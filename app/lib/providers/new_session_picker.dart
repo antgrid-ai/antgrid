@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/supervisor_state.dart';
 import '../demo/demo_identity.dart';
 import '../demo/fixtures/demo_workspace_fixtures.dart';
 import '../models/ab_project.dart';
@@ -30,6 +31,7 @@ import 'host_status.dart' show hostUpGenerationProvider;
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
+import 'supervisor_status.dart';
 import 'ui_attention_providers.dart';
 import 'value_controller.dart';
 
@@ -398,11 +400,31 @@ final localDetectedToolsProvider = FutureProvider<Map<String, String?>>((
 final remoteDetectedToolsProvider = Provider.autoDispose
     .family<AsyncValue<Map<String, String?>?>, String>((ref, machineUuid) {
       final plane = ref.watch(controlPlaneStateProvider(machineUuid));
-      if (plane.isLoading) return const AsyncLoading();
       if (plane.hasError) return AsyncError(plane.error!, plane.stackTrace!);
       final state = plane.value;
-      if (state == null || !state.toolsReceived) return const AsyncLoading();
-      return AsyncData({for (final t in state.tools) t.tool: t.label});
+      if (!plane.isLoading && state != null && state.toolsReceived) {
+        return AsyncData({for (final t in state.tools) t.tool: t.label});
+      }
+
+      final connection = ref.watch(supervisorStatusProvider(machineUuid));
+      if (connection.hasError) {
+        return AsyncError(connection.error!, connection.stackTrace!);
+      }
+      final status = connection.value;
+      if (plane.isLoading &&
+          (connection.isLoading || status is Climbing || status is Connected)) {
+        return const AsyncLoading();
+      }
+      // clearAdvert also emits toolsReceived:false after a failed refresh;
+      // that settled state has no scan to finish and must remain retryable.
+      return AsyncError(
+        StateError(
+          status is Connected
+              ? 'Coding agent advertisement unavailable'
+              : 'Computer is not connected',
+        ),
+        StackTrace.current,
+      );
     });
 
 /// Tools installed on [target]'s MACHINE, keyed by the target rather than read

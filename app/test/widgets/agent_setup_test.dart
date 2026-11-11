@@ -1,16 +1,24 @@
 import 'dart:async';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
+import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/providers/agent_setup.dart';
+import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/supervisor_status.dart';
+import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/agent_setup.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/fake_agent_transport.dart';
 
 const _codex = AgentDescriptor(
   tool: 'codex',
@@ -34,6 +42,65 @@ Widget _host(Widget child, List<Override> overrides) => ProviderScope(
 );
 
 void main() {
+  testWidgets('cleared remote advert can retry again after a failed refresh', (
+    tester,
+  ) async {
+    final transport = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: transport);
+    addTearDown(transport.dispose);
+    addTearDown(client.dispose);
+    await tester.pumpWidget(
+      _host(const AgentSetupHelp(), [
+        agentSetupMachineProvider.overrideWithValue((
+          uuid: 'work',
+          label: 'Work laptop',
+        )),
+        controlPlaneClientForProvider('work').overrideWith((_) async => client),
+        supervisorStatusProvider(
+          'work',
+        ).overrideWith((_) => Stream.value(const Connected())),
+      ]),
+    );
+    await tester.pumpAndSettle();
+    transport.emit('agent:tools', {
+      'tools': [
+        {'tool': 'codex', 'label': 'Codex'},
+      ],
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('Codex detected on Work laptop.'), findsOneWidget);
+
+    client.clearAdvert();
+    await tester.pumpAndSettle();
+    expect(find.text('Retry'), findsOneWidget);
+
+    final failedRefresh = Completer<Map<String, dynamic>>();
+    transport.requestHandler = (_, _) => failedRefresh.future;
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    expect(find.text('Checking…'), findsOneWidget);
+    expect(transport.requests, hasLength(1));
+    failedRefresh.completeError(RpcException('E_TIMEOUT', 'timed out'));
+    await tester.pumpAndSettle();
+    expect(find.text('Retry'), findsOneWidget);
+
+    transport.requestHandler = (_, _) => {
+      'frames': [
+        {
+          'type': 'agent:tools',
+          'tools': [
+            {'tool': 'codex', 'label': 'Codex'},
+          ],
+        },
+      ],
+    };
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(transport.requests, hasLength(2));
+    expect(find.text('Codex detected on Work laptop.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'setup opens installation guidance and hides advanced troubleshooting',
     (tester) async {

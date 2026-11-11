@@ -917,6 +917,71 @@ void main() {
     expect(toggle.onChanged, isNull);
   });
 
+  testWidgets('agent menu survives its selector being replaced by setup', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        overrides: [
+          ..._baseOverrides(target: _project),
+          newSessionDetectedToolsProvider.overrideWith(
+            (ref) => ref.watch(_toolsDriver),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(NewSessionComposer)),
+    );
+    await tester.tap(find.byKey(const Key('new-session-agent-selector')));
+    await tester.pumpAndSettle();
+
+    container
+        .read(_toolsDriver.notifier)
+        .set(AsyncError(StateError('advert unavailable'), StackTrace.current));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('new-session-agent-selector')), findsNothing);
+    expect(find.byKey(const Key('new-session-agent-setup')), findsOneWidget);
+    await tester.tap(find.text('Custom'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(container.read(newSessionAgentProvider), const CustomAgent());
+    expect(container.read(newSessionAgentTouchedProvider), isTrue);
+    expect(find.byType(AbPromptField), findsNothing);
+  });
+
+  testWidgets('mode menu survives its selector being replaced by setup', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        overrides: [
+          ..._baseOverrides(target: _project, chatCapable: {'claude-code'}),
+          newSessionDetectedToolsProvider.overrideWith(
+            (ref) => ref.watch(_toolsDriver),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(NewSessionComposer)),
+    );
+    await _openModeMenu(tester);
+    container
+        .read(_toolsDriver.notifier)
+        .set(AsyncError(StateError('advert unavailable'), StackTrace.current));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('new-session-mode-chip')), findsNothing);
+    await tester.tap(find.byKey(const Key('new-session-mode-chat')));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(container.read(newSessionModeProvider), 'chat');
+  });
+
   testWidgets('agent selector picks an agent and sets the touched flag', (
     tester,
   ) async {

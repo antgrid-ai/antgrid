@@ -1099,36 +1099,39 @@ class _ModeSelector extends ConsumerWidget {
       label: isChat ? 'Chat' : 'Terminal',
       alpha: isChat && markChatAlpha,
       enabled: enabled,
-      onTap: (ctx) async {
+      onTap: (ctx) {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
-        final picked = await showAbMenu<String>(
-          context: ctx,
-          preferred: AbMenuPlacement.above,
-          anchorRect: anchor,
-          bounds: MenuBoundsScope.maybeOf(ctx),
-          width: 220,
-          entries: [
-            AbMenuItem(
-              key: const Key('new-session-mode-terminal'),
-              label: 'Terminal',
-              value: 'terminal',
-              icon: displayMode == 'terminal' ? AbIcons.check : null,
-            ),
-            AbMenuItem(
-              key: const Key('new-session-mode-chat'),
-              label: 'Chat',
-              value: 'chat',
-              icon: displayMode == 'chat' ? AbIcons.check : null,
-              badge: markChatAlpha ? 'Alpha' : null,
-              badgeColor: context.antgrid.warning,
-              enabled: chatEnabled,
-              disabledReason: chatEnabled ? null : chatDisabledReason,
-            ),
-          ],
-        );
-        if (picked == null || picked == displayMode) return;
-        ref.read(newSessionModeProvider.notifier).set(picked);
+        final container = ref.container;
+        detached('NewSession', 'select mode', () async {
+          final picked = await showAbMenu<String>(
+            context: ctx,
+            preferred: AbMenuPlacement.above,
+            anchorRect: anchor,
+            bounds: MenuBoundsScope.maybeOf(ctx),
+            width: 220,
+            entries: [
+              AbMenuItem(
+                key: const Key('new-session-mode-terminal'),
+                label: 'Terminal',
+                value: 'terminal',
+                icon: displayMode == 'terminal' ? AbIcons.check : null,
+              ),
+              AbMenuItem(
+                key: const Key('new-session-mode-chat'),
+                label: 'Chat',
+                value: 'chat',
+                icon: displayMode == 'chat' ? AbIcons.check : null,
+                badge: markChatAlpha ? 'Alpha' : null,
+                badgeColor: context.antgrid.warning,
+                enabled: chatEnabled,
+                disabledReason: chatEnabled ? null : chatDisabledReason,
+              ),
+            ],
+          );
+          if (picked == null || picked == displayMode) return;
+          container.read(newSessionModeProvider.notifier).set(picked);
+        });
       },
     );
   }
@@ -1243,23 +1246,26 @@ class _AgentSelector extends ConsumerWidget {
       icon: AbIcons.terminal,
       label: newSessionAgentLabel(agent, detected, catalog),
       enabled: enabled,
-      onTap: (ctx) async {
+      onTap: (ctx) {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
+        final container = ref.container;
         // A panel rather than a static menu: detection can still be under way
         // when the menu opens, and its rows have to arrive while it is up.
-        final picked = await showAbPanel<NewSessionAgent>(
-          context: ctx,
-          preferred: AbMenuPlacement.above,
-          anchorRect: anchor,
-          bounds: MenuBoundsScope.maybeOf(ctx),
-          width: 240,
-          builder: (_) => const _AgentPanel(),
-        );
-        if (picked != null) {
-          ref.read(newSessionAgentProvider.notifier).set(picked);
-          ref.read(newSessionAgentTouchedProvider.notifier).set(true);
-        }
+        detached('NewSession', 'select agent', () async {
+          final picked = await showAbPanel<NewSessionAgent>(
+            context: ctx,
+            preferred: AbMenuPlacement.above,
+            anchorRect: anchor,
+            bounds: MenuBoundsScope.maybeOf(ctx),
+            width: 240,
+            builder: (_) => const _AgentPanel(),
+          );
+          if (picked != null) {
+            container.read(newSessionAgentProvider.notifier).set(picked);
+            container.read(newSessionAgentTouchedProvider.notifier).set(true);
+          }
+        });
       },
     );
   }
