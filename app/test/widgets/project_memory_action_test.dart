@@ -1,6 +1,6 @@
 // The drawer's entries to Memory: a revealed lightbulb on local and
-// advertised-remote project rows plus a Memory nav row, all absent under the
-// sample project.
+// advertised-remote project rows plus a Memory nav row, which the sample
+// project keeps for its own memories.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/memory.dart';
@@ -16,6 +17,7 @@ import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/memory/memory_project_button.dart';
 import 'package:antgrid/providers/account_agents.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
@@ -221,16 +223,10 @@ void main() {
     await tester.pumpAndSettle();
     final view = container.read(memoryViewProvider);
     expect(view.projectId, _remoteProjectId);
-    expect(view.target.machineId, _machineUuid);
-    expect(view.target.label, isNotEmpty);
-    expect(view.target.label, isNot('This machine'));
-    expect(
-      view.target,
-      MemoryTarget.machine(machineId: _machineUuid, label: view.target.label),
-    );
+    expect(view.target, MemoryTarget.machine(machineId: _machineUuid));
   });
 
-  desktopTest('the sample project has no lightbulb and there is no nav row', (
+  desktopTest('the sample project offers its memories, without a count', (
     tester,
   ) async {
     final container = await pump(tester);
@@ -241,8 +237,14 @@ void main() {
     expect(find.text(sample), findsOneWidget);
     await hoverRow(tester, find.text(sample));
     expect(find.byTooltip('New session'), findsOneWidget);
-    expect(find.byType(MemoryProjectButton), findsNothing);
-    expect(find.text('Memory'), findsNothing);
+    expect(find.byType(MemoryProjectButton), findsOneWidget);
+    expect(find.text('Memory'), findsOneWidget);
+    // The machine total is the real host's, not the sample's.
+    expect(find.text('7'), findsNothing);
+
+    await tester.tap(find.byType(MemoryProjectButton));
+    await tester.pumpAndSettle();
+    expect(container.read(memoryViewProvider).projectId, kDemoProjectId);
   });
 
   desktopTest('the Memory nav row carries the machine total', (tester) async {
@@ -309,8 +311,40 @@ void main() {
     await tester.tap(find.text('Memory'));
     await tester.pumpAndSettle();
     expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
-    expect(container.read(memoryViewProvider).target.machineId, isNull);
+    expect(container.read(memoryViewProvider).target, isNull);
     expect(key.currentState!.isDrawerOpen, isFalse);
+  });
+
+  testWidgets('on a phone the Memory row opens the selected machine '
+      'without a count or a summary request', (tester) async {
+    // A phone has no local host, so it never lists a local project, whose row
+    // would read the summary for its own count.
+    await stores.projectStore.remove(_localId);
+    final container = await pump(tester);
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+    await tester.tap(find.text('Memory'));
+    await tester.pumpAndSettle();
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    expect(container.read(memoryViewProvider).target, isNull);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+  }, variant: TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}));
+
+  desktopTest('a remote machine pick hides the local count', (tester) async {
+    final container = await pump(tester);
+    expect(find.text('7'), findsOneWidget);
+    container.read(machinePickProvider.notifier).set(_machineUuid);
+    await tester.pumpAndSettle();
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+  });
+
+  desktopTest('picking the local machine keeps the count', (tester) async {
+    final container = await pump(tester);
+    container.read(machinePickProvider.notifier).set(kLocalMachineKey);
+    await tester.pumpAndSettle();
+    expect(find.text('7'), findsOneWidget);
   });
 
   test('the drawer count never reaches the host unless it is up now', () async {

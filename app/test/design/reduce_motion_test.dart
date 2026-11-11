@@ -5,47 +5,66 @@ import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
 
-/// Minimal shell around [AbLoading]: the design system reads reduce-motion
-/// exclusively via `MediaQuery.disableAnimationsOf`, so the harness only
-/// needs a MediaQuery + themed Directionality — no MaterialApp, no Riverpod.
-Widget _harness({required bool disableAnimations}) {
+Widget _harness(Widget loader, {required bool disableAnimations}) {
   return MediaQuery(
     data: MediaQueryData(disableAnimations: disableAnimations),
     child: Directionality(
       textDirection: TextDirection.ltr,
-      child: Theme(
-        data: buildAbTheme(kDefaultPalette),
-        child: const AbLoading(),
-      ),
+      child: Theme(data: buildAbTheme(kDefaultPalette), child: loader),
     ),
   );
 }
 
+({double alpha, Size size}) _appearance(WidgetTester tester, Type type) {
+  final glyph = find.descendant(
+    of: find.byType(type),
+    matching: find.byType(DecoratedBox),
+  );
+  final decoration =
+      tester.widget<DecoratedBox>(glyph).decoration as BoxDecoration;
+  return (alpha: decoration.color!.a, size: tester.getRect(glyph).size);
+}
+
 void main() {
-  testWidgets('AbLoading pulses when animations are enabled', (tester) async {
-    await tester.pumpWidget(_harness(disableAnimations: false));
+  for (final loader in <Widget>[const AbLoading(), const AbLoadingDot()]) {
+    final type = loader.runtimeType;
+    testWidgets('$type pulses when animations are enabled', (tester) async {
+      await tester.pumpWidget(_harness(loader, disableAnimations: false));
+      final initial = _appearance(tester, type);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(_appearance(tester, type), isNot(initial));
+    });
 
-    expect(tester.hasRunningAnimations, isTrue);
-  });
+    testWidgets('$type holds its resting appearance under reduce motion', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_harness(loader, disableAnimations: true));
+      final initial = _appearance(tester, type);
+      if (loader is AbLoading) {
+        expect(initial.alpha, closeTo(0.6, 0.001));
+      } else {
+        expect(initial.size.width, closeTo(12 * 0.7, 0.001));
+      }
+      await tester.pump(const Duration(seconds: 2));
+      expect(_appearance(tester, type), initial);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+    });
 
-  testWidgets('AbLoading holds still under disableAnimations', (tester) async {
-    await tester.pumpWidget(_harness(disableAnimations: true));
+    testWidgets('$type stops and resumes on a live reduce-motion flip', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_harness(loader, disableAnimations: false));
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pumpWidget(_harness(loader, disableAnimations: true));
+      final resting = _appearance(tester, type);
+      await tester.pump(const Duration(seconds: 2));
+      expect(_appearance(tester, type), resting);
+      expect(tester.binding.hasScheduledFrame, isFalse);
 
-    expect(tester.hasRunningAnimations, isFalse);
-  });
-
-  testWidgets('a live reduce-motion flip stops and restarts the pulse', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_harness(disableAnimations: false));
-    expect(tester.hasRunningAnimations, isTrue);
-
-    // Same widget tree, only the ambient MediaQuery changes — exercises the
-    // didChangeDependencies re-sync rather than a fresh initState.
-    await tester.pumpWidget(_harness(disableAnimations: true));
-    expect(tester.hasRunningAnimations, isFalse);
-
-    await tester.pumpWidget(_harness(disableAnimations: false));
-    expect(tester.hasRunningAnimations, isTrue);
-  });
+      await tester.pumpWidget(_harness(loader, disableAnimations: false));
+      final resumed = _appearance(tester, type);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(_appearance(tester, type), isNot(resumed));
+    });
+  }
 }

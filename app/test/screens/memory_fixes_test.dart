@@ -14,9 +14,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/fake_agent_transport.dart';
+import '../helpers/pump_until.dart';
 import '../helpers/toast_host.dart';
 
-const _remote = MemoryTarget.machine(machineId: 'm', label: 'Remote');
+const _remote = MemoryTarget.machine(machineId: 'm');
 
 Map<String, dynamic> _status({String search = 'ready'}) => {
   'available': true,
@@ -101,7 +102,10 @@ void main() {
     expect(gets, 1);
     await tester.tap(find.text('Edit'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(EditableText).first, 'MY TYPED FIX');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-content')),
+      'MY TYPED FIX',
+    );
     await tester.pump();
     statusCtrl.add(const Connected());
     await tester.pump();
@@ -113,22 +117,27 @@ void main() {
     expect(gets, 1);
   });
 
-  test('request providers do not outlive their page or build a session', () async {
-    final container = ProviderContainer(
-      overrides: [
-        supervisorStatusProvider('m').overrideWith((ref) => Stream.value(null)),
-      ],
-    );
-    addTearDown(container.dispose);
-    const q = (target: _remote, filter: MemoryFilter(), offset: 0);
-    final sub = container.listen(memoryPageProvider(q), (_, _) {});
-    await container.pump();
-    sub.close();
-    await container.pump();
-    await container.pump();
-    expect(container.exists(memoryPageProvider(q)), isFalse);
-    expect(container.exists(memoryRequestProvider(_remote)), isFalse);
-  });
+  test(
+    'request providers do not outlive their page or build a session',
+    () async {
+      final container = ProviderContainer(
+        overrides: [
+          supervisorStatusProvider(
+            'm',
+          ).overrideWith((ref) => Stream.value(null)),
+        ],
+      );
+      addTearDown(container.dispose);
+      const q = (target: _remote, filter: MemoryFilter(), offset: 0);
+      final sub = container.listen(memoryPageProvider(q), (_, _) {});
+      await container.pump();
+      sub.close();
+      await container.pump();
+      await container.pump();
+      expect(container.exists(memoryPageProvider(q)), isFalse);
+      expect(container.exists(memoryRequestProvider(_remote)), isFalse);
+    },
+  );
 
   testWidgets('Reconnect and retry redials a failed machine connection', (
     tester,
@@ -138,6 +147,8 @@ void main() {
     final fake = FakeAgentTransport()
       ..requestHandler = (method, params) => _answer(params);
     final container = ProviderContainer(
+      // The next dial must come from the reconnect action, not backoff.
+      retry: (_, _) => null,
       overrides: [
         supervisorStatusProvider('m').overrideWith((ref) => Stream.value(null)),
         controlPlaneClientForProvider('m').overrideWith((ref) async {
@@ -157,7 +168,10 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await tester.pumpUntil(
+      () => find.text('Reconnect and retry').evaluate().isNotEmpty,
+      reason: 'the reconnect action after a failed dial',
+    );
     expect(dials, 1);
     await tester.tap(find.text('Reconnect and retry'));
     await tester.pumpAndSettle();
@@ -165,30 +179,43 @@ void main() {
     expect(find.text('Original memory'), findsWidgets);
   });
 
-  testWidgets('a machine that is not connected says so, not that storage failed', (
-    tester,
-  ) async {
-    _size(tester, const Size(1280, 820));
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          supervisorStatusProvider('m').overrideWith((ref) => Stream.value(null)),
-          controlPlaneClientForProvider('m').overrideWith((ref) async => null),
-        ],
-        child: MaterialApp(
-          theme: buildAbTheme(),
-          home: const MemoryScreen(target: _remote),
+  testWidgets(
+    'a machine that is not connected says so, not that storage failed',
+    (tester) async {
+      _size(tester, const Size(1280, 820));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            supervisorStatusProvider(
+              'm',
+            ).overrideWith((ref) => Stream.value(null)),
+            controlPlaneClientForProvider(
+              'm',
+            ).overrideWith((ref) async => null),
+          ],
+          // Surface the intentional offline failure without provider backoff.
+          retry: (_, _) => null,
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: const MemoryScreen(target: _remote),
+          ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(
-      find.text("This machine isn't connected. Connect it to see its memories."),
-      findsOneWidget,
-    );
-    expect(find.text('Reconnect and retry'), findsOneWidget);
-    expect(find.textContaining("Memory storage couldn't be opened"), findsNothing);
-  });
+      );
+      final offline = find.text(
+        "This machine isn't connected. Connect it to see its memories.",
+      );
+      await tester.pumpUntil(
+        () => offline.evaluate().isNotEmpty,
+        reason: 'the disconnected machine message',
+      );
+      expect(offline, findsOneWidget);
+      expect(find.text('Reconnect and retry'), findsOneWidget);
+      expect(
+        find.textContaining("Memory storage couldn't be opened"),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets('a conflicting save explains itself and retries with one key', (
     tester,
@@ -216,7 +243,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Edit'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(EditableText).first, 'A better memory');
+    await tester.enterText(
+      find.byKey(const Key('memory-edit-content')),
+      'A better memory',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Save changes'));
     await tester.pumpAndSettle();

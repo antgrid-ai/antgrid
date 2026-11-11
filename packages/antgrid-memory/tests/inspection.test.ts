@@ -182,7 +182,7 @@ describe("conflicts", () => {
 
     const db = sql();
     expect(db.query("SELECT failure_code, outcome FROM operations WHERE operation_key='late-key'").get()).toEqual({ failure_code: "CONFLICT", outcome: "dismissed" });
-    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
   });
 
   test("forgetting the latest version clears the failure and consumes the key", async () => {

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMemoryMcpServer, MEMORY_INSTRUCTIONS } from "./server";
+import { MEMORY_SERVER_INSTRUCTIONS } from "antgrid-agents/memory-guidance";
+import { createMemoryMcpServer } from "./server";
 import { MemoryMcpClient } from "./client";
 import { searchResponse } from "../../../packages/antgrid-memory/src/search";
 import type { MemoryRecord } from "antgrid-memory";
@@ -18,10 +19,16 @@ test("memory MCP advertises only its four tools and static guidance", async () =
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(["memory_search", "memory_get", "memory_save", "memory_forget"]);
-    expect(client.getInstructions()).toBe(MEMORY_INSTRUCTIONS);
+    expect(client.getInstructions()).toBe(MEMORY_SERVER_INSTRUCTIONS);
     const save = (await client.listTools()).tools.find(tool => tool.name === "memory_save")!;
     expect((save.inputSchema.properties as { scope: { enum: string[] } }).scope.enum).toEqual(["project", "task"]);
-    expect(MEMORY_INSTRUCTIONS).not.toMatch(/use user scope/i);
+    expect(save.inputSchema.required).toEqual(["content", "memory_type", "scope"]);
+    expect(save.inputSchema.properties).toMatchObject({
+      title: { type: "string", description: expect.stringContaining("256 bytes UTF-8") },
+      description: { type: "string", description: expect.stringContaining("512 bytes UTF-8") },
+      content: { type: "string", description: expect.stringContaining("16 KiB UTF-8") },
+    });
+    expect(MEMORY_SERVER_INSTRUCTIONS).not.toMatch(/use user scope/i);
     const result = await client.callTool({ name: "memory_get", arguments: { id: "expired", history: true } });
     expect(result.isError).toBe(true);
     expect(calls).toEqual([{ op: "get", body: { id: "expired", history: true } }]);
@@ -32,6 +39,7 @@ test("memory MCP advertises only its four tools and static guidance", async () =
 test("search remains within its UTF-8 byte budget after MCP JSON escaping", async () => {
   const records: MemoryRecord[] = Array.from({ length: 11 }, (_, index) => ({
     id: `memory-${index}`, owner_id: "profile", content: '"引用\\\n'.repeat(350),
+    title: "🧭".repeat(64), description: "🔎".repeat(128),
     applicability: "Only under the original-language fixture conditions.", memory_type: "observation", scope: "project",
     project_id: "project", source: { actor: "agent", project_id: "project", session_id: "session", agent_id: "test" },
     evidence: [], created_at: 0, updated_at: 0, lifecycle: "active",
@@ -42,4 +50,5 @@ test("search remains within its UTF-8 byte budget after MCP JSON escaping", asyn
   expect(response.has_more).toBe(true);
   expect(response.results.some(record => record.excerpted)).toBe(true);
   expect(response.results.every(record => record.applicability === records[0]!.applicability)).toBe(true);
+  expect(response.results.every(record => record.title === records[0]!.title && record.description === records[0]!.description)).toBe(true);
 });

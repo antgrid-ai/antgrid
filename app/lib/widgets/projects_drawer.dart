@@ -28,6 +28,8 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
+import '../providers/account_machines.dart'
+    show kLocalMachineKey, machinePickProvider;
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
 import '../providers/memory.dart';
@@ -255,12 +257,19 @@ class _NavActions extends ConsumerWidget {
     }
 
     void openMemory() {
-      openMemoryScreen(context, const MemoryTarget.machine());
+      openMemoryScreen(context, null);
       closeDrawerIfOverlay(context);
     }
 
-    final offersMemory = !isMobilePlatform && !ref.watch(demoModeProvider);
-    final memoryCount = offersMemory
+    final pick = ref.watch(machinePickProvider);
+    // The count is the local host's and the drawer never dials, so it is
+    // shown only while the selected machine is local, never over the sample's
+    // canned memories, and never builds the machine inventory.
+    final showsCount =
+        !ref.watch(demoModeProvider) &&
+        !isMobilePlatform &&
+        (pick == null || pick == kLocalMachineKey);
+    final memoryCount = showsCount
         ? ref.watch(
             memoryDrawerSummaryProvider.select((s) => s.value?.memories),
           )
@@ -326,24 +335,22 @@ class _NavActions extends ConsumerWidget {
               selected: surface == WorkbenchSurface.scheduler,
               onTap: openScheduler,
             ),
-            if (offersMemory) ...[
-              const SizedBox(height: AbTokens.space4),
-              navigationRow(
-                label: 'Memory',
-                icon: AbIcons.lightbulb,
-                selected: surface == WorkbenchSurface.memory,
-                onTap: openMemory,
-                trailing: memoryCount != null && memoryCount > 0
-                    ? Text(
-                        '$memoryCount',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontSm,
-                          color: context.antgrid.textMuted,
-                        ),
-                      )
-                    : null,
-              ),
-            ],
+            const SizedBox(height: AbTokens.space4),
+            navigationRow(
+              label: 'Memory',
+              icon: AbIcons.lightbulb,
+              selected: surface == WorkbenchSurface.memory,
+              onTap: openMemory,
+              trailing: memoryCount != null && memoryCount > 0
+                  ? Text(
+                      '$memoryCount',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: context.antgrid.textMuted,
+                      ),
+                    )
+                  : null,
+            ),
           ],
         ),
       ),
@@ -655,12 +662,7 @@ class _EntryWithSessions extends ConsumerWidget {
         entryRowWrapped,
         if (expanded)
           machineUuid != null
-              ? _MachineProjects(
-                  machineUuid: machineUuid,
-                  machineLabel: entry.displayName.trim().isEmpty
-                      ? 'Remote machine'
-                      : entry.displayName,
-                )
+              ? _MachineProjects(machineUuid: machineUuid)
               : SessionsList(projectId: entry.id),
       ],
     );
@@ -708,11 +710,7 @@ Widget _machineHint(
 /// empty (switch off vs genuinely no projects) and is rendered as such.
 class _MachineProjects extends ConsumerWidget {
   final String machineUuid;
-  final String machineLabel;
-  const _MachineProjects({
-    required this.machineUuid,
-    required this.machineLabel,
-  });
+  const _MachineProjects({required this.machineUuid});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -753,7 +751,6 @@ class _MachineProjects extends ConsumerWidget {
               _AdvertisedProjectRow(
                 key: ValueKey(p.projectId),
                 machineUuid: machineUuid,
-                machineLabel: machineLabel,
                 project: p,
               ),
           ],
@@ -770,12 +767,10 @@ class _MachineProjects extends ConsumerWidget {
 /// bare-uuid ids).
 class _AdvertisedProjectRow extends ConsumerStatefulWidget {
   final String machineUuid;
-  final String machineLabel;
   final AdvertisedProject project;
   const _AdvertisedProjectRow({
     super.key,
     required this.machineUuid,
-    required this.machineLabel,
     required this.project,
   });
 
@@ -842,10 +837,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // every other row's trailing glyph.
             final memory = revealed && !demo
                 ? MemoryProjectButton(
-                    target: MemoryTarget.machine(
-                      machineId: widget.machineUuid,
-                      label: widget.machineLabel,
-                    ),
+                    target: MemoryTarget.machine(machineId: widget.machineUuid),
                     projectId: widget.project.projectId,
                     projectName: name,
                   )

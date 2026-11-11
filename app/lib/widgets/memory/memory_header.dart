@@ -6,7 +6,7 @@ import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_status_dot.dart';
-import '../../models/memory.dart';
+import '../../models/memory.dart' show MemoryStatus;
 
 /// The machine-wide status folded into one word. [projectPaused] is separate
 /// because status is machine-wide while the screen may be showing one paused
@@ -52,7 +52,7 @@ class MemoryStatusPill extends StatelessWidget {
 class MemoryHeader extends StatelessWidget {
   const MemoryHeader({
     super.key,
-    required this.target,
+    this.machine,
     this.status,
     this.projectPaused = false,
     this.onSettings,
@@ -68,13 +68,14 @@ class MemoryHeader extends StatelessWidget {
     this.onOpenDrawer,
     this.backTooltip = 'Back',
     this.onSettings,
-  }) : target = null,
-       status = null,
+    this.onMore,
+    this.machine,
+  }) : status = null,
        projectPaused = false,
-       onMore = null,
        compact = true;
 
-  final MemoryTarget? target;
+  /// The machine selector, which the screen owns.
+  final Widget? machine;
   final MemoryStatus? status;
   final bool projectPaused;
   final VoidCallback? onSettings;
@@ -95,6 +96,15 @@ class MemoryHeader extends StatelessWidget {
             icon: AbIcons.settings,
             tooltip: 'Memory settings',
             onTap: onSettings,
+          );
+    final more = onMore == null
+        ? null
+        : Builder(
+            builder: (anchor) => AbIconButton(
+              icon: AbIcons.more,
+              tooltip: 'More actions',
+              onTap: () => onMore!(anchor),
+            ),
           );
     final lead = onBack != null
         ? AbIconButton(icon: AbIcons.back, tooltip: backTooltip, onTap: onBack)
@@ -128,8 +138,12 @@ class MemoryHeader extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: AbTokens.space8),
+                Expanded(
+                  child: Align(alignment: Alignment.centerLeft, child: machine),
+                ),
                 ?settings,
+                ?more,
               ],
             )
           : Row(
@@ -144,29 +158,14 @@ class MemoryHeader extends StatelessWidget {
                 ),
                 const SizedBox(width: AbTokens.space12),
                 Expanded(
-                  child: Text(
-                    target!.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontMd,
-                      color: colors.textMuted,
-                    ),
-                  ),
+                  child: Align(alignment: Alignment.centerLeft, child: machine),
                 ),
                 if (status case final status?) ...[
                   MemoryStatusPill(status, projectPaused: projectPaused),
                   const SizedBox(width: AbTokens.space8),
                 ],
                 ?settings,
-                if (onMore case final onMore?)
-                  Builder(
-                    builder: (anchor) => AbIconButton(
-                      icon: AbIcons.more,
-                      tooltip: 'More actions',
-                      onTap: () => onMore(anchor),
-                    ),
-                  ),
+                ?more,
               ],
             ),
     );

@@ -24,6 +24,7 @@ import '../../design/widgets/ab_tooltip.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
 import '../../launcher/host_control_client.dart';
 import '../../models/scheduler.dart';
+import '../../providers/agent_catalog.dart' show agentLabelsProvider;
 import '../../providers/scheduler.dart';
 import '../../providers/scheduler_drafts.dart';
 import '../../providers/scheduler_timezone.dart';
@@ -1094,7 +1095,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     final machineName =
         ref.watch(schedulerMachinesProvider)[widget.machineId] ??
         'this machine';
-    final labels = ref.watch(schedulerAgentLabelsProvider);
+    final labels = ref.watch(agentLabelsProvider);
     final localZone =
         localTimezone.value ?? widget.snapshot.capabilities.timezone;
     final agents = widget.snapshot.capabilities.agents;

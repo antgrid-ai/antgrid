@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_memory.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/host_controller.dart' show HostPhase;
 import '../models/memory.dart';
@@ -11,6 +12,13 @@ import 'host_status.dart' show hostStatusProvider;
 typedef MemoryRequest =
     Future<Map<String, dynamic>> Function(Map<String, dynamic> request);
 
+/// Rebuilt whenever the flag flips, so every entry into the sample starts from
+/// the seed and nothing changed inside it survives leaving.
+final demoMemoryBackendProvider = Provider<DemoMemoryBackend>((ref) {
+  ref.watch(demoModeProvider);
+  return DemoMemoryBackend();
+});
+
 /// Resolves the transport at call time and watches nothing: a dependency
 /// rebuild here would dispose every consumer's state (an open edit form, a
 /// second `get`), and reading it must not spawn anything.
@@ -18,23 +26,29 @@ final memoryRequestProvider = Provider.autoDispose
     .family<MemoryRequest, MemoryTarget>((ref, target) {
       final container = ref.container;
       return (request) async {
+        // Read per call, never captured: a request started before the sample
+        // opened must not reach it, and one started inside must not reach a
+        // real machine.
         if (container.read(demoModeProvider)) {
-          throw const MemoryException(
-            'DEMO',
-            'Memory is unavailable in the sample project.',
-          );
+          return container.read(demoMemoryBackendProvider).request(request);
         }
         if (target.machineId case final machineId?) {
-          final client = await container.read(
-            controlPlaneClientForProvider(machineId).future,
+          final client = await connectedControlPlaneClient(
+            container,
+            machineId,
           );
-          if (client == null || !client.transport.isEstablished) {
+          if (client == null) {
             throw const MemoryException(
               'NOT_CONNECTED',
               'Connect this machine to inspect its memories.',
             );
           }
-          return client.transport.request('memory.request', params: request);
+          // Matches the loopback path, since a first turn-on creates the store.
+          return client.transport.request(
+            'memory.request',
+            params: request,
+            timeout: const Duration(seconds: 15),
+          );
         }
         if (isMobilePlatform) {
           throw const MemoryException(

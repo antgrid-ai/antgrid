@@ -44,30 +44,47 @@ class MemoryListRow extends StatelessWidget {
       selected: selected,
       child: AbListRow(
         title: Text(
-          record.content,
+          record.displayTitle,
           style: AbTokens.sansStyle(
             fontSize: compact ? AbTokens.fontBody : AbTokens.fontMd,
             height: 1.45,
           ),
         ),
         titleMaxLines: compact ? 3 : 2,
-        subtitle: Wrap(
-          spacing: AbTokens.space8,
-          runSpacing: AbTokens.space4,
-          crossAxisAlignment: WrapCrossAlignment.center,
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              memoryMetaLine(
-                project: projectLabel,
-                agent: agentLabel,
-                created: record.createdAt,
+            if (record.description case final description?) ...[
+              Text(
+                description,
+                maxLines: compact ? 3 : 2,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: colors.textSecondary,
+                ),
               ),
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: colors.textMuted,
-              ),
+              const SizedBox(height: AbTokens.space4),
+            ],
+            Wrap(
+              spacing: AbTokens.space8,
+              runSpacing: AbTokens.space4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  memoryMetaLine(
+                    project: projectLabel,
+                    agent: agentLabel,
+                    created: record.createdAt,
+                  ),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: colors.textMuted,
+                  ),
+                ),
+                if (tag != null) MemoryTag(label: tag),
+              ],
             ),
-            if (tag != null) MemoryTag(label: tag),
           ],
         ),
         subtitleMaxLines: 2,
@@ -136,7 +153,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     if (!first.hasValue) return const Center(child: AbLoading());
     if (widget.visible.isEmpty && total == 0) return _empty();
 
-    final catalog = ref.watch(agentCatalogProvider);
+    final labels = ref.watch(agentLabelsProvider);
     final list = ListView.builder(
       controller: _scroll,
       itemCount: widget.visible.length + 1,
@@ -147,7 +164,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
           record: record,
           projectLabel: widget.projects.labelFor(record.projectId),
           projectRemoved: widget.projects.isRemoved(record.projectId),
-          agentLabel: memoryAgentName(record, catalog),
+          agentLabel: memoryAgentName(record, labels),
           selected: record.id == widget.selectedId,
           onTap: () => widget.onSelect(record.id),
           compact: widget.compact,

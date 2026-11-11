@@ -13,14 +13,18 @@ class MemoryOffState extends StatelessWidget {
     required this.onTurnOn,
     this.busy = false,
     this.error,
+    this.machineName,
   });
 
   final VoidCallback? onTurnOn;
   final bool busy;
   final String? error;
 
-  static const _bullets = [
-    'Stored only on this machine, never in your repository.',
+  /// Null for the local machine.
+  final String? machineName;
+
+  List<String> get _bullets => [
+    'Stored only on ${machineName ?? 'this machine'}, never in your repository.',
     'You can read, edit or forget any memory here.',
     "Each agent's own built-in memory keeps working as before.",
   ];

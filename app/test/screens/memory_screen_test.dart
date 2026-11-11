@@ -5,6 +5,7 @@ import 'package:antgrid/design/widgets/ab_search_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/memory.dart';
+import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -177,6 +178,10 @@ Future<void> mount(
       overrides: [
         memoryRequestProvider(_machine).overrideWithValue(fake.call),
         agentCatalogProvider.overrideWith(_Catalog.new),
+        if (viaOpen) ...[
+          accountMachinesProvider.overrideWithValue(const {}),
+          machinesSettlingProvider.overrideWithValue(false),
+        ],
       ],
       child: MaterialApp(
         theme: buildAbTheme(),
@@ -236,10 +241,7 @@ void main() {
     expect(find.text('Let your agents remember what they learn'), findsOne);
     await tester.tap(find.text('Turn on Memory'));
     await tester.pumpAndSettle();
-    expect(
-      fake.calls,
-      contains(equals({'op': 'settings', 'enabled': true})),
-    );
+    expect(fake.calls, contains(equals({'op': 'settings', 'enabled': true})));
     expect(find.text('Let your agents remember what they learn'), findsNothing);
   });
 
@@ -295,10 +297,7 @@ void main() {
       final fake = Fake();
       await mount(tester, fake);
       expect(find.text('3 memories'), findsOneWidget);
-      expect(
-        find.text('antgrid  ·  Claude Code  ·  2d ago'),
-        findsNWidgets(3),
-      );
+      expect(find.text('antgrid  ·  Claude Code  ·  2d ago'), findsNWidgets(3));
       expect(find.text('Applies when'), findsOneWidget);
       expect(fake.ops('get').single['id'], 'm1');
       expect(find.text('Saving on'), findsOneWidget);
@@ -309,9 +308,7 @@ void main() {
       expect(find.text('Applies when'), findsOneWidget);
     });
 
-    testWidgets('search as you type sends the debounced query', (
-      tester,
-    ) async {
+    testWidgets('search as you type sends the debounced query', (tester) async {
       useWide(tester);
       final fake = Fake();
       await mount(tester, fake);
@@ -419,10 +416,7 @@ void main() {
       expect(last.containsKey('project_id'), isFalse);
       expect(last.containsKey('memory_type'), isFalse);
       expect(find.text('cmake'), findsNothing);
-      expect(
-        tester.widget<EditableText>(searchInput).controller.text,
-        isEmpty,
-      );
+      expect(tester.widget<EditableText>(searchInput).controller.text, isEmpty);
     });
 
     testWidgets('an invalid search shows the error, not an empty result', (
@@ -493,7 +487,10 @@ void main() {
         findsOneWidget,
       );
       expect(find.text("Search is off until it's rebuilt"), findsOneWidget);
-      expect(tester.widget<AbTextField>(find.byType(AbTextField)).enabled, false);
+      expect(
+        tester.widget<AbTextField>(find.byType(AbTextField)).enabled,
+        false,
+      );
       expect(find.byType(AbSearchField), findsNothing);
       expect(find.text('Needs attention'), findsOneWidget);
       await tester.tap(find.text('Rebuild search'));
@@ -536,32 +533,35 @@ void main() {
     testWidgets(
       'problem lines read search, then pending, then conflict; pending has no button',
       (tester) async {
-      useWide(tester);
-      final fake = Fake(
-        status: statusJson(
-          search: 'needs_repair',
-          pending: 1,
-          failed: 1,
-          failures: [
-            {'code': 'CONFLICT', 'target_id': 'm1', 'latest_id': 'm2'},
-          ],
-        ),
-      );
-      await mount(tester, fake);
-      final search = find.textContaining('Search is broken');
-      final pending = find.textContaining('1 save is waiting');
-      final conflict = find.textContaining('1 save was skipped');
-      expect(pending, findsOneWidget);
-      expect(conflict, findsOneWidget);
-      final y = [search, pending, conflict]
-          .map((f) => tester.getTopLeft(f).dy)
-          .toList();
-      expect(y[0], lessThan(y[1]));
-      expect(y[1], lessThan(y[2]));
-      // Rebuild search and Show memory are the only buttons.
-      expect(find.text('Rebuild search'), findsOneWidget);
-      expect(find.text('Show memory'), findsOneWidget);
-    });
+        useWide(tester);
+        final fake = Fake(
+          status: statusJson(
+            search: 'needs_repair',
+            pending: 1,
+            failed: 1,
+            failures: [
+              {'code': 'CONFLICT', 'target_id': 'm1', 'latest_id': 'm2'},
+            ],
+          ),
+        );
+        await mount(tester, fake);
+        final search = find.textContaining('Search is broken');
+        final pending = find.textContaining('1 save is waiting');
+        final conflict = find.textContaining('1 save was skipped');
+        expect(pending, findsOneWidget);
+        expect(conflict, findsOneWidget);
+        final y = [
+          search,
+          pending,
+          conflict,
+        ].map((f) => tester.getTopLeft(f).dy).toList();
+        expect(y[0], lessThan(y[1]));
+        expect(y[1], lessThan(y[2]));
+        // Rebuild search and Show memory are the only buttons.
+        expect(find.text('Rebuild search'), findsOneWidget);
+        expect(find.text('Show memory'), findsOneWidget);
+      },
+    );
 
     testWidgets('a pending-only status has a line and no action', (
       tester,
@@ -603,10 +603,7 @@ void main() {
       expect(fake.calls.first, {'op': 'dismiss', 'target_id': 'old'});
       final gets = fake.ops('get').map((c) => c['id']).toList();
       expect(gets, contains('m2'));
-      expect(
-        tester.widget<EditableText>(searchInput).controller.text,
-        isEmpty,
-      );
+      expect(tester.widget<EditableText>(searchInput).controller.text, isEmpty);
       expect(find.text('Show memory'), findsNothing);
     });
 
@@ -682,7 +679,9 @@ void main() {
       expect(line, findsOneWidget);
       expect(
         tester.getTopLeft(line).dy,
-        lessThan(tester.getTopLeft(find.textContaining('1 save is waiting')).dy),
+        lessThan(
+          tester.getTopLeft(find.textContaining('1 save is waiting')).dy,
+        ),
       );
     });
 
@@ -754,12 +753,10 @@ void main() {
       await mount(tester, fake);
       await tester.tap(find.text('Edit'));
       await tester.pumpAndSettle();
-      final content = find
-          .descendant(
-            of: find.byType(MemoryEditForm),
-            matching: find.byType(EditableText),
-          )
-          .first;
+      final content = find.descendant(
+        of: find.byKey(const Key('memory-edit-content')),
+        matching: find.byType(EditableText),
+      );
       await tester.enterText(content, 'Edited content');
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
@@ -839,9 +836,14 @@ void main() {
     await tester.tap(find.text('Clear filters'));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpAndSettle();
-    expect(fake.ops('search').map((c) => c['query']), isNot(contains('cmakes')));
     expect(
-      fake.calls.lastWhere((c) => c['op'] == 'list' || c['op'] == 'search')['op'],
+      fake.ops('search').map((c) => c['query']),
+      isNot(contains('cmakes')),
+    );
+    expect(
+      fake.calls.lastWhere(
+        (c) => c['op'] == 'list' || c['op'] == 'search',
+      )['op'],
       'list',
     );
     expect(tester.widget<EditableText>(searchInput).controller.text, isEmpty);

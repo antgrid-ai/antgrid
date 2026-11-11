@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { MemoryError } from "./contracts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export const MEMORY_DATABASE = "memory.sqlite";
 
@@ -40,7 +40,15 @@ export class MemoryStore {
       if (version() > SCHEMA_VERSION) throw new MemoryError("UNAVAILABLE", "Memory database was written by a newer version; upgrade Antgrid");
       // Re-read under the write lock: another connection may have created the
       // store while this one waited for it.
-      if (version() === 0) this.db.transaction(() => { if (version() === 0) this.create(); }).immediate();
+      if (version() < SCHEMA_VERSION) this.db.transaction(() => {
+        if (version() > SCHEMA_VERSION) throw new MemoryError("UNAVAILABLE", "Memory database was written by a newer version; upgrade Antgrid");
+        if (version() === 0) this.create();
+        if (version() === 1) {
+          this.db.exec("ALTER TABLE records ADD COLUMN title TEXT; ALTER TABLE records ADD COLUMN description TEXT;");
+          this.replaceIndex();
+          this.db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
+        }
+      }).immediate();
       const profile = this.query("SELECT owner_id FROM profile WHERE singleton=1").get() as { owner_id: string } | null;
       if (!profile?.owner_id) throw new MemoryError("UNAVAILABLE", "Memory profile identity is missing; preserve the database for recovery");
       this.ownerId = profile.owner_id;
@@ -53,7 +61,7 @@ export class MemoryStore {
         // A passing checkIndex has read every canonical row; a failing one may
         // have stopped early. Canonical corruption thrown here fails the open
         // rather than being treated as an index failure and replacing the store.
-        for (const _row of this.query("SELECT id, content, applicability FROM records").iterate()) { /* Read without retaining the store in memory. */ }
+        for (const _row of this.query("SELECT id, content, applicability, title, description FROM records").iterate()) { /* Read without retaining the store in memory. */ }
         try { this.repair(); } catch { this.searchReady = false; }
       }
     } catch (error) { this.close(); throw error; }
@@ -83,7 +91,7 @@ export class MemoryStore {
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         id TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL, scope TEXT NOT NULL,
         project_id TEXT NOT NULL, task_id TEXT, checkout_id TEXT, memory_type TEXT NOT NULL,
-        content TEXT NOT NULL, applicability TEXT, evidence TEXT NOT NULL, source TEXT NOT NULL,
+        content TEXT NOT NULL, applicability TEXT, title TEXT, description TEXT, evidence TEXT NOT NULL, source TEXT NOT NULL,
         supersedes TEXT, superseded_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         match_hash TEXT NOT NULL
       );
@@ -110,21 +118,22 @@ export class MemoryStore {
 
   private createIndex(): void {
     this.db.exec(`
-      CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, content, applicability, tokenize='unicode61');
+      CREATE VIRTUAL TABLE memory_fts USING fts5(id UNINDEXED, content, applicability, title, description, tokenize='unicode61');
       INSERT INTO memory_fts(memory_fts,rank) VALUES('secure-delete',1);
+      INSERT INTO memory_fts(memory_fts,rank) VALUES('rank','bm25(0,1,1,4,2)');
       CREATE TRIGGER memory_insert AFTER INSERT ON records BEGIN
-        INSERT INTO memory_fts(rowid,id,content,applicability) VALUES(new.seq,new.id,new.content,new.applicability);
+        INSERT INTO memory_fts(rowid,id,content,applicability,title,description) VALUES(new.seq,new.id,new.content,new.applicability,new.title,new.description);
       END;
       CREATE TRIGGER memory_delete AFTER DELETE ON records BEGIN DELETE FROM memory_fts WHERE rowid=old.seq; END;
-      CREATE TRIGGER memory_update AFTER UPDATE OF content,applicability ON records BEGIN
+      CREATE TRIGGER memory_update AFTER UPDATE OF content,applicability,title,description ON records BEGIN
         DELETE FROM memory_fts WHERE rowid=old.seq;
-        INSERT INTO memory_fts(rowid,id,content,applicability) VALUES(new.seq,new.id,new.content,new.applicability);
+        INSERT INTO memory_fts(rowid,id,content,applicability,title,description) VALUES(new.seq,new.id,new.content,new.applicability,new.title,new.description);
       END;
     `);
   }
 
   private fillIndex(): void {
-    this.db.exec("INSERT INTO memory_fts(rowid,id,content,applicability) SELECT seq,id,content,applicability FROM records");
+    this.db.exec("INSERT INTO memory_fts(rowid,id,content,applicability,title,description) SELECT seq,id,content,applicability,title,description FROM records");
   }
 
   /**
@@ -136,20 +145,21 @@ export class MemoryStore {
     const row = this.query(`SELECT
       (SELECT count(*) FROM records) != (SELECT count(*) FROM memory_fts)
       OR EXISTS(SELECT 1 FROM records r LEFT JOIN memory_fts f ON f.rowid=r.seq
-        WHERE f.rowid IS NULL OR f.id IS NOT r.id OR f.content IS NOT r.content OR f.applicability IS NOT r.applicability) AS damaged`).get() as { damaged: number };
+        WHERE f.rowid IS NULL OR f.id IS NOT r.id OR f.content IS NOT r.content OR f.applicability IS NOT r.applicability OR f.title IS NOT r.title OR f.description IS NOT r.description) AS damaged`).get() as { damaged: number };
     if (row.damaged) throw new MemoryError("SEARCH_UNAVAILABLE", "Memory search index requires rebuilding");
   }
 
   repair(): void {
     this.searchReady = false;
-    this.db.transaction(() => {
-      this.db.exec("DROP TRIGGER IF EXISTS memory_insert; DROP TRIGGER IF EXISTS memory_delete; DROP TRIGGER IF EXISTS memory_update; DROP TABLE IF EXISTS memory_fts;");
-      this.createIndex();
-      this.fillIndex();
-      this.db.exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')");
-      this.checkIndex();
-    }).immediate();
+    this.db.transaction(() => this.replaceIndex()).immediate();
     this.searchReady = true;
+  }
+  private replaceIndex(): void {
+    this.db.exec("DROP TRIGGER IF EXISTS memory_insert; DROP TRIGGER IF EXISTS memory_delete; DROP TRIGGER IF EXISTS memory_update; DROP TABLE IF EXISTS memory_fts;");
+    this.createIndex();
+    this.fillIndex();
+    this.db.exec("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')");
+    this.checkIndex();
   }
   query(sql: string): Statement {
     let statement = this.statements.get(sql);

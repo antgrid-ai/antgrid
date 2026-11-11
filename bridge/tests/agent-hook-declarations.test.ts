@@ -28,7 +28,7 @@ describe("hook profile declarations", () => {
 
   test("only the agents with an installed integration declare posts", () => {
     const expected: PerAgent<readonly string[] | null> = {
-      "claude-code": ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"],
+      "claude-code": ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event", "/memory/bootstrap"],
       codex: ["/session-title", "/handler-event", "/notify", "/hook-alive", "/turn-activity", "/turn-start", "/memory/bootstrap"],
       // Posted from inside opencode's own runtime, so this list is deliberately
       // NOT derivable from its (empty) `events`.

@@ -4,7 +4,7 @@ import {
   LIMITS, MEMORY_OFF, TASK_EXPIRY_MS, MemoryError, MemoryRequestSchema, MemoryRecordSchema, bytes, redactSave,
   type MemoryContext, type MemoryRecord, type MemoryRequest, type MemorySave,
 } from "./contracts";
-import { ftsQuery, searchResponse } from "./search";
+import { bodyExcerpt, ftsQuery, searchResponse } from "./search";
 import { MemoryStore } from "./store";
 
 type ContextSource = MemoryContext | (() => MemoryContext);
@@ -13,6 +13,7 @@ type Row = {
   task_id: string | null; checkout_id: string | null; memory_type: MemoryRecord["memory_type"];
   content: string; applicability: string | null; evidence: string; source: string;
   supersedes: string | null; superseded_by: string | null; created_at: number; updated_at: number; match_hash: string;
+  title: string | null; description: string | null;
 };
 type Operation = {
   binding: string; operation_key: string; payload_hash: string | null; match_hash: string | null;
@@ -223,6 +224,7 @@ export class MemoryService {
   private record(row: Row, at = this.now()): MemoryRecord {
     return MemoryRecordSchema.parse({
       id: row.id, owner_id: row.owner_id, scope: row.scope, memory_type: row.memory_type, content: row.content,
+      ...(row.title === null ? {} : { title: row.title }), ...(row.description === null ? {} : { description: row.description }),
       project_id: row.project_id, ...(row.task_id === null ? {} : { task_id: row.task_id }),
       ...(row.checkout_id === null ? {} : { checkout_id: row.checkout_id }), ...(row.applicability === null ? {} : { applicability: row.applicability }),
       evidence: JSON.parse(row.evidence), source: JSON.parse(row.source),
@@ -305,8 +307,10 @@ export class MemoryService {
       const { query, limit } = request;
       const match = ftsQuery(query);
       const { sql, args } = this.filter(ctx, "current");
-      const rows = this.store.query(`SELECT r.* FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(match, ...args, limit + 1) as Row[];
-      return searchResponse(rows.map(r => this.record(r)), limit);
+      const startMarker = crypto.randomUUID();
+      const endMarker = crypto.randomUUID();
+      const rows = this.store.query(`SELECT r.*, snippet(memory_fts,1,?,?,'…',48) AS excerpt FROM memory_fts JOIN records r ON r.seq=memory_fts.rowid WHERE memory_fts MATCH ? AND ${sql} ORDER BY rank ASC,r.id ASC LIMIT ?`).all(startMarker, endMarker, match, ...args, limit + 1) as (Row & { excerpt: string })[];
+      return searchResponse(rows.map(r => this.record(r)), limit, rows.map(r => bodyExcerpt(r.excerpt, startMarker, endMarker, r.description ? LIMITS.describedExcerpt : LIMITS.excerpt)));
     });
   }
   // The app is not inside an MCP envelope, so it gets complete records with timestamps.
@@ -427,6 +431,7 @@ export class MemoryService {
       ...(ctx.checkout_id ? { checkout_id: ctx.checkout_id } : {}), ...(ctx.agent_id ? { agent_id: ctx.agent_id } : {}) });
     const now = this.now();
     const row: Row = { id: crypto.randomUUID(), owner_id: ctx.owner_id, ...placement, memory_type: save.memory_type, content: save.content,
+      title: save.title ?? null, description: save.description ?? null,
       applicability: save.applicability ?? null, evidence: JSON.stringify(save.evidence), source,
       supersedes: save.supersedes ?? null, superseded_by: null, created_at: now, updated_at: now, match_hash: matchHash };
     const size = bytes(this.record(row));
@@ -457,11 +462,11 @@ export class MemoryService {
         row = this.makeRow(ctx, save, placement, matchHash, operation?.payload ? JSON.stringify(JSON.parse(operation.payload).source) : undefined);
         if (target) {
           const previous = { ...target, superseded_by: row.id };
-          if (bytes(this.record(previous)) > LIMITS.record) throw new MemoryError("INVALID_ARGUMENT", "Correction history metadata would exceed the 16384 byte record limit");
+          if (bytes(this.record(previous)) > LIMITS.record) throw new MemoryError("INVALID_ARGUMENT", `Correction history metadata would exceed the ${LIMITS.record} byte record limit`);
           this.store.query("UPDATE records SET superseded_by=? WHERE id=? AND superseded_by IS NULL").run(row.id, save.supersedes);
         }
-        this.store.query(`INSERT INTO records(id,owner_id,scope,project_id,task_id,checkout_id,memory_type,content,applicability,evidence,source,supersedes,superseded_by,created_at,updated_at,match_hash)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(row.id,row.owner_id,row.scope,row.project_id,row.task_id,row.checkout_id,row.memory_type,row.content,row.applicability,row.evidence,row.source,row.supersedes,row.superseded_by,row.created_at,row.updated_at,row.match_hash);
+        this.store.query(`INSERT INTO records(id,owner_id,scope,project_id,task_id,checkout_id,memory_type,content,applicability,evidence,source,supersedes,superseded_by,created_at,updated_at,match_hash,title,description)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(row.id,row.owner_id,row.scope,row.project_id,row.task_id,row.checkout_id,row.memory_type,row.content,row.applicability,row.evidence,row.source,row.supersedes,row.superseded_by,row.created_at,row.updated_at,row.match_hash,row.title,row.description);
       }
       this.store.query(`INSERT INTO operations(binding,operation_key,payload_hash,match_hash,target_id,record_id,outcome,state) VALUES(?,?,?,?,?,?,?,'resolved')
         ON CONFLICT(binding,operation_key) DO UPDATE SET record_id=excluded.record_id,outcome=excluded.outcome,state='resolved',payload=NULL`)
