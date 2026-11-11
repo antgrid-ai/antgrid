@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
@@ -12,8 +11,11 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../services/upload_service.dart';
 import '../util/detached.dart';
+import 'attachment_file.dart';
 import 'clipboard_image.dart' show imageFormatHint;
 import 'data_reader_bytes.dart';
+
+export 'attachment_file.dart' show readCapped;
 
 /// Exactly `TerminalAttachmentUploader.attach`'s signature, so the shared
 /// pipeline's method tears off straight into the drop path.
@@ -129,23 +131,12 @@ String droppedFileName(
   String? reported,
   String? fallbackExtension, {
   DateTime? now,
-}) {
-  final base = (reported ?? '').split(RegExp(r'[\\/]')).last;
-  final cleaned = base
-      .replaceAll(RegExp(r'^\.+'), '')
-      .replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '_')
-      .trim();
-  if (cleaned.isNotEmpty) {
-    final needsExtension = !cleaned.contains('.') && fallbackExtension != null;
-    return needsExtension ? '$cleaned.$fallbackExtension' : cleaned;
-  }
-
-  final at = now ?? DateTime.now();
-  String pad(int v) => v.toString().padLeft(2, '0');
-  return 'dropped-${at.year}${pad(at.month)}${pad(at.day)}'
-      '-${pad(at.hour)}${pad(at.minute)}${pad(at.second)}'
-      '.${fallbackExtension ?? 'bin'}';
-}
+}) => attachmentFileName(
+  reported,
+  fallbackExtension,
+  now: now,
+  prefix: 'dropped',
+);
 
 /// Accepts OS drags onto the terminal and routes them into the shared attach
 /// pipeline.
@@ -364,28 +355,4 @@ class _DropItemFile implements DroppedFile {
         ) !=
         null,
   );
-}
-
-/// Reads the file, refusing anything over [limit] from both the size the
-/// platform declares up front and a running count while streaming.
-///
-/// The declared size is checked before a byte is read: a dropped 2 GB video
-/// would otherwise be buffered into app memory just to be refused. The running
-/// count is not redundant with it — `readAll` would buffer the whole thing
-/// first, and the platform does not always declare a size to refuse it by.
-@visibleForTesting
-Future<Uint8List> readCapped({
-  required int? declaredSize,
-  required Stream<Uint8List> Function() stream,
-  required int limit,
-}) async {
-  if (declaredSize != null && declaredSize > limit) {
-    throw const UploadException('TOO_LARGE', '');
-  }
-  final builder = BytesBuilder(copy: false);
-  await for (final chunk in stream()) {
-    builder.add(chunk);
-    if (builder.length > limit) throw const UploadException('TOO_LARGE', '');
-  }
-  return builder.takeBytes();
 }
