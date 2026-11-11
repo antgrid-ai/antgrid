@@ -600,14 +600,8 @@ export class HostServer {
     // makes the failure cost one retry rather than a wrongly-failed,
     // already-applied send.
     //
-    // `"applied"` is the whole answer for every verb the coordinator ever hands
-    // this: the store commit it implies (mailbox for a post, the log/thread row
-    // for a notify) has already landed by the time `handleInbound` returns it,
-    // and what happens to a notify's rendered line downstream
-    // (`deliverBusEvent`/`lineForEvent`) is a separate, deliberately swallowed
-    // best-effort concern — `lineForEvent` returns null for every post ON
-    // PURPOSE, so answering "true iff a line was queued" here would read every
-    // local post as failed and retry it forever.
+    // The receipt witnesses the history/thread store commit. Rendering is
+    // downstream and cannot turn an already-applied frame into a retry.
     deliverLocal: (frame, to) => {
       const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
       if (projectId === null) return false;

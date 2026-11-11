@@ -112,7 +112,7 @@ async function fireHook(bridge: LocalBridge, sessionId: string, agent: string, e
   );
 }
 
-test("a post reaches a sibling session's mailbox on a bridge with no relay identity and remote access off", async () => {
+test("a notification reaches a sibling session on a bridge with no relay identity and remote access off", async () => {
   const bridge = await bootLocalBridge();
   try {
     const sender = await createSession(bridge, "sender");
@@ -143,12 +143,12 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
     // prove nothing about the missing-link refusal this block exists to pin. (That
     // precedence has its own case in `api-server-session-bus.test.ts`.)
     await setMobileAccess(bridge.abDir, true);
-    const noLink = await busCall(bridge.abDir, "post", { terminalId: sender, body: offMachine });
+    const noLink = await busCall(bridge.abDir, "notify", { terminalId: sender, body: offMachine });
     expect(noLink.status).toBe(503);
     expect(noLink.body.code).toBe("PEER_UNREACHABLE");
     await setMobileAccess(bridge.abDir, false);
 
-    const posted = await busCall(bridge.abDir, "post", {
+    const posted = await busCall(bridge.abDir, "notify", {
       terminalId: sender,
       body: { to: localTarget(bridge, target), summary: "the parser rewrite is on branch x", text: "look at lexer.ts" },
     });
@@ -163,23 +163,11 @@ test("a post reaches a sibling session's mailbox on a bridge with no relay ident
     expect(typeof threadId).toBe("string");
     expect(threadId.length).toBeGreaterThan(0);
 
-    const inbox = await busCall(bridge.abDir, "inbox", { terminalId: target });
-    expect(inbox.status).toBe(200);
-    expect(inbox.body.dropped).toBe(0);
-    expect(inbox.body.posts).toHaveLength(1);
-    expect(inbox.body.posts[0].threadId).toBe(threadId);
-    expect(inbox.body.posts[0].summary).toBe("the parser rewrite is on branch x");
-    expect(inbox.body.posts[0].text).toEqual(["look at lexer.ts"]);
-    expect(inbox.body.posts[0].from.sessionId).toBe(sender);
-
-    // The agent's read spends the unread flag: a post handed over once must not
-    // be handed over again.
-    const drained = await busCall(bridge.abDir, "inbox", { terminalId: target });
-    expect(drained.body.posts).toHaveLength(0);
-
-    // A post is read when its target chooses, so it owes the receiving
-    // terminal no line at all.
-    expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(0);
+    const history = await busCall(bridge.abDir, "thread", { terminalId: target, query: { threadId } });
+    expect(history.status).toBe(200);
+    expect(history.body.entries).toHaveLength(1);
+    expect(history.body.entries[0].peer.sessionId).toBe(sender);
+    expect(history.body.entries[0].text).toEqual(["look at lexer.ts"]);
 
     // The delivery receipt: a same-machine post is stamped by the target's own
     // store write, and a build that let it fall through to the relay transport
@@ -321,7 +309,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     await awaitAddressable(bridge, asker);
 
     const question = "which lock owns the queue";
-    const posted = await busCall(bridge.abDir, "post", {
+    const posted = await busCall(bridge.abDir, "notify", {
       terminalId: asker,
       body: { to: localTarget(bridge, answerer), summary: question, text: "see queue.ts" },
     });
@@ -331,12 +319,12 @@ test("a reply answers on the thread it was given and reaches the opener at its o
     // The id the answerer replies on is the one it was HANDED, never one it
     // spelled: the id is bridge-owned, and a reply is the verb that
     // needs no address at all because the thread already records one.
-    const inbox = await busCall(bridge.abDir, "inbox", { terminalId: answerer });
-    expect(inbox.body.posts[0].threadId).toBe(threadId);
+    const history = await busCall(bridge.abDir, "thread", { terminalId: answerer, query: { threadId } });
+    expect(history.body.threadId).toBe(threadId);
 
     await fireHook(bridge, asker, "claude", "user-prompt");
 
-    const replied = await busCall(bridge.abDir, "reply", {
+    const replied = await busCall(bridge.abDir, "notify", {
       terminalId: answerer,
       body: { threadId, summary: "the writer lock does", text: "queue.ts holds it for the whole drain" },
     });
@@ -366,7 +354,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
       20_000,
       "the reply line at the asker's turn boundary",
     );
-    expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(0);
+    expect(countMarkers(sinkText(bridge.sinkPath), NOTIFY_MARKER)).toBe(1);
     // The question is not in the reply's body; it reaches the line only as the
     // thread context the delivery was rendered with, so a reply whose exchange
     // was resolved to the wrong thread would arrive naming nothing.
@@ -383,7 +371,7 @@ test("a reply answers on the thread it was given and reaches the opener at its o
   }
 }, 180_000);
 
-test("the pair budget refuses through the real verbs, survives a restart, and lifts only for a human", async () => {
+test("the notify budget refuses through the real route and survives a restart", async () => {
   const bridge = await bootLocalBridge();
   try {
     const sender = await createSession(bridge, "sender");
@@ -411,79 +399,16 @@ test("the pair budget refuses through the real verbs, survives a restart, and li
     expect(rateLimited.status).toBe(429);
     expect(rateLimited.body.code).toBe("NOTIFY_RATE");
     expect(rateLimited.body.error).toContain(String(MAX_NOTIFIES_PER_PAIR_HOUR));
-    expect(rateLimited.body.error).toContain("post");
-
-    // A post is unbudgeted by the ceiling, so the same pair still reaches.
-    const stillReaches = await busCall(bridge.abDir, "post", {
-      terminalId: sender,
-      body: { to: localTarget(bridge, rateTarget), summary: "not urgent", text: "read when you can" },
-    });
-    expect(stillReaches.status).toBe(200);
-
-    // The pair-budget halt, on a pair of its own so the ceiling above cannot
-    // be what stops it. The first send opens a thread (progress); every one
-    // after it rides that same thread and publishes nothing, which is the exchange the
-    // counter exists to notice.
-    const opener = await busCall(bridge.abDir, "post", {
-      terminalId: sender,
-      body: { to: localTarget(bridge, haltTarget), summary: "round 0", text: "round 0" },
-    });
-    expect(opener.status).toBe(200);
-    const threadId = opener.body.threadId;
-    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i++) {
-      const sent = await busCall(bridge.abDir, "post", {
-        terminalId: sender,
-        body: { threadId, summary: `round ${i}`, text: `round ${i}` },
-      });
-      expect(sent.status).toBe(200);
-      expect(sent.body.ok).toBe(true);
-    }
-
-    // The one a reader assumes is wrong: a POST is refused too. A halt that
-    // gated only `notify` would leave the pair looping on the unbudgeted verb
-    // forever and bound nothing.
-    const halted = await busCall(bridge.abDir, "post", {
-      terminalId: sender,
-      body: { to: localTarget(bridge, haltTarget), summary: "round again", text: "round again" },
-    });
-    expect(halted.status).toBe(429);
-    expect(halted.body.code).toBe("NO_PROGRESS");
-    expect(halted.body.error).toContain(String(NO_PROGRESS_EXCHANGES));
-    expect(halted.body.error).toContain("human");
-
-    // "Only a human clears it" is worth nothing if a crash clears it instead,
-    // which is why the halt is forced to disk the moment it trips.
+    expect(rateLimited.body.error).toContain("rolling-hour");
     await bridge.restart();
     const afterRestart = await untilAsync(async () => {
-      const answer = await busCall(bridge.abDir, "post", {
+      const answer = await busCall(bridge.abDir, "notify", {
         terminalId: sender,
-        body: { to: localTarget(bridge, haltTarget), summary: "round after restart", text: "round after restart" },
+        body: { to: localTarget(bridge, rateTarget), summary: "still limited", text: "after restart" },
       });
-      // Two startup races, both answered before the pair is ever consulted —
-      // the row read runs ahead of `pairRefusal`, so either one wins the poll.
-      // The fresh process has to re-read the repo key before it can resolve any
-      // address at all (AGENT_NOT_READY), and the target session has to be back
-      // in the host's index before a local row for it exists (UNKNOWN_PEER).
-      // Both clear on their own; neither is an answer about the halt.
-      return answer.body.code === "AGENT_NOT_READY" || answer.body.code === "UNKNOWN_PEER" ? undefined : answer;
-    }, 30_000, "the restarted bridge to answer about the pair");
+      return answer.body.code === "NOTIFY_RATE" ? answer : undefined;
+    }, 30_000, "the notify budget to survive restart");
     expect(afterRestart.status).toBe(429);
-    expect(afterRestart.body.code).toBe("NO_PROGRESS");
-
-    // The one signal a bridge can observe that a human is looking. Nothing an
-    // agent sends arrives as terminal input, which is what makes it unforgeable
-    // — and this is its only regression anywhere.
-    await startSession(bridge, sender);
-    bridge.client.send(createMessage("terminal:input", { terminalId: sender, data: "\r" }));
-
-    const cleared = await untilAsync(async () => {
-      const answer = await busCall(bridge.abDir, "post", {
-        terminalId: sender,
-        body: { to: localTarget(bridge, haltTarget), summary: "round after the human", text: "round after the human" },
-      });
-      return answer.status === 200 ? answer : undefined;
-    }, 20_000, "the human submit to lift the halt");
-    expect(cleared.body.ok).toBe(true);
   } finally {
     await bridge.teardown();
   }

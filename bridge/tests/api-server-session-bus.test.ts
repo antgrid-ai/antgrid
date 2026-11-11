@@ -8,12 +8,12 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApiServer, type AgentContext } from "../src/api-server";
-import { createSessionBusApi, type SessionMembership } from "../src/session-bus/api";
+import { createSessionBusApi, type SessionMembership, type SessionBusApiDeps } from "../src/session-bus/api";
 import { SessionDirectory, type SessionDirectoryRow } from "../src/session-bus/directory";
 import { SessionBusCoordinator, type SessionBusEvent } from "../src/session-bus/coordinator";
 import { pairKey, upsertPairBudget, type PairBudgetState } from "../src/session-bus/pair-budget";
 import {
-  MAILBOX_TTL_MS,
+  THREAD_TTL_MS,
   MAX_NOTIFIES_PER_PAIR_HOUR,
   NO_PROGRESS_EXCHANGES,
 } from "../src/session-bus/constants";
@@ -54,6 +54,7 @@ interface Machine {
    *  construction-time because the state that matters is an exchange opened
    *  while it was on and answered after it went off. */
   setRemoteAccess(on: boolean): void;
+  revokeMembership(): void;
   stop(): void;
   outbound: AbMessage[];
   /** The per-pair budget this machine's coordinator answers to, when one was
@@ -109,6 +110,7 @@ function machine(opts: {
    *  all, which is every other case in this file — a stopped target is then
    *  refused NOT_RUNNING unconditionally, exactly as before the hook existed. */
   startSession?: (sessionId: string) => boolean;
+  request?: SessionBusApiDeps["request"];
 }): Machine {
   const outbound: AbMessage[] = [];
   const coordinator = new SessionBusCoordinator({
@@ -151,15 +153,17 @@ function machine(opts: {
   // Mutable so a case can flip the switch mid-exchange, which is the only way
   // to reach the state that matters: a thread opened while it was on.
   let remoteAccess = opts.remoteAccess !== false;
+  let member = true;
   const api = createSessionBusApi({
     coordinator,
     abDir: opts.abDir,
     projectId: opts.projectId,
     projectName: "proj",
     machineId: () => (opts.localMode ? null : opts.machineId),
-    membership: membershipOf,
+    membership: (id) => member ? membershipOf(id) : null,
     remoteAccessEnabled: () => remoteAccess,
     ...(opts.directory ? { directory: opts.directory } : {}),
+    ...(opts.request ? { request: opts.request } : {}),
     ...(opts.startSession ? { startSession: opts.startSession } : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });
@@ -180,6 +184,7 @@ function machine(opts: {
     outbound,
     busEvents,
     budget: opts.pairBudget ?? null,
+    revokeMembership() { member = false; },
     setRemoteAccess(on: boolean) {
       remoteAccess = on;
     },
@@ -320,6 +325,7 @@ function linkedPair(
      *  no part in cross-machine messaging in either direction. */
     leadRemoteAccess?: boolean;
     leadStartSession?: (id: string) => boolean;
+    leadRequest?: SessionBusApiDeps["request"];
     /** Both coordinators' clock, so a case can age a route out from under a
      *  thread that is still live. */
     now?: () => number;
@@ -363,6 +369,7 @@ function linkedPair(
     ...(opts.leadDeliverable === false ? { deliverable: false } : {}),
     remoteAccess: opts.leadRemoteAccess !== false,
     link: () => peerMachine ?? null,
+    ...(opts.leadRequest ? { request: opts.leadRequest } : {}),
     ...(opts.leadStartSession ? { startSession: opts.leadStartSession } : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });
@@ -526,7 +533,7 @@ describe("a self with no address is not a session this bridge does not hold", ()
   const post = (c: SessionBusCoordinator) =>
     c.message({
       sessionId: LEAD_SESSION,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
       summary: "go",
@@ -563,7 +570,7 @@ describe("the two machines may know the session by different projects", () => {
       // Relaxing the project id must not relax the session id with it: that one
       // is the whole of what proves the sender means a session living here.
       const stray = {
-        type: "session-bus:post",
+        type: "session-bus:notify",
         contextId: "ctx-1",
         threadId: null,
         from: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
@@ -764,7 +771,7 @@ describe("the send verbs over the loopback route", () => {
     try {
       // The coordinator mints the message id (§4.3). A caller able to author one
       // could author the id of a message it never sent.
-      const forgedId = await post(lead, "post", LEAD_SESSION, {
+      const forgedId = await post(lead, "notify", LEAD_SESSION, {
         to: TO_PEER, summary: "the codec diff", text: "look", messageId: "m-forged",
       });
       expect(forgedId.status).toBe(400);
@@ -775,7 +782,7 @@ describe("the send verbs over the loopback route", () => {
 
       // The sender is resolved from the terminal id and nothing else (§4.3), so
       // a `from` in the body is an agent naming itself.
-      const forgedFrom = await post(lead, "post", LEAD_SESSION, {
+      const forgedFrom = await post(lead, "notify", LEAD_SESSION, {
         to: TO_PEER, summary: "the codec diff", text: "look",
         from: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
       });
@@ -788,7 +795,7 @@ describe("the send verbs over the loopback route", () => {
   test("a send with neither text nor an artifact is refused 400 rather than crossing empty", async () => {
     const { lead, stop } = linkedPair();
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "nothing to say" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "nothing to say" });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("Invalid body");
       expect(lead.outbound).toHaveLength(0);
@@ -800,11 +807,11 @@ describe("the send verbs over the loopback route", () => {
     try {
       // The control: this machine can deliver, so the refusal below is the
       // DIRECTORY's answer and not a transport failure wearing its name.
-      const known = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const known = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(known.status).toBe(200);
       const attempted = lead.outbound.length;
 
-      const res = await post(lead, "post", LEAD_SESSION, {
+      const res = await post(lead, "notify", LEAD_SESSION, {
         to: { machineId: "m2", projectId: "p2", sessionId: "no-such-session" },
         summary: "s", text: "t",
       });
@@ -822,7 +829,7 @@ describe("the send verbs over the loopback route", () => {
     } finally { stop(); }
   });
 
-  test("a halted pair is refused NO_PROGRESS on post, not only on notify", async () => {
+  test("a halted pair is refused NO_PROGRESS before attempting wake", async () => {
     const { lead, peerRow, stop } = linkedPair();
     try {
       // Seeded rather than tripped, because a halt survives a restart and is
@@ -833,7 +840,7 @@ describe("the send verbs over the loopback route", () => {
         pairKey: leadPeerKey(), notifiesAtMs: [], exchangesSinceProgress: NO_PROGRESS_EXCHANGES, haltedAt: 1,
       });
 
-      const posted = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const posted = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(posted.status).toBe(429);
       expect(posted.body.code).toBe("NO_PROGRESS");
 
@@ -857,17 +864,13 @@ describe("the send verbs over the loopback route", () => {
     try {
       peerRow.activity = "stopped";
       const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("NOT_RUNNING");
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("AGENT_NOT_READY");
       // §7.3: refuse, and name the verb that reaches — as the tool it is called
       // by, since an agent reads this refusal and then calls something.
-      expect(res.body.error).toContain("antgrid_post");
+      expect(res.body.error).toContain("cannot send requests");
       expect(lead.outbound).toHaveLength(0);
 
-      // And the verb it names does reach: a post lands in the mailbox whether
-      // or not anything is running to read it yet.
-      const posted = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(posted.status).toBe(200);
     } finally { stop(); }
   });
 
@@ -933,7 +936,7 @@ describe("the send verbs over the loopback route", () => {
     } finally { declines.stop(); }
   });
 
-  test("a notify at a stopped CROSS-machine session stays refused even when startSession is wired", async () => {
+  test("a remote wake requires the authenticated request hook, never the local start hook", async () => {
     // §7.3's boundary: `startSession` answering true is not enough on its own —
     // waking is scoped to a same-machine target, so a host must never be asked
     // to start a process on another machine's behalf just because it happens to
@@ -943,14 +946,14 @@ describe("the send verbs over the loopback route", () => {
     try {
       peerRow.activity = "stopped";
       const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("NOT_RUNNING");
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("AGENT_NOT_READY");
       // Never even asked: the machine check gates the call, not just the outcome.
       expect(startCalls).toHaveLength(0);
     } finally { stop(); }
   });
 
-  test("an over-ceiling notify is NOTIFY_RATE while a post to the same pair still lands", async () => {
+  test("an over-ceiling notify is NOTIFY_RATE and sends no frame", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
       const now = Date.now();
@@ -964,29 +967,19 @@ describe("the send verbs over the loopback route", () => {
       const notified = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(notified.status).toBe(429);
       expect(notified.body.code).toBe("NOTIFY_RATE");
-      // Names the verb still open to it (§7.4), which is the whole reason this
-      // is a separate code from the halt: one is waited out, the other is not.
-      expect(notified.body.error).toContain("post");
-
-      // At the same moment, on the same pair: post is unbudgeted, so a spent
-      // notify ceiling must not read as the pair being silenced.
-      const posted = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
-      expect(posted.status).toBe(200);
-      expect(posted.body.sent).toBe(true);
-      const inbox = await get(peer, "inbox", PEER_SESSION);
-      expect(inbox.body.posts).toHaveLength(1);
+      expect(lead.outbound).toHaveLength(0);
     } finally { stop(); }
   });
 
   test("an off-machine send leaves while this machine's remote access is on", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(res.status).toBe(200);
       expect(res.body.sent).toBe(true);
       expect(lead.outbound).toHaveLength(1);
-      const inbox = await get(peer, "inbox", PEER_SESSION);
-      expect(inbox.body.posts).toHaveLength(1);
+      const history = peer.coordinator.messages(PEER_SESSION).entries;
+      expect(history).toHaveLength(1);
     } finally { stop(); }
   });
 
@@ -996,15 +989,15 @@ describe("the send verbs over the loopback route", () => {
     // own `remoteFrameAllowed`, so the leg that still left was the useless one.
     const { lead, peer, stop } = linkedPair({ leadRemoteAccess: false });
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
       // Nothing left the machine, and nothing was held pretending it would.
       expect(lead.outbound).toHaveLength(0);
       expect(res.body.ok).toBeUndefined();
       expect(res.body.held).toBeUndefined();
-      const inbox = await get(peer, "inbox", PEER_SESSION);
-      expect(inbox.body.posts).toHaveLength(0);
+      const history = peer.coordinator.messages(PEER_SESSION).entries;
+      expect(history).toHaveLength(0);
     } finally { stop(); }
   });
 
@@ -1014,7 +1007,7 @@ describe("the send verbs over the loopback route", () => {
     // the send leave.
     const { lead, stop } = linkedPair({ leadRemoteAccess: false, leadDeliverable: false });
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe("REMOTE_ACCESS_OFF");
     } finally { stop(); }
@@ -1044,7 +1037,7 @@ describe("the send verbs over the loopback route", () => {
       remoteAccess: false,
     });
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: target, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: target, summary: "s", text: "t" });
       expect(res.status).toBe(200);
       expect(res.body.sent).toBe(true);
     } finally { lead.stop(); }
@@ -1053,7 +1046,7 @@ describe("the send verbs over the loopback route", () => {
   test("an off-machine send the transport cannot take is held, and says why", async () => {
     const { lead, stop } = linkedPair({ leadDeliverable: false });
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       // Not a refusal: the message is kept and goes when the transport returns,
       // and the answer names the rung it is on and the reason it has not left.
       expect(res.status).toBe(200);
@@ -1065,7 +1058,7 @@ describe("the send verbs over the loopback route", () => {
   test("every send verb answers with a thread id, and the minted one is what a reply names", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
-      const posted = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const posted = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       expect(posted.status).toBe(200);
       expect(posted.body).toMatchObject({ ok: true, sent: true, rung: "delivered", opensThread: true });
       expect(typeof posted.body.threadId).toBe("string");
@@ -1077,7 +1070,7 @@ describe("the send verbs over the loopback route", () => {
 
       // §4.3 makes the id bridge-owned, so an agent never told it cannot answer
       // on the thread it was just handed.
-      const replied = await post(peer, "reply", PEER_SESSION, {
+      const replied = await post(peer, "notify", PEER_SESSION, {
         threadId: posted.body.threadId, summary: "answering", text: "three",
       });
       expect(replied.status).toBe(200);
@@ -1090,16 +1083,16 @@ describe("the send verbs over the loopback route", () => {
     const { lead, stop } = linkedPair();
     const SERVICE_PTY = "service-pty";
     try {
-      for (const verb of ["post", "notify"]) {
+      for (const verb of ["notify"]) {
         const res = await post(lead, verb, SERVICE_PTY, { to: TO_PEER, summary: "s", text: "t" });
         expect(res.status).toBe(403);
         expect(res.body.code).toBe("NOT_MEMBER");
       }
-      const replied = await post(lead, "reply", SERVICE_PTY, { threadId: "t-1", summary: "s", text: "t" });
+      const replied = await post(lead, "notify", SERVICE_PTY, { threadId: "t-1", summary: "s", text: "t" });
       expect(replied.status).toBe(403);
       expect(replied.body.code).toBe("NOT_MEMBER");
 
-      for (const path of ["inbox", "thread?threadId=t-1"]) {
+      for (const path of ["thread?threadId=t-1"]) {
         const res = await get(lead, path, SERVICE_PTY);
         expect(res.status).toBe(403);
         expect(res.body.code).toBe("NOT_MEMBER");
@@ -1118,26 +1111,28 @@ describe("the no-progress halt as the verbs actually charge it", () => {
    *  It is still an exchange on the pair, and the lead charges it on arrival —
    *  the counts below are one short of the ceiling for that reason. */
   async function peerOpenedThread(lead: Machine, peer: Machine): Promise<string> {
-    const opened = await post(peer, "post", PEER_SESSION, { to: TO_LEAD, summary: "opening", text: "one" });
+    const opened = await post(peer, "notify", PEER_SESSION, { to: TO_LEAD, summary: "opening", text: "one" });
     expect(opened.status).toBe(200);
-    const read = await get(lead, "inbox", LEAD_SESSION);
+    const read = { body: { posts: lead.coordinator.messages(LEAD_SESSION).entries } };
     expect(read.body.posts).toHaveLength(1);
     return opened.body.threadId as string;
   }
 
   test("the halt trips through the route, on the send after the ceiling", async () => {
-    const { lead, peer, stop } = linkedPair();
+    let clock = Date.now();
+    const { lead, peer, stop } = linkedPair({ now: () => clock });
     try {
       // The opener is the pair's first exchange, counted at both ends, so the
       // ceiling is reached one send sooner than a sender-scoped count would.
       const threadId = await peerOpenedThread(lead, peer);
       for (let i = 0; i < NO_PROGRESS_EXCHANGES - 1; i += 1) {
-        const res = await post(lead, "post", LEAD_SESSION, {
+        clock += 3_600_001;
+        const res = await post(lead, "notify", LEAD_SESSION, {
           to: TO_PEER, threadId, summary: "still going", text: `round ${i}`,
         });
         expect(res.status).toBe(200);
       }
-      const halted = await post(lead, "post", LEAD_SESSION, {
+      const halted = await post(lead, "notify", LEAD_SESSION, {
         to: TO_PEER, threadId, summary: "one too many", text: "round n",
       });
       expect(halted.status).toBe(429);
@@ -1149,7 +1144,8 @@ describe("the no-progress halt as the verbs actually charge it", () => {
   });
 
   test("a send carrying an artifact does not trip the halt at that count", async () => {
-    const { lead, peer, stop } = linkedPair();
+    let clock = Date.now();
+    const { lead, peer, stop } = linkedPair({ now: () => clock });
     try {
       const published = await post(lead, "artifacts", LEAD_SESSION, {
         name: "diff.txt", summary: "the codec diff", content: "0123456789",
@@ -1161,7 +1157,8 @@ describe("the no-progress halt as the verbs actually charge it", () => {
       // One past the ceiling: an artifact is half of §7.4's own definition of
       // progress, so the counter resets on every one of these.
       for (let i = 0; i <= NO_PROGRESS_EXCHANGES; i += 1) {
-        const res = await post(lead, "post", LEAD_SESSION, {
+        clock += 3_600_001;
+        const res = await post(lead, "notify", LEAD_SESSION, {
           to: TO_PEER, threadId, summary: "with evidence", text: `round ${i}`, artifactIds: [artifactId],
         });
         expect(res.status).toBe(200);
@@ -1170,10 +1167,12 @@ describe("the no-progress halt as the verbs actually charge it", () => {
   });
 
   test("a send that opens a new thread does not trip the halt at that count", async () => {
-    const { lead, stop } = linkedPair();
+    let clock = Date.now();
+    const { lead, stop } = linkedPair({ now: () => clock });
     try {
       for (let i = 0; i <= NO_PROGRESS_EXCHANGES; i += 1) {
-        const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "a new one", text: `round ${i}` });
+        clock += 3_600_001;
+        const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "a new one", text: `round ${i}` });
         expect(res.status).toBe(200);
         expect(res.body.opensThread).toBe(true);
       }
@@ -1183,7 +1182,7 @@ describe("the no-progress halt as the verbs actually charge it", () => {
 
 // The reads nothing else in the tree exercises, plus the routing fact none of
 // them type-checks: which exchange a reply goes back out on.
-describe("threads, replies and the mailbox over the loopback route", () => {
+describe("threads and replies over the loopback route", () => {
   test("a reply rides the contextId the peer opened the thread on", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
@@ -1197,7 +1196,7 @@ describe("threads, replies and the mailbox over the loopback route", () => {
       const threadId = notified.body.threadId as string;
 
       const before = lead.outbound.length;
-      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const replied = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(replied.status).toBe(200);
 
       // The misroute nothing type-checks: the replier's own session id as the
@@ -1212,11 +1211,11 @@ describe("threads, replies and the mailbox over the loopback route", () => {
   test("a reply that names no address is aimed by the thread row", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
-      const opened = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       expect(opened.status).toBe(200);
 
       const before = peer.outbound.length;
-      const replied = await post(peer, "reply", PEER_SESSION, {
+      const replied = await post(peer, "notify", PEER_SESSION, {
         threadId: opened.body.threadId, summary: "answering", text: "two",
       });
       expect(replied.status).toBe(200);
@@ -1232,7 +1231,7 @@ describe("threads, replies and the mailbox over the loopback route", () => {
   test("a reply naming a thread that does not exist is refused, not defaulted", async () => {
     const { lead, stop } = linkedPair();
     try {
-      const res = await post(lead, "reply", LEAD_SESSION, {
+      const res = await post(lead, "notify", LEAD_SESSION, {
         threadId: "no-such-thread", summary: "answering", text: "two",
       });
       expect(res.status).toBe(404);
@@ -1241,40 +1240,15 @@ describe("threads, replies and the mailbox over the loopback route", () => {
     } finally { stop(); }
   });
 
-  test("the inbox hands over unread posts with the drop count, and reading marks them read", async () => {
-    const { lead, peer, stop } = linkedPair();
-    try {
-      const first = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "first", text: "one" });
-      expect(first.status).toBe(200);
-      const second = await post(lead, "post", LEAD_SESSION, {
-        to: TO_PEER, summary: "second", text: "two", unexpected: "the codec is also wrong",
-      });
-      expect(second.status).toBe(200);
 
-      const read = await get(peer, "inbox", PEER_SESSION);
-      expect(read.status).toBe(200);
-      expect(read.body.posts.map((p: { summary: string }) => p.summary)).toEqual(["first", "second"]);
-      expect(read.body.posts[0].text).toEqual(["one"]);
-      expect(read.body.posts[0].from).toMatchObject({ machineId: "m1", sessionId: LEAD_SESSION });
-      expect(read.body.posts[1].unexpected).toBe("the codec is also wrong");
-      // Zero rides every answer (§7.4): an empty inbox and an emptied one are
-      // different facts, and a reader told only the posts cannot tell them apart.
-      expect(read.body.dropped).toBe(0);
-
-      const again = await get(peer, "inbox", PEER_SESSION);
-      expect(again.status).toBe(200);
-      expect(again.body.posts).toEqual([]);
-      expect(again.body.dropped).toBe(0);
-    } finally { stop(); }
-  });
 
   test("a thread reads both directions, and the acknowledgement lands on the outbound entry", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
-      const opened = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       expect(opened.status).toBe(200);
       const threadId = opened.body.threadId as string;
-      const replied = await post(peer, "reply", PEER_SESSION, { threadId, summary: "answering", text: "two" });
+      const replied = await post(peer, "notify", PEER_SESSION, { threadId, summary: "answering", text: "two" });
       expect(replied.status).toBe(200);
 
       const res = await get(lead, `thread?threadId=${threadId}`, LEAD_SESSION);
@@ -1309,7 +1283,7 @@ describe("threads, replies and the mailbox over the loopback route", () => {
   test("a refusal from the peer marks the entry refused and never delivered", async () => {
     const m = unlinkedLead();
     try {
-      const opened = await post(m, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(m, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       expect(opened.status).toBe(200);
       m.coordinator.onTransportOutcome(opened.body.messageId, "m2", { kind: "refused", code: "UNKNOWN_PEER" });
 
@@ -1325,7 +1299,7 @@ describe("threads, replies and the mailbox over the loopback route", () => {
   test("an outcome naming a machine the message was not addressed to is ignored", async () => {
     const m = unlinkedLead();
     try {
-      const opened = await post(m, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(m, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       m.coordinator.onTransportOutcome(opened.body.messageId, "m-other", { kind: "applied" });
 
       const res = await get(m, `thread?threadId=${opened.body.threadId}`, LEAD_SESSION);
@@ -1337,7 +1311,7 @@ describe("threads, replies and the mailbox over the loopback route", () => {
   test("a relay receipt moves the entry to relayed and nothing further", async () => {
     const m = unlinkedLead();
     try {
-      const opened = await post(m, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(m, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       m.coordinator.onTransportOutcome(opened.body.messageId, "m2", { kind: "relayed" });
 
       const res = await get(m, `thread?threadId=${opened.body.threadId}`, LEAD_SESSION);
@@ -1411,8 +1385,8 @@ describe("the send rungs in the state a machine is usually in", () => {
       // went nowhere: the arrival reached the consumer that queues the line, and
       // left no mailbox row for the agent to read the same thing twice.
       expect(peer.busEvents.map((e) => e.kind)).toEqual(["notify"]);
-      const inbox = await get(peer, "inbox", PEER_SESSION);
-      expect(inbox.body.posts).toEqual([]);
+      const history = peer.coordinator.messages(PEER_SESSION).entries;
+      expect(history).toHaveLength(1);
     } finally { stop(); }
   });
 
@@ -1433,7 +1407,7 @@ describe("the send rungs in the state a machine is usually in", () => {
       }),
     });
     try {
-      const res = await post(m, "post", LEAD_SESSION, {
+      const res = await post(m, "notify", LEAD_SESSION, {
         to: { machineId: null, projectId: "unrelated", sessionId: "s-elsewhere" },
         summary: "s", text: "t",
       });
@@ -1443,7 +1417,7 @@ describe("the send rungs in the state a machine is usually in", () => {
 
       // The control: another project on the SAME key is a peer, so what the
       // refusal above names is the repo key and not the local path itself.
-      const sibling = await post(m, "post", LEAD_SESSION, {
+      const sibling = await post(m, "notify", LEAD_SESSION, {
         to: { machineId: null, projectId: "sibling", sessionId: "s-sibling" },
         summary: "s", text: "t",
       });
@@ -1479,7 +1453,7 @@ describe("the send rungs in the state a machine is usually in", () => {
       );
 
       const before = m.outbound.length;
-      const res = await post(m, "reply", LEAD_SESSION, { threadId: "t-open", summary: "s", text: "t" });
+      const res = await post(m, "notify", LEAD_SESSION, { threadId: "t-open", summary: "s", text: "t" });
       expect(res.status).toBe(404);
       expect(res.body.code).toBe("UNKNOWN_PEER");
       expect(m.outbound).toHaveLength(before);
@@ -1494,7 +1468,7 @@ describe("the send rungs in the state a machine is usually in", () => {
     const { lead, leadMirror, stop } = linkedPair();
     try {
       leadMirror.length = 0;
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "s", text: "t" });
       expect(res.status).toBe(503);
       expect(res.body.code).toBe("PEER_UNREACHABLE");
       expect(lead.outbound).toHaveLength(0);
@@ -1514,12 +1488,12 @@ describe("the send rungs in the state a machine is usually in", () => {
       // resolves is exactly the case where following the caller instead sends
       // the frame somewhere it will be accepted.
       leadMirror.push(mirroredRow("m2", "p2", "another-session"));
-      const opened = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
+      const opened = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking", text: "one" });
       expect(opened.status).toBe(200);
       const threadId = opened.body.threadId as string;
 
       const before = lead.outbound.length;
-      const res = await post(lead, "post", LEAD_SESSION, {
+      const res = await post(lead, "notify", LEAD_SESSION, {
         threadId,
         to: { machineId: "m2", projectId: "p2", sessionId: "another-session" },
         summary: "s", text: "t",
@@ -1531,7 +1505,7 @@ describe("the send rungs in the state a machine is usually in", () => {
       expect(res.body.error).toContain("omit");
       expect(lead.outbound).toHaveLength(before);
 
-      const agreeing = await post(lead, "post", LEAD_SESSION, {
+      const agreeing = await post(lead, "notify", LEAD_SESSION, {
         threadId, to: TO_PEER, summary: "s", text: "t",
       });
       expect(agreeing.status).toBe(200);
@@ -1540,24 +1514,24 @@ describe("the send rungs in the state a machine is usually in", () => {
     } finally { stop(); }
   });
 
-  test("a post naming only a thread is aimed by the peer that thread recorded", async () => {
+  test("a notify naming only a thread is aimed by the peer that thread recorded", async () => {
     // The non-interrupting way to answer an exchange, and why `to` is optional
     // beside a thread id: the only rendering an agent could copy that address
     // out of is a joined string, and an address it has to respell is one it can
     // spell wrong.
     const { lead, peer, stop } = linkedPair();
     try {
-      const opened = await post(peer, "post", PEER_SESSION, { to: TO_LEAD, summary: "asking", text: "one" });
+      const opened = await post(peer, "notify", PEER_SESSION, { to: TO_LEAD, summary: "asking", text: "one" });
       expect(opened.status).toBe(200);
       const threadId = opened.body.threadId as string;
 
       const before = lead.outbound.length;
-      const answered = await post(lead, "post", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const answered = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(answered.status).toBe(200);
       expect(answered.body.threadId).toBe(threadId);
       const sent = lead.outbound
         .slice(before)
-        .find((f): f is Extract<AbMessage, { type: "session-bus:post" }> => f.type === "session-bus:post");
+        .find((f): f is Extract<AbMessage, { type: "session-bus:notify" }> => f.type === "session-bus:notify");
       expect(sent?.to).toEqual({ machineId: "m2", projectId: "p2", sessionId: PEER_SESSION });
     } finally { stop(); }
   });
@@ -1568,7 +1542,7 @@ describe("the send rungs in the state a machine is usually in", () => {
     // a target for it.
     const { lead, stop } = linkedPair();
     try {
-      const res = await post(lead, "post", LEAD_SESSION, { summary: "s", text: "t" });
+      const res = await post(lead, "notify", LEAD_SESSION, { summary: "s", text: "t" });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("Invalid body");
       expect(res.body.code).toBeUndefined();
@@ -1592,7 +1566,7 @@ describe("a peer may finish a sentence it did not start", () => {
    *  not open — the thing a reply falls back on, obtained the only way it can
    *  be. */
   async function peerOpensThread(lead: Machine, peer: Machine): Promise<string> {
-    const opened = await post(peer, "post", PEER_SESSION, { to: TO_LEAD, summary: "asking", text: "one" });
+    const opened = await post(peer, "notify", PEER_SESSION, { to: TO_LEAD, summary: "asking", text: "one" });
     expect(opened.status).toBe(200);
     return opened.body.threadId as string;
   }
@@ -1606,7 +1580,7 @@ describe("a peer may finish a sentence it did not start", () => {
       leadMirror.length = 0;
 
       const before = peer.busEvents.length;
-      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const replied = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(replied.status).toBe(200);
       expect(replied.body).toMatchObject({ ok: true, sent: true, held: false });
       // The acknowledgement is not the claim. What has to be true is that the
@@ -1628,7 +1602,7 @@ describe("a peer may finish a sentence it did not start", () => {
       lead.setRemoteAccess(false);
 
       const before = peer.busEvents.length;
-      const replied = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const replied = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(replied.status).toBe(403);
       expect(replied.body.code).toBe("REMOTE_ACCESS_OFF");
       expect(peer.busEvents.slice(before)).toHaveLength(0);
@@ -1636,7 +1610,7 @@ describe("a peer may finish a sentence it did not start", () => {
       // And it is a switch, not a latch: flipping it back restores the same
       // thread, so the refusal never cost the correspondence.
       lead.setRemoteAccess(true);
-      const again = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const again = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(again.status).toBe(200);
       expect(peer.busEvents.slice(before).map((e) => e.kind)).toEqual(["notify"]);
     } finally { stop(); }
@@ -1651,15 +1625,15 @@ describe("a peer may finish a sentence it did not start", () => {
     const { lead, peer, leadMirror, stop } = linkedPair();
     leadMirror.push(mirroredRow(DARK.machineId, DARK.projectId, DARK.sessionId));
     try {
-      const withPeer = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "asking m2", text: "one" });
+      const withPeer = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "asking m2", text: "one" });
       expect(withPeer.status).toBe(200);
       expect(withPeer.body).toMatchObject({ rung: "delivered" });
-      const withDark = await post(lead, "post", LEAD_SESSION, { to: DARK, summary: "asking m3", text: "one" });
+      const withDark = await post(lead, "notify", LEAD_SESSION, { to: DARK, summary: "asking m3", text: "one" });
       expect(withDark.status).toBe(200);
       // Left the machine and was not acknowledged: still on the first rung.
       expect(withDark.body).toMatchObject({ rung: "held", sent: false, held: true });
 
-      const answered = await post(peer, "reply", PEER_SESSION, {
+      const answered = await post(peer, "notify", PEER_SESSION, {
         threadId: withPeer.body.threadId, summary: "answering", text: "two",
       });
       expect(answered.status).toBe(200);
@@ -1668,11 +1642,11 @@ describe("a peer may finish a sentence it did not start", () => {
       // the thread row.
       leadMirror.length = 0;
 
-      const toDark = await post(lead, "post", LEAD_SESSION, { threadId: withDark.body.threadId, summary: "again", text: "three" });
+      const toDark = await post(lead, "notify", LEAD_SESSION, { threadId: withDark.body.threadId, summary: "again", text: "three" });
       expect(toDark.status).toBe(200);
       expect(toDark.body).toMatchObject({ rung: "held", held: true });
 
-      const toPeer = await post(lead, "post", LEAD_SESSION, { threadId: withPeer.body.threadId, summary: "again", text: "three" });
+      const toPeer = await post(lead, "notify", LEAD_SESSION, { threadId: withPeer.body.threadId, summary: "again", text: "three" });
       expect(toPeer.status).toBe(200);
       expect(toPeer.body).toMatchObject({ ok: true, sent: true, held: false, rung: "delivered" });
     } finally { stop(); }
@@ -1689,7 +1663,7 @@ describe("a peer may finish a sentence it did not start", () => {
       leadMirror.length = 0;
 
       const before = lead.outbound.length;
-      const res = await post(lead, "post", LEAD_SESSION, { to: TO_PEER, summary: "new", text: "one" });
+      const res = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "new", text: "one" });
       expect(res.status).toBe(503);
       expect(res.body.code).toBe("PEER_UNREACHABLE");
       expect(res.body.error).toContain("threadId");
@@ -1707,7 +1681,7 @@ describe("a peer may finish a sentence it did not start", () => {
       const threadId = await peerOpensThread(lead, peer);
 
       const before = lead.outbound.length;
-      const res = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const res = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe("NOT_ADDRESSABLE");
       expect(res.body.error).toContain("git remote");
@@ -1724,20 +1698,98 @@ describe("a peer may finish a sentence it did not start", () => {
     const { lead, peer, stop } = linkedPair({ now: () => clock });
     try {
       const threadId = await peerOpensThread(lead, peer);
-      expect((await get(lead, "inbox", LEAD_SESSION)).body.posts).toHaveLength(1);
 
-      clock += MAILBOX_TTL_MS + 1;
+      clock += THREAD_TTL_MS + 1;
 
-      const stale = await post(lead, "reply", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
+      const stale = await post(lead, "notify", LEAD_SESSION, { threadId, summary: "answering", text: "two" });
       expect(stale.status).toBe(404);
       expect(stale.body.code).toBe("UNKNOWN_PEER");
       expect(stale.body.error).toContain("age out");
 
-      const inbox = await get(lead, "inbox", LEAD_SESSION);
-      expect(inbox.body.posts).toEqual([]);
-      // Counted rather than merely gone: a reader that cannot tell an empty
-      // inbox from an emptied one has been told the wrong thing.
-      expect(inbox.body.dropped).toBe(1);
+    } finally { stop(); }
+  });
+});
+
+describe("notify remote wake", () => {
+  test("concurrent notifications share a start, then each keeps its own thread and delivery", async () => {
+    const calls: unknown[] = [];
+    let finish!: (value: { ok: true; result: unknown }) => void;
+    const started = new Promise<{ ok: true; result: unknown }>((resolve) => { finish = resolve; });
+    const { lead, peer, peerRow, stop } = linkedPair({ leadRequest: async (request) => { calls.push(request); return started; } });
+    peerRow.activity = "stopped";
+    try {
+      const first = post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "one", text: "first" });
+      const second = post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "two", text: "second" });
+      const deadline = Date.now() + 1000;
+      while (calls.length === 0 && Date.now() < deadline) await Bun.sleep(1);
+      await Bun.sleep(20);
+      expect(calls).toEqual([{
+        to: "m2", method: "session.start", params: { projectId: "p2", sessionId: PEER_SESSION }, timeoutMs: 30_000,
+      }]);
+      expect(lead.outbound).toHaveLength(0);
+      finish({ ok: true, result: {} });
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200);
+      expect(a.body.threadId).not.toBe(b.body.threadId);
+      expect(peer.busEvents).toHaveLength(2);
+    } finally { finish({ ok: true, result: {} }); stop(); }
+  });
+
+  for (const code of ["REMOTE_ACCESS_OFF", "NOT_ALLOWED_AGENT_REACH", "NOT_ORCHESTRATOR", "UNKNOWN_SESSION", "UNKNOWN_PROJECT", "REQUEST_TIMEOUT", "SESSION_START_FAILED", "SESSION_NOT_BUS_ELIGIBLE"]) {
+    test(`failed remote start ${code} never sends a notification`, async () => {
+      let starts = 0;
+      const { lead, peerRow, stop } = linkedPair({ leadRequest: async () => { starts++; return { ok: false, code }; } });
+      peerRow.activity = "stopped";
+      try {
+        const result = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "wake", text: "work" });
+        expect(result.status).toBeGreaterThanOrEqual(400);
+        expect(result.body.remoteCode ?? result.body.code).toBe(code);
+        expect(starts).toBe(1);
+        expect(lead.outbound).toHaveLength(0);
+        expect(lead.coordinator.messages(LEAD_SESSION).entries).toHaveLength(0);
+      } finally { stop(); }
+    });
+  }
+
+  test("invalid attachments, oversized envelopes, exhausted budgets and access off never start", async () => {
+    let starts = 0;
+    const { lead, peerRow, stop } = linkedPair({ leadRequest: async () => { starts++; return { ok: true, result: {} }; } });
+    peerRow.activity = "stopped";
+    try {
+      const base = { to: TO_PEER, summary: "wake", text: "work" };
+      expect((await post(lead, "notify", LEAD_SESSION, { ...base, artifactIds: ["missing"] })).body.code).toBe("UNKNOWN_ARTIFACT");
+      expect((await post(lead, "notify", LEAD_SESSION, { ...base, text: "\u0001".repeat(32000) })).body.code).toBe("ENVELOPE_TOO_LARGE");
+      lead.budget!.write(LEAD_SESSION, { pairKey: leadPeerKey(), notifiesAtMs: Array(MAX_NOTIFIES_PER_PAIR_HOUR).fill(Date.now()), exchangesSinceProgress: 0, haltedAt: null });
+      expect((await post(lead, "notify", LEAD_SESSION, base)).body.code).toBe("NOTIFY_RATE");
+      lead.setRemoteAccess(false);
+      expect((await post(lead, "notify", LEAD_SESSION, base)).body.code).toBe("REMOTE_ACCESS_OFF");
+      expect(starts).toBe(0);
+    } finally { stop(); }
+  });
+
+  for (const changed of ["access", "budget", "membership"] as const) {
+    test(`rechecks ${changed} after a successful remote start`, async () => {
+      const { lead, peerRow, stop } = linkedPair({ leadRequest: async () => {
+        if (changed === "membership") lead.revokeMembership();
+        else if (changed === "access") lead.setRemoteAccess(false);
+        else lead.budget!.write(LEAD_SESSION, { pairKey: leadPeerKey(), notifiesAtMs: Array(MAX_NOTIFIES_PER_PAIR_HOUR).fill(Date.now()), exchangesSinceProgress: 0, haltedAt: null });
+        return { ok: true, result: {} };
+      } });
+      peerRow.activity = "stopped";
+      try {
+        const result = await post(lead, "notify", LEAD_SESSION, { to: TO_PEER, summary: "wake", text: "work" });
+        expect(result.body.code).toBe(changed === "membership" ? "NOT_MEMBER" : changed === "access" ? "REMOTE_ACCESS_OFF" : "NOTIFY_RATE");
+        expect(lead.outbound).toHaveLength(0);
+      } finally { stop(); }
+    });
+  }
+
+  test("removed HTTP operations return unsupported routes", async () => {
+    const { lead, stop } = linkedPair();
+    try {
+      for (const verb of ["post", "reply"]) expect((await post(lead, verb, LEAD_SESSION, {})).status).toBe(404);
+      expect((await get(lead, "inbox", LEAD_SESSION)).status).toBe(404);
     } finally { stop(); }
   });
 });

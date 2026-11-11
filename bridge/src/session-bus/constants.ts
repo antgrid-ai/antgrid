@@ -14,22 +14,9 @@ export const BUS_MESSAGE_TTL_MS = 6 * 60 * 60_000;
  *  that loads as empty. */
 export const MAX_HELD_MESSAGES = 32;
 
-/** Unread posts one session's mailbox holds. A post interrupts nothing, so a
- *  chatty peer can fill this while its target is mid-turn; past it the OLDEST
- *  goes and the drop is COUNTED, so the loss is visible to the reader rather
- *  than merely bounded. */
-export const MAX_MAILBOX_POSTS = 50;
+/** Thread retention after the last message. */
+export const THREAD_TTL_MS = 3 * 24 * 60 * 60_000;
 
-/** How long an unread post, and the thread it belongs to, stay worth reading:
- *  a thread is garbage once its last message has aged out, so the thread
- *  store runs on this clock rather than growing an expiry of its own. */
-export const MAILBOX_TTL_MS = 3 * 24 * 60 * 60_000;
-
-/** Threads one session correlates at once. Above the mailbox bound on purpose:
- *  a notify leaves a thread row and no mail, so threads accrue from exchanges
- *  the mailbox never saw. Past it the oldest `lastAt` goes, and losing a row
- *  costs a reply the only record of where it goes — which is why the cap is
- *  loose rather than tight. */
 export const MAX_THREADS_PER_SESSION = 100;
 
 /** How stale the persisted copy of a pair budget may get. Every send and every
@@ -96,9 +83,6 @@ export const MAX_PART_CHARS = 32_000;
 /** Parts in one envelope. */
 export const MAX_PARTS = 16;
 
-/** The one-line summary every message carries. Short on purpose: it is what a
- *  mailbox and a phone's queue render, and a paragraph there is a list nobody
- *  can scan. */
 export const MAX_SUMMARY_CHARS = 400;
 
 /** The first-class "here is something you did not ask about" channel. */
@@ -153,23 +137,10 @@ export const BUS_REQUEST_MAX_TIMEOUT_MS = 300_000;
  *  is done. */
 export const BUS_REQUESTS_PER_MIN_PER_MACHINE = 60;
 
-/** A bridge's name for ITSELF on a purely local exchange when it has no
- *  relay identity to be addressed by — a machine launched local-only, or one
- *  whose control-plane registration never landed. Two sessions one bridge
- *  spawned need no network to reach each other, so refusing them an address
- *  refuses the one exchange that cannot fail for transport reasons.
- *
- *  Reserved, and never a real machine id: a relay device id is a uuid. It is
- *  PERSISTED into mailbox rows, thread rows and log peers like any other
- *  address, which is why `SessionBusCoordinator` treats it as naming this
- *  machine under whatever name the machine later acquires. */
+/** Persisted local addresses must still resolve after relay registration gives
+ * this machine a network ID; namesMachine handles that alias. */
 export const LOCAL_MACHINE_ID = "local";
 
-/** Rolling-hour `notify` ceiling per (sender, target) pair. `post` is
- *  unbudgeted, so this is deliberately tight: it pushes agents onto `post` for
- *  anything but the genuinely urgent, rather than onto the channel that
- *  interrupts a turn. A product decision, not a default — do not raise it back
- *  toward a "more generous" number without a decision to match. */
 export const MAX_NOTIFIES_PER_PAIR_HOUR = 4;
 
 /** Sends one (sender, target) pair may make with no artifact and no new thread

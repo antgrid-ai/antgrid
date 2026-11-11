@@ -204,8 +204,9 @@ session stream, rate-limited per (peer, project) pair (`INVALID_NOTICE_COOLDOWN_
 
 **Agent-to-agent session-bus frames** (`session-bus:*` carrying a `from`/`to` pair, `bridge/src/protocol.ts`) never
 ride this stream: a bridge drops any that arrive on one. Mail between machines travels sealed through the relay's
-bus queue instead (the session-bus section of `bridge/AGENTS.md`). The app's own reads of its bridge's mailboxes
-(`session-bus:directory`, `:inbox`, `:thread`) and the `session-bus:arrived` push do ride it.
+bus queue instead (the session-bus section of `bridge/AGENTS.md`). The bridge's `session-bus:directory` read can ride the project stream.
+Mailbox/thread app reads and arrival pushes are removed; agents read thread history
+through the loopback MCP API.
 
 **Failure isolation** matches §1b/§1c: an overflow or a lost stream resets only that one project stream
 (the app reopens and resyncs through `state.snapshot`); only `unauthorized`, or a protocol violation (a bad

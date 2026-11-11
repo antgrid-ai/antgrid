@@ -1,16 +1,5 @@
-// Where the session bus touches the filesystem, which is now only the artifact
-// BYTES. Every record it keeps — routes, message logs, held messages,
-// mailboxes, threads, artifact handles, queued deliveries — lives in one
-// machine-level database
-// (`bus-db.ts`); what is left here is the content those handles point at, and
-// the two deletes that have to reclaim both halves together.
-//
-// The split is deliberate rather than incidental. An artifact is the durable
-// half of the protocol and can be megabytes; a row is small and is read back by
-// whichever session happens to hold the context next. Putting the bytes in the
-// database would make every reclaim a rewrite of the file that holds every
-// other project's state.
-
+// Artifact bytes live outside the shared bus database so large artifacts do
+// not inflate every database rewrite. Reclaim must remove both halves.
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { deleteScope, readBusDb, reclaimBusDb } from "./bus-db";
@@ -28,24 +17,8 @@ export function sessionBusSessionDir(abDir: string, projectId: string, sessionId
   return join(sessionBusProjectDir(abDir, projectId), encodeURIComponent(sessionId));
 }
 
-/**
- * Every session this MACHINE still holds live bus state for, across every
- * project.
- *
- * The restart path needs this: a fresh process holds no sessions in memory, so
- * without it nothing would re-arm the retries a killed bridge left queued, and
- * a held message would sit unsent until some unrelated call happened to name
- * that session.
- *
- * Held messages, unread mail and thread rows, and nothing else. Those three are
- * the state a resume has to ACT on: a held message is retried, a mailbox is read
- * back and expired, and a thread row is the only record of the context a reply
- * routes on. A session whose bus state is a message log and some artifact
- * handles has nothing to do, and hydrating it would pin that state in memory for
- * nothing. The caller still has to check who OWNS each pair — the row says which
- * project the state was FILED under, and the session index is the authority on
- * who holds it now (see `SessionBusCoordinator.resume`).
- */
+/** Resume only actionable state: held sends need retries and threads need expiry.
+ * The session index still decides who owns each persisted session. */
 export function listSessionBusSessions(abDir: string): { projectId: string; sessionId: string }[] {
   return readBusDb(
     abDir,
@@ -53,7 +26,6 @@ export function listSessionBusSessions(abDir: string): { projectId: string; sess
       db
         .query(
           `SELECT projectId, sessionId FROM bus_held
-           UNION SELECT projectId, sessionId FROM bus_mailbox
            UNION SELECT projectId, sessionId FROM bus_threads
            ORDER BY projectId, sessionId`,
         )

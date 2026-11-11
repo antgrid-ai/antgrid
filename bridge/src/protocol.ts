@@ -2454,15 +2454,6 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** Two verbs rather than one verb and a flag, and the shape is
- *  identical because everything after the send decision is: a bridge that does
- *  not know a verb REFUSES it, where a bridge that does not know a flag would
- *  silently do the wrong thing — and a required Zod field is only fail-closed
- *  in the old→new direction, which is the wrong one. */
-const SessionBusPostMessage = BaseMessage.extend({
-  type: z.literal("session-bus:post"),
-}).extend(SessionBusMessageWire.shape);
-
 const SessionBusNotifyMessage = BaseMessage.extend({
   type: z.literal("session-bus:notify"),
 }).extend(SessionBusMessageWire.shape);
@@ -2479,7 +2470,6 @@ const SessionBusFetchResultMessage = BaseMessage.extend({
  *  where nothing else checks a bus frame's shape: the sealed header proves who
  *  sent it, not that the body is well formed. */
 export const BusMessageBodySchema = z.discriminatedUnion("type", [
-  SessionBusPostMessage,
   SessionBusNotifyMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
@@ -2568,47 +2558,6 @@ const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
   }),
 ]);
 
-const SessionBusInboxArtifactSchema = z.object({
-  artifactId: z.string().max(200),
-  name: z.string().max(200),
-  mediaType: z.string().max(120),
-  bytes: z.number(),
-  sha256: z.string().max(64),
-  summary: z.string().max(MAX_SUMMARY_CHARS),
-});
-
-/** One unread post, rendered whole so a reader needs no second call per row. */
-const SessionBusInboxPostSchema = z.object({
-  messageId: z.string().max(200),
-  threadId: z.string().max(200).nullable(),
-  contextId: z.string().max(200),
-  at: z.number(),
-  from: SessionMemberKeySchema,
-  summary: z.string().max(MAX_SUMMARY_CHARS),
-  text: z.array(z.string()),
-  unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
-  artifacts: z.array(SessionBusInboxArtifactSchema),
-});
-
-const SessionBusThreadEntrySchema = z.object({
-  direction: z.enum(["in", "out"]),
-  at: z.number(),
-  peer: SessionMemberKeySchema,
-  summary: z.string().max(MAX_SUMMARY_CHARS),
-  text: z.array(z.string()),
-  /** Outbound entries only: when the peer BRIDGE's signed acknowledgement said
-   *  it stored the message. Never that the peer's agent read it, and never that
-   *  a message from that peer can reach back here. Absent covers every rung
-   *  below it; `delivery` says which one the message has reached. */
-  deliveredAt: z.number().optional(),
-  /** Outbound entries only. `held` is on this machine, `relayed` is the relay's
-   *  own receipt, `delivered` is the recipient's signed ack, `refused` is
-   *  terminal. Optional so an app that predates it keeps parsing. */
-  delivery: z.enum(["held", "relayed", "delivered", "refused"]).optional(),
-  /** Why a `refused` message was refused. */
-  refusedCode: z.string().max(64).optional(),
-});
-
 const SessionBusDirectoryMessage = BaseMessage.extend({
   type: z.literal("session-bus:directory"),
   requestId: z.string(),
@@ -2634,66 +2583,6 @@ const SessionBusDirectoryResultMessage = BaseMessage.extend({
   ...SessionBusRefusalWire,
 });
 
-const SessionBusInboxMessage = BaseMessage.extend({
-  type: z.literal("session-bus:inbox"),
-  requestId: z.string(),
-  sessionId: z.string(),
-});
-
-const SessionBusInboxResultMessage = BaseMessage.extend({
-  type: z.literal("session-bus:inbox:result"),
-  requestId: z.string(),
-  /** A PEEK: answering this does not mark anything read. The agent's own read
-   *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
-  posts: z.array(SessionBusInboxPostSchema).optional(),
-  /** Posts this session will never see, zero included: a reader that
-   *  cannot tell an empty inbox from an emptied one has been told the wrong
-   *  thing, not merely told less. */
-  dropped: z.number().optional(),
-  ...SessionBusRefusalWire,
-});
-
-const SessionBusThreadMessage = BaseMessage.extend({
-  type: z.literal("session-bus:thread"),
-  requestId: z.string(),
-  sessionId: z.string(),
-  threadId: z.string(),
-});
-
-const SessionBusThreadResultMessage = BaseMessage.extend({
-  type: z.literal("session-bus:thread:result"),
-  requestId: z.string(),
-  /** Echoed even on a refusal: a surface holding several open threads has to
-   *  know which one was refused, and `requestId` alone says that only to the
-   *  caller that still remembers what it asked. */
-  threadId: z.string(),
-  contextId: z.string().optional(),
-  entries: z.array(SessionBusThreadEntrySchema).optional(),
-  ...SessionBusRefusalWire,
-});
-
-/** Unsolicited: a mailbox grew. Carries WHOSE and nothing else — no count,
- *  because nothing renders one: a session's peers are not the user's business
- *  and no surface announces their mail. What still needs the signal is a sheet
- *  ALREADY open on that mailbox, which re-reads on it, and the kebab row that
- *  is the one door to it. Coalesced per session on the bridge, so a burst of
- *  arrivals is one push rather than one per post. */
-const SessionBusArrivedMessage = BaseMessage.extend({
-  type: z.literal("session-bus:arrived"),
-  sessionId: z.string(),
-});
-
-// ── Netwatch: shipping a remote app's half of the frame capture ───────────────
-// Both ride the machine CONTROL plane and are consumed by relay-client.ts before
-// anything project-scoped sees them. Deliberately absent from
-// CHECKOUT_VARIABLE_MESSAGE_TYPES: neither reads nor writes a working tree.
-
-// Agent -> app: arm or disarm the app's own frame capture. A phone has no env
-// var and no UI for this, so `antgrid watch --remote` is the only control
-// surface. `ttlMs` is a DEAD-MAN SWITCH, not a preference: a CLI killed with
-// SIGKILL sends no disarm, and a phone left capturing forever costs battery and
-// bandwidth with nothing on the device able to stop it. The watcher re-arms
-// well inside the window while it runs.
 const NetwatchConfigureMessage = BaseMessage.extend({
   type: z.literal("netwatch:configure"),
   enabled: z.boolean(),
@@ -2883,17 +2772,11 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
-  SessionBusPostMessage,
   SessionBusNotifyMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
   SessionBusDirectoryMessage,
   SessionBusDirectoryResultMessage,
-  SessionBusInboxMessage,
-  SessionBusInboxResultMessage,
-  SessionBusThreadMessage,
-  SessionBusThreadResultMessage,
-  SessionBusArrivedMessage,
   NetwatchConfigureMessage,
   NetwatchEventsMessage,
 ]);
@@ -3079,17 +2962,11 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
-export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
 export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
 export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
 export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
-export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
-export type SessionBusInboxResult = z.infer<typeof SessionBusInboxResultMessage>;
-export type SessionBusThreadRead = z.infer<typeof SessionBusThreadMessage>;
-export type SessionBusThreadResult = z.infer<typeof SessionBusThreadResultMessage>;
-export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
 
 /**
  * Types whose wire text must never be recorded verbatim, however loudly an
@@ -3293,11 +3170,8 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result",
+  "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result",
   "session-bus:directory", "session-bus:directory:result",
-  "session-bus:inbox", "session-bus:inbox:result",
-  "session-bus:thread", "session-bus:thread:result",
-  "session-bus:arrived",
   "netwatch:configure", "netwatch:events",
 ]);
 

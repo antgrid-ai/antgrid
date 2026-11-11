@@ -34,7 +34,7 @@ const peer = { id: randomUUID(), sign: ed25519Pair(), bus: busPair() };
 const other = { id: randomUUID(), sign: ed25519Pair(), bus: busPair() };
 
 const wait = (ms = 20) => new Promise((r) => setTimeout(r, ms));
-const POST = { type: "session-bus:post", data: { hello: "world" } } as never;
+const POST = { type: "session-bus:notify", data: { hello: "world" } } as never;
 
 function entry(m: typeof peer, over: Partial<MachineEntry> = {}): MachineEntry {
   return {
@@ -284,7 +284,7 @@ describe("outbound send", () => {
 
   test("an oversized body is refused terminally and spends no pacing", () => {
     const h = harness();
-    const big = { type: "session-bus:post", data: "x".repeat(100_000) } as never;
+    const big = { type: "session-bus:notify", data: "x".repeat(100_000) } as never;
     expect(h.t.send(sendInput({ body: big }))).toEqual({ sent: false, refused: "PLAINTEXT_TOO_LARGE" });
     expect(h.sent).toHaveLength(0);
   });
@@ -698,7 +698,7 @@ describe("logging", () => {
     try {
       const h = harness();
       const secret = "TOPSECRETCONTENT";
-      const body = { type: "session-bus:post", data: { secret } } as never;
+      const body = { type: "session-bus:notify", data: { secret } } as never;
       h.t.send(sendInput({ body }));
       h.t.handleFrame(deliver({ body: JSON.stringify(body) }));
       h.t.handleFrame(deliver({ body: `${secret} not json` }));

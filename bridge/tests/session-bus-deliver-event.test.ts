@@ -32,9 +32,7 @@ function event(over: Partial<SessionBusEvent> & { messageId?: string; summary?: 
 // is allowed to return, and it has to be asserted rather than assumed: every
 // other null here is an arrival that folded, acked and delivered no character,
 // which no log on either machine distinguishes from a quiet success.
-test("a post owes the local agent no line", () => {
-  expect(lineForEvent(event({ kind: "post" }))).toBeNull();
-});
+
 
 test("a notify becomes exactly one line, keyed by the message id", () => {
   const line = lineForEvent(event({ messageId: "msg-7" }));
@@ -52,7 +50,7 @@ test("a first contact on a thread renders the notify template and names the thre
   expect(line.kind).toBe("notify");
   expect(line.text).toContain("delivery: notify (template v3)");
   expect(line.text).toContain("has sent this session a message.");
-  expect(line.text).toContain('use antgrid_reply on thread "th-9".');
+  expect(line.text).toContain('use antgrid_notify on thread "th-9".');
 });
 
 test("a notify on a thread this receiver already holds renders the reply template", () => {

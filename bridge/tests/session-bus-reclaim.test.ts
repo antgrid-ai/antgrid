@@ -29,7 +29,6 @@ import {
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
-import { appendPost, emptyMailbox, loadMailbox, saveMailbox } from "../src/session-bus/mailbox";
 import { emptyThreads, loadThreads, saveThreads, upsertThread } from "../src/session-bus/thread-store";
 import { stampEnvelope } from "../src/session-bus/envelope";
 import { removeSessionBusSession } from "../src/session-bus/store-fs";
@@ -97,7 +96,7 @@ function seedSession(projectId: string, sessionId: string): void {
       messageId: "m-1",
       contextId: "ctx-1",
       to: PEER,
-      frame: { type: "session-bus:post" },
+      frame: { type: "session-bus:notify" },
       heldAt: 1,
       attempts: 1,
       nextAttemptAt: 0,
@@ -154,30 +153,6 @@ test("deleting one session reclaims all four of its stores and leaves its siblin
 const PairBudgetRowSchema = z.object({ pairKey: z.string(), haltedAt: z.number().nullable() });
 
 function seedThreadedSession(projectId: string, sessionId: string): void {
-  const envelope = stampEnvelope(
-    { threadId: "th-1", contextId: "ctx-1", parts: [{ kind: "text", text: "hello" }], summary: "a summary" },
-    { messageId: `mail-${sessionId}`, peer: { ...PEER, sessionName: "remote" }, now: 1 },
-  );
-  saveMailbox(
-    abDir,
-    projectId,
-    sessionId,
-    appendPost(
-      emptyMailbox(),
-      {
-        kind: "post",
-        messageId: `mail-${sessionId}`,
-        threadId: "th-1",
-        contextId: "ctx-1",
-        at: 1,
-        from: PEER,
-        summary: "a summary",
-        envelope,
-        read: false,
-      },
-      1,
-    ),
-  );
   saveThreads(
     abDir,
     projectId,
@@ -196,7 +171,6 @@ function seedThreadedSession(projectId: string, sessionId: string): void {
 
 function readThreadedSession(projectId: string, sessionId: string) {
   return {
-    mailbox: loadMailbox(abDir, projectId, sessionId, 1).posts.length,
     threads: loadThreads(abDir, projectId, sessionId, 1).threads.length,
     budgets: readBusDb(
       abDir,
@@ -206,7 +180,7 @@ function readThreadedSession(projectId: string, sessionId: string) {
   };
 }
 
-test("deleting one session reclaims its mailbox, its thread rows and its pair budgets", () => {
+test("deleting one session reclaims its history, thread rows and pair budgets", () => {
   // Not merely a leak if one of these is missed. `deleteScope` runs a single
   // `WHERE projectId = ? AND sessionId = ?` across every table it knows, so a
   // new table without both columns raises "no such column", throws the
@@ -216,14 +190,14 @@ test("deleting one session reclaims its mailbox, its thread rows and its pair bu
   const projectId = "p-threads";
   seedThreadedSession(projectId, "s-doomed");
   seedThreadedSession(projectId, "s-kept");
-  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ mailbox: 1, threads: 1, budgets: 1 });
+  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ threads: 1, budgets: 1 });
 
   removeSessionBusSession(abDir, projectId, "s-doomed");
 
-  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ mailbox: 0, threads: 0, budgets: 0 });
+  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ threads: 0, budgets: 0 });
   // Every assertion above is also true of a session that was never seeded, so
   // the untouched sibling is what makes them mean anything.
-  expect(readThreadedSession(projectId, "s-kept")).toEqual({ mailbox: 1, threads: 1, budgets: 1 });
+  expect(readThreadedSession(projectId, "s-kept")).toEqual({ threads: 1, budgets: 1 });
 });
 
 test("deleting one session leaves the project's delivery queue standing", () => {
