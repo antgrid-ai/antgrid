@@ -1624,6 +1624,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     if (_presentation.selecting) _returnToLive();
     final terminalService = widget.terminalService;
     final terminalId = widget.tab.terminalId;
+    bool isCurrentTerminal() =>
+        mounted &&
+        identical(widget.terminalService, terminalService) &&
+        widget.tab.terminalId == terminalId;
+
     if (terminalService.session.mode == ProjectSessionMode.relay) {
       final readFiles = widget.readFiles;
       final readImage = widget.readImage;
@@ -1636,27 +1641,20 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         fixedTerminalId: terminalId,
         toaster: AbToaster.maybeOf(context),
       );
-      void returnToLive() {
-        if (mounted &&
-            identical(widget.terminalService, terminalService) &&
-            widget.tab.terminalId == terminalId) {
-          if (_historyOpen) _closeHistory();
-          if (_presentation.selecting) _returnToLive();
-        }
-      }
-
       try {
         final files = await readFiles();
         final image = files.isEmpty ? await readImage() : null;
         // Text paste must remain available while an attachment is uploading.
         if (files.isNotEmpty || image != null) {
           await uploader.exclusive(() async {
-            returnToLive();
+            if (isCurrentTerminal()) {
+              if (_historyOpen) _closeHistory();
+              if (_presentation.selecting) _returnToLive();
+            }
             if (files.isNotEmpty) {
               await attachClipboardFiles(
                 files: files,
-                attach: ({required bytes, required fileName}) =>
-                    uploader.attach(bytes: bytes, fileName: fileName),
+                attach: uploader.attach,
                 onError: uploader.onError,
               );
             } else if (image != null) {
@@ -1676,17 +1674,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         uploader.dispose();
       }
     }
-    if (!mounted ||
-        !identical(widget.terminalService, terminalService) ||
-        widget.tab.terminalId != terminalId) {
-      return;
-    }
+    if (!isCurrentTerminal()) return;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!mounted ||
-        !identical(widget.terminalService, terminalService) ||
-        widget.tab.terminalId != terminalId) {
-      return;
-    }
+    if (!isCurrentTerminal()) return;
     // Same gap as the image branch, one await later: this one would write the
     // clipboard straight into a prompt the archive is covering.
     if (_historyOpen) _closeHistory();

@@ -29,9 +29,9 @@ class TerminalAttachBoard {
 
   bool _reserve(String key, Object owner) {
     final entry = _entries[key];
+    final progress = entry?.progress.value;
     if (entry?.owner != null ||
-        (entry?.progress.value != null &&
-            entry!.progress.value!.phase != AttachPhase.done)) {
+        (progress != null && progress.phase != AttachPhase.done)) {
       return false;
     }
     acquire(key);
@@ -121,24 +121,23 @@ class TerminalAttachmentUploader {
 
   /// Reserves the terminal even while a batch is reading its next file. The
   /// board also excludes attachments started by a replacement view.
-  Future<T?> exclusive<T>(Future<T> Function() operation) async {
-    if (_disposed) return null;
-    final key = boardKey();
-    if (_batchKey != null || !board._reserve(key, this)) {
-      onError(uploadErrorText(const UploadException('BUSY', ''), 'clipboard'));
-      return null;
-    }
-    _batchKey = key;
-    _holders++;
-    try {
-      return await operation();
-    } finally {
-      _batchKey = null;
-      board._releaseReservation(key, this);
-      _holders--;
-      if (_disposeRequested && _holders == 0) dispose();
-    }
-  }
+  Future<void> exclusive(Future<void> Function() operation) =>
+      keepAliveDuring(() async {
+        final key = boardKey();
+        if (_batchKey != null || !board._reserve(key, this)) {
+          onError(
+            uploadErrorText(const UploadException('BUSY', ''), 'clipboard'),
+          );
+          return;
+        }
+        _batchKey = key;
+        try {
+          await operation();
+        } finally {
+          _batchKey = null;
+          board._releaseReservation(key, this);
+        }
+      });
 
   /// A native picker can outlive the terminal view during reconnection.
   Future<void> keepAliveDuring(Future<void> Function() operation) async {
@@ -175,13 +174,6 @@ class TerminalAttachmentUploader {
     _attaching = true;
     final progress = board.acquire(key);
     try {
-      // The board, not this uploader, is what says busy: the view that
-      // started an upload may be gone, and its successor's uploader with it.
-      final shown = progress.value;
-      if (shown != null && shown.phase != AttachPhase.done) {
-        onError(uploadErrorText(const UploadException('BUSY', ''), fileName));
-        return;
-      }
       final run = resolveUpload();
       if (run == null) {
         onError(

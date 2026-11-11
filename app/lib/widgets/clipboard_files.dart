@@ -14,12 +14,8 @@ Future<List<Uri>> readClipboardFiles({
 }) async {
   final ClipboardReader? reader;
   try {
-    reader =
-        await (read != null
-                ? read()
-                : SystemClipboard.instance?.read() ??
-                      Future<ClipboardReader?>.value(null))
-            .timeout(timeout);
+    final pending = read != null ? read() : SystemClipboard.instance?.read();
+    reader = await pending?.timeout(timeout);
   } on MissingPluginException {
     return const [];
   } on UnsupportedError {
