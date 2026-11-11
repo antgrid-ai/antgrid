@@ -66,6 +66,18 @@ void main() {
   setUp(useInMemoryPrefs);
 
   group('AgentDescriptor.fromJson', () {
+    test(
+      'installation guide survives wire and cache without being required',
+      () {
+        final old = AgentDescriptor.fromJson(_wire('codex'))!;
+        expect(old.installUrl, isNull);
+        final wire = _wire('codex')
+          ..['installUrl'] = 'https://developers.openai.com/codex/cli/';
+        final described = AgentDescriptor.fromJson(wire)!;
+        expect(AgentDescriptor.fromJson(described.toJson()), described);
+        expect(described, isNot(old));
+      },
+    );
     test('parses a complete descriptor', () {
       final wire = _wire(
         'codex',

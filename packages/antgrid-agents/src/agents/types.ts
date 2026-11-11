@@ -666,6 +666,8 @@ export interface AgentSpec {
    *  advertisement so a newly-added agent shows with a proper name without
    *  needing an app release. */
   label: string;
+  /** Official CLI installation guide, exposed to clients before installation. */
+  installUrl?: string;
   /** Explicit per-mode support. An empty object means bypass is unsupported. */
   approvalPolicies: { bypass?: AgentApprovalPolicy };
   /** True when a session launched with the default policy stops to ask before

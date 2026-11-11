@@ -37,6 +37,7 @@ class AbButton extends StatefulWidget {
     this.fontWeight,
     this.wrapLabel = false,
     this.expand = false,
+    this.padding,
   });
 
   final String label;
@@ -76,6 +77,8 @@ class AbButton extends StatefulWidget {
   /// row) with the label centred, instead of hugging the label at the start of
   /// that slot. Needs a bounded width, like [wrapLabel].
   final bool expand;
+
+  final EdgeInsetsGeometry? padding;
 
   @override
   State<AbButton> createState() => _AbButtonState();
@@ -124,7 +127,9 @@ class _AbButtonState extends State<AbButton> {
             ? 0
             : AbTokens.rowHeightSm,
       ),
-      padding: EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
+      padding:
+          widget.padding ??
+          EdgeInsets.symmetric(horizontal: hPad, vertical: vPad),
       decoration: BoxDecoration(
         color: fillColor,
         border: Border.all(color: borderColor),

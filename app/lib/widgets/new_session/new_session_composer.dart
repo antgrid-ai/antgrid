@@ -31,6 +31,7 @@ import '../../launcher/host_control_client.dart' show HostControlException;
 export '../../design/widgets/ab_composer_send_button.dart'
     show ComposerSendButton;
 import '../../providers/agent_catalog.dart';
+import '../../providers/agent_setup.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/new_session_start.dart';
@@ -40,6 +41,7 @@ import '../../util/ab_log.dart';
 import '../../util/detached.dart';
 import '../ab_status_helpers.dart'
     show agentsCheckingCopy, agentsUnlistedCopy, sessionRefusalCopy;
+import 'new_session_agent_setup.dart';
 import 'branch_menu.dart';
 import 'branch_remote_advisory.dart';
 import 'environment_menu.dart';
@@ -47,10 +49,7 @@ import 'picker_sources.dart';
 import 'project_menu.dart';
 
 typedef StartNewSessionCallback =
-    Future<void> Function(
-      ProviderContainer ref, {
-      bool allowActiveSessions,
-    });
+    Future<void> Function(ProviderContainer ref, {bool allowActiveSessions});
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
 /// both the reactive `canSend` (built from watched values in `build`) and the
@@ -63,9 +62,11 @@ bool newSessionCanStart({
   required String customCmd,
   bool isolated = false,
   bool isolationReady = false,
+  bool agentMissing = false,
 }) =>
     !starting &&
     hasValidTarget &&
+    !agentMissing &&
     (!isCustom || customCmd.trim().isNotEmpty) &&
     (!isolated || isolationReady);
 
@@ -176,6 +177,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   late final FocusNode _promptFocus;
   bool _hovered = false;
   bool _promptFocused = false;
+  bool _restorePromptFocus = false;
 
   @override
   void initState() {
@@ -307,6 +309,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     customCmd: ref.read(newSessionCustomCmdProvider),
     isolated: ref.read(newSessionIsolatedProvider),
     isolationReady: ref.read(newSessionIsolationReadyProvider),
+    agentMissing: ref.read(newSessionNeedsAgentSetupProvider),
   );
 
   /// The reason [_reportAbort] last consumed. The abort reason is consume-once
@@ -508,7 +511,24 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // tool so the default is actually runnable. Custom and user-touched
     // picks are left alone ([firstInstalledAgent] keeps them).
     ref.listen(newSessionDetectedToolsProvider, (_, _) {
-      _snapToInstalledAgent();
+      // Detection also arrives before a project exists. Defer the selection
+      // until capability providers have finished the current notification.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _snapToInstalledAgent();
+      });
+    });
+    ref.listen(newSessionNeedsAgentSetupProvider, (previous, next) {
+      if (next) {
+        _restorePromptFocus = _promptFocus.hasFocus;
+        _promptFocus.unfocus();
+      } else if (previous == true && _restorePromptFocus) {
+        _restorePromptFocus = false;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && !ref.read(newSessionNeedsAgentSetupProvider)) {
+            _promptFocus.requestFocus();
+          }
+        });
+      }
     });
     // Keep the controller in sync with external writes to the prompt
     // provider (e.g. resetNewSessionForm clearing it on exit). Guarded on
@@ -559,6 +579,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // flag would unlock the form while the start it was guarding ran on.
     final progress = ref.watch(newSessionStartProgressProvider);
     final starting = progress != null;
+    final agentMissing = ref.watch(newSessionNeedsAgentSetupProvider);
+    if (agentMissing) return const NewSessionAgentSetup();
     // Reactive form of `_canStart`, built from the values already watched
     // above so the button reacts to every one of them; both go through
     // [newSessionCanStart] so the watch and read paths stay in lockstep.
@@ -569,6 +591,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       customCmd: customCmd,
       isolated: isolated,
       isolationReady: isolationReady,
+      agentMissing: agentMissing,
     );
 
     final p = context.antgrid;
@@ -726,7 +749,9 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                         enabled: !isCustom,
                         readOnly: starting,
                         hintText: isCustom
-                            ? 'Starts a terminal session — set the command in ⚙'
+                            ? customCmd.trim().isEmpty
+                                  ? 'Starts a terminal session — set the command in ⚙'
+                                  : 'Starts a terminal session with your custom command'
                             : 'Describe a task or ask a question (optional)',
                         onChanged: (v) =>
                             ref.read(newSessionPromptProvider.notifier).set(v),

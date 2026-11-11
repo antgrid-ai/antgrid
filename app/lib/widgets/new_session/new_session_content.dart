@@ -7,6 +7,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_docked_column.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../design/widgets/ab_touch_sizing.dart';
@@ -114,33 +115,31 @@ class NewSessionContent extends ConsumerWidget {
                   alignment: Alignment.topCenter,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: _maxWidth),
-                    child: Column(
-                      children: [
-                        // The desktop setup checklist moved to the sidebar
-                        // (`FirstRunSetupSection` in projects_drawer.dart);
-                        // mobile's fills RecentSessionsTab's empty slot below.
-                        // Neither is mounted here any more.
-                        const RemoteAccessNudgeBanner(),
-                        // Self-gating too: it renders only while the
-                        // composer's isolation toggle is on for a target that
-                        // can actually make worktrees.
-                        const WorktreeSetupNudge(),
-                        // Recents fill the canvas. RefreshIndicator keeps the
-                        // old pull-to-refresh contract (inventory + viewed
-                        // machine advert).
-                        Expanded(
-                          child: RefreshIndicator(
-                            onRefresh: () => _refresh(ref),
-                            color: context.antgrid.accent,
-                            backgroundColor: context.antgrid.bgElevated,
-                            // The scrolling header duplicates what the
-                            // fixed top bar above already shows, so exactly
-                            // one of the two mounts — decided here, where
-                            // both answers are in hand.
-                            child: RecentSessionsTab(showHeader: !showTopBar),
-                          ),
-                        ),
-                        Padding(
+                    child: AbDockedColumn(
+                      header: const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          RemoteAccessNudgeBanner(),
+                          WorktreeSetupNudge(),
+                        ],
+                      ),
+                      // Recents fill the canvas. RefreshIndicator keeps the
+                      // old pull-to-refresh contract (inventory + viewed
+                      // machine advert).
+                      body: RefreshIndicator(
+                        onRefresh: () => _refresh(ref),
+                        color: context.antgrid.accent,
+                        backgroundColor: context.antgrid.bgElevated,
+                        // The scrolling header duplicates what the
+                        // fixed top bar above already shows, so exactly
+                        // one of the two mounts — decided here, where
+                        // both answers are in hand.
+                        child: RecentSessionsTab(showHeader: !showTopBar),
+                      ),
+                      // Setup can grow when custom entry or troubleshooting
+                      // opens. It must scroll when the keyboard takes space.
+                      dock: SingleChildScrollView(
+                        child: Padding(
                           // No bottom inset here — SafeArea (wrapping this
                           // whole route) already reserves clearance from the
                           // system gesture bar; stacking this on top of it
@@ -156,7 +155,8 @@ class NewSessionContent extends ConsumerWidget {
                             onOpenFolder: () => _addProject(context, ref),
                           ),
                         ),
-                      ],
+                      ),
+                      pinned: const [],
                     ),
                   ),
                 ),

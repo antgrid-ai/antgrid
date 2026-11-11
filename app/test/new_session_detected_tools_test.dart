@@ -37,6 +37,7 @@ void main() {
   test('switching targets never shows the previous machine\'s tools', () async {
     final container = ProviderContainer(
       overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
         controlPlaneStateProvider('a').overrideWith(
           (ref) => Stream.value(
             const ControlPlaneState(
@@ -80,6 +81,7 @@ void main() {
     addTearDown(() => unawaited(plane.close()));
     final container = ProviderContainer(
       overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
         controlPlaneStateProvider('a').overrideWith((ref) => plane.stream),
       ],
     );

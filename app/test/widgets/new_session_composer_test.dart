@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/widgets/ab_prompt_field.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_docked_column.dart';
 import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/design/ab_theme.dart';
@@ -16,6 +18,7 @@ import 'package:antgrid/launcher/host_control_client.dart'
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/new_session_start.dart';
@@ -23,8 +26,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/sessions_service.dart'
     show SessionOperationException;
 import 'package:antgrid/utils/platform_utils.dart';
-import 'package:antgrid/widgets/ab_status_helpers.dart'
-    show agentsCheckingCopy, agentsUnlistedCopy, friendlyErrorCopy;
+import 'package:antgrid/widgets/ab_status_helpers.dart' show friendlyErrorCopy;
 import 'package:antgrid/widgets/new_session/branch_menu.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
@@ -67,6 +69,12 @@ final _chatCapDriver =
 final _composerVisible = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(true),
 );
+
+final _toolsDriver =
+    NotifierProvider<
+      ValueController<AsyncValue<Map<String, String?>?>>,
+      AsyncValue<Map<String, String?>?>
+    >(() => ValueController(const AsyncData(_installed)));
 
 /// A catalog notifier seeded with a fixed map, bypassing the disk hydration.
 /// Stands in for "some bridge has already described these agents".
@@ -116,7 +124,7 @@ final _fullCatalog = <String, AgentDescriptor>{
 
 /// Base overrides every test needs: one local source, and detection/chat-
 /// capability futures stubbed so the widget never touches a real host
-/// controller. Detection defaults to "the target has not answered"; the agent
+/// controller. Detection defaults to installed agents; the agent
 /// catalog is seeded to what a current bridge advertises, and `catalog: const
 /// {}` is the older-bridge case where nothing has described any agent. Callers
 /// append target/agent overrides on top.
@@ -128,11 +136,19 @@ List<Override> _baseOverrides({
   bool worktreeSupported = false,
   String currentBranch = 'main',
   List<PickerSource> sources = const [_localSource],
+  VoidCallback? onLocalScan,
 }) {
   return [
     pickerSourcesProvider.overrideWithValue(sources),
+    workbenchSurfaceProvider.overrideWith(
+      () => ValueController(WorkbenchSurface.newSession),
+    ),
+    localDetectedToolsProvider.overrideWith((_) async {
+      onLocalScan?.call();
+      return detection == null ? _installed : (await detection) ?? {};
+    }),
     detectedToolsForProvider.overrideWith(
-      (ref, target) => detection ?? Future.value(),
+      (ref, target) => detection ?? Future.value(_installed),
     ),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => chatCapable),
     agentCatalogProvider.overrideWith(
@@ -186,9 +202,8 @@ const _installed = <String, String?>{
   'codex': 'Codex',
 };
 
-/// Mount the composer on [_project] with detection held open and open the agent
-/// menu; the caller settles detection through the returned completer.
-Future<Completer<Map<String, String?>?>> _openAgentMenuPending(
+/// Mount with detection held open; the caller supplies the machine's answer.
+Future<Completer<Map<String, String?>?>> _mountPending(
   WidgetTester tester,
 ) async {
   final detection = Completer<Map<String, String?>?>();
@@ -200,8 +215,6 @@ Future<Completer<Map<String, String?>?>> _openAgentMenuPending(
       ),
     ),
   );
-  await tester.pumpAndSettle();
-  await tester.tap(find.byKey(const Key('new-session-agent-selector')));
   await tester.pumpAndSettle();
   return detection;
 }
@@ -234,6 +247,267 @@ Widget _host({
 }
 
 void main() {
+  testWidgets('setup detects the local machine before any project is chosen', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(overrides: _baseOverrides(detection: Future.value({}))),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Set up an agent to start coding'), findsOneWidget);
+    expect(find.byType(AbPromptField), findsNothing);
+    expect(find.byType(EnvironmentChip), findsOneWidget);
+  });
+
+  testWidgets(
+    'early detection switches an unavailable default without capability rebuild errors',
+    (tester) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(detection: Future.value({'codex': 'Codex'})),
+            newSessionAgentProvider.overrideWith(
+              () => ValueController(const KnownAgent('cursor-agent')),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      expect(
+        container.read(newSessionAgentProvider),
+        const KnownAgent('codex'),
+      );
+      expect(find.byType(AbPromptField), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'setup switches machines and restores the previous project and prompt',
+    (tester) async {
+      const remote = PickerSource(
+        id: 'machine:work',
+        label: 'Work laptop',
+        isLocal: false,
+        machineUuid: 'work',
+        projects: [],
+      );
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(
+              target: _project,
+              detection: Future.value({}),
+              sources: const [_localSource, remote],
+            ),
+            remoteDetectedToolsProvider(
+              'work',
+            ).overrideWithValue(const AsyncData({'codex': 'Codex'})),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      container.read(newSessionPromptProvider.notifier).set('Keep the draft');
+      await tester.tap(find.byType(EnvironmentChip));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Work laptop'));
+      await tester.pumpAndSettle();
+      expect(container.read(selectedTargetProjectProvider), isNull);
+      expect(find.byType(AbPromptField), findsOneWidget);
+      expect(find.text('Keep the draft'), findsOneWidget);
+      expect(container.read(newSessionHasValidTargetProvider), isFalse);
+      await tester.tap(find.byType(EnvironmentChip));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Local'));
+      await tester.pumpAndSettle();
+      expect(container.read(selectedTargetProjectProvider), _project);
+      expect(container.read(newSessionPromptProvider), 'Keep the draft');
+      expect(find.byType(AbPromptField), findsNothing);
+    },
+  );
+
+  testWidgets('expanded setup scrolls in a short narrow viewport', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(detection: Future.value({})),
+        wrap: (composer) => SizedBox(
+          width: 320,
+          height: 220,
+          child: AbDockedColumn(
+            header: const SizedBox.shrink(),
+            body: const SizedBox.shrink(),
+            dock: SingleChildScrollView(child: composer),
+            pinned: const [],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Advanced: Use a custom command'));
+    await tester.tap(find.text('Advanced: Use a custom command'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Use this command'));
+    expect(find.text('Use this command').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'custom command is entered inline and confirmed before showing the composer',
+    (tester) async {
+      var submitted = 0;
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(
+            target: _project,
+            detection: Future.value({}),
+          ),
+          submit: (_, {allowActiveSessions = false}) async {
+            submitted++;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      await tester.tap(find.text('Advanced: Use a custom command'));
+      await tester.pumpAndSettle();
+      final command = find.byKey(const Key('new-session-setup-command'));
+      await tester.enterText(command, '   ');
+      expect(
+        tester
+            .widget<AbButton>(find.widgetWithText(AbButton, 'Use this command'))
+            .onTap,
+        isNull,
+      );
+      await tester.enterText(command, '/opt/agents/my-agent');
+      await tester.pump();
+      expect(find.byType(AbPromptField), findsNothing);
+      expect(
+        container.read(newSessionAgentProvider),
+        isNot(isA<CustomAgent>()),
+      );
+      await tester.tap(find.text('Use this command'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AbPromptField), findsOneWidget);
+      expect(
+        container.read(newSessionCustomCmdProvider),
+        '/opt/agents/my-agent',
+      );
+      expect(container.read(newSessionAgentProvider), const CustomAgent());
+      expect(container.read(newSessionAgentTouchedProvider), isTrue);
+      expect(find.text('Starts a terminal session with your custom command'), findsOneWidget);
+      expect(submitted, 0);
+    },
+  );
+
+  testWidgets(
+    'a draft and project survive unavailable, empty and recovered detection',
+    (tester) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionDetectedToolsProvider.overrideWith(
+              (ref) => ref.watch(_toolsDriver),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'Keep my draft',
+      );
+      for (final state in <AsyncValue<Map<String, String?>?>>[
+        const AsyncLoading(),
+        AsyncError(StateError('offline'), StackTrace.current),
+        const AsyncData({}),
+      ]) {
+        container.read(_toolsDriver.notifier).set(state);
+        await tester.pumpAndSettle();
+        expect(find.byType(AbPromptField), findsNothing);
+        expect(container.read(newSessionPromptProvider), 'Keep my draft');
+        expect(container.read(selectedTargetProjectProvider), _project);
+      }
+      container
+          .read(_toolsDriver.notifier)
+          .set(const AsyncData({'codex': 'Codex'}));
+      await tester.pumpAndSettle();
+      expect(find.text('Keep my draft'), findsOneWidget);
+      expect(
+        container.read(newSessionAgentProvider),
+        const KnownAgent('codex'),
+      );
+    },
+  );
+
+  testWidgets(
+    'no computer on mobile asks for connection without scanning locally',
+    (tester) async {
+      var localScans = 0;
+      final overrides = _baseOverrides(
+        onLocalScan: () => localScans++,
+        sources: const [
+          PickerSource(
+            id: 'machine:none',
+            label: 'Remote',
+            isLocal: false,
+            projects: [],
+          ),
+        ],
+      );
+      await tester.pumpWidget(_host(overrides: overrides));
+      await tester.pumpAndSettle();
+      expect(find.text('Connect a computer to start coding'), findsOneWidget);
+      expect(find.byType(AbPromptField), findsNothing);
+      expect(find.text('Advanced: Use a custom command'), findsNothing);
+      expect(localScans, 0);
+    },
+  );
+
+  testWidgets('no agents offers setup without selecting Custom or submitting', (
+    tester,
+  ) async {
+    var submitted = 0;
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(
+          target: _project,
+          detection: Future.value({}),
+        ),
+        submit: (_, {allowActiveSessions = false}) async {
+          submitted++;
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(NewSessionComposer)),
+    );
+    expect(container.read(newSessionAgentProvider), isNot(isA<CustomAgent>()));
+    expect(find.text('Set up a coding agent'), findsOneWidget);
+    expect(find.byKey(const Key('new-session-send-button')), findsNothing);
+    expect(find.byType(AbPromptField), findsNothing);
+    expect(find.byType(ProjectChip), findsNothing);
+    expect(find.byKey(const Key('new-session-mode-chip')), findsNothing);
+    expect(find.byType(EnvironmentChip), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(submitted, 0);
+  });
+
   testWidgets('empty prompt is explicitly optional and can start by button', (
     tester,
   ) async {
@@ -426,9 +700,9 @@ void main() {
               machineUuid: 'M',
             ),
           ]),
-          detectedToolsForProvider.overrideWith(
-            (ref, target) async => const <String, String?>{},
-          ),
+          remoteDetectedToolsProvider(
+            'M',
+          ).overrideWithValue(const AsyncData(_installed)),
           newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
         ],
       ),
@@ -669,21 +943,24 @@ void main() {
     expect(container.read(newSessionAgentTouchedProvider), isTrue);
   });
 
-  testWidgets('agent menu holds the catalog back until detection answers', (
-    tester,
-  ) async {
-    final detection = await _openAgentMenuPending(tester);
-    expect(find.text(agentsCheckingCopy), findsOneWidget);
-    expect(find.text('Codex'), findsNothing);
-    expect(find.text('Cursor'), findsNothing);
-    expect(find.text('Custom'), findsOneWidget);
+  testWidgets(
+    'checking replaces the composer until an installed agent answers',
+    (tester) async {
+      final detection = await _mountPending(tester);
+      expect(find.text('Checking coding agents'), findsOneWidget);
+      expect(find.byType(AbPromptField), findsNothing);
+      expect(find.text('Codex'), findsNothing);
+      expect(find.text('Cursor'), findsNothing);
+      expect(find.text('Custom'), findsNothing);
 
-    // Still open: the answer has to reach the menu the user is looking at.
-    detection.complete(_installed);
-    await tester.pumpAndSettle();
-    expect(find.text(agentsCheckingCopy), findsNothing);
-    expect(find.text('Cursor'), findsNothing);
-    expect(find.text('Copilot'), findsNothing);
+      detection.complete(_installed);
+      await tester.pumpAndSettle();
+      expect(find.text('Checking coding agents'), findsNothing);
+      expect(find.byType(AbPromptField), findsOneWidget);
+      await tester.tap(find.byKey(const Key('new-session-agent-selector')));
+      await tester.pumpAndSettle();
+      expect(find.text('Cursor'), findsNothing);
+      expect(find.text('Copilot'), findsNothing);
 
     await tester.tap(find.text('Codex'));
     await tester.pumpAndSettle();
@@ -696,14 +973,20 @@ void main() {
   testWidgets('a failed lookup says so instead of checking forever', (
     tester,
   ) async {
-    final detection = await _openAgentMenuPending(tester);
+    final detection = await _mountPending(tester);
     detection.completeError(StateError('host did not start'));
     await tester.pumpAndSettle();
 
-    expect(find.text(agentsUnlistedCopy), findsOneWidget);
-    expect(find.text(agentsCheckingCopy), findsNothing);
+    expect(
+      find.text('Couldn’t check agents on this computer.'),
+      findsOneWidget,
+    );
+    expect(find.text('Checking coding agents'), findsNothing);
+    expect(find.textContaining('No coding agent found'), findsNothing);
+    expect(find.byType(AbPromptField), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
     expect(find.text('Cursor'), findsNothing);
-    expect(find.text('Custom'), findsOneWidget);
+    expect(find.text('Advanced: Use a custom command'), findsOneWidget);
   });
 
   testWidgets('manual mode toggle survives a chat-capability re-emission', (
@@ -902,7 +1185,9 @@ void main() {
         await tester.pumpWidget(
           _host(
             overrides: [
-              ..._baseOverrides(),
+              ..._baseOverrides(
+                detection: Future.value({'cursor-agent': 'Cursor'}),
+              ),
               newSessionAgentProvider.overrideWith(
                 () => ValueController(const KnownAgent('cursor-agent')),
               ),
@@ -941,7 +1226,10 @@ void main() {
         await tester.pumpWidget(
           _host(
             overrides: [
-              ..._baseOverrides(catalog: const {}),
+              ..._baseOverrides(
+                catalog: const {},
+                detection: Future.value({'kilo': 'Kilo'}),
+              ),
               newSessionAgentProvider.overrideWith(
                 () => ValueController(const KnownAgent('kilo')),
               ),
@@ -1470,6 +1758,32 @@ void main() {
 
     Finder sendButton() => find.byKey(const Key('new-session-send-button'));
     Finder stopButton() => find.byKey(const Key('new-session-stop-button'));
+
+    testWidgets('empty detection never replaces an in-progress start', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionDetectedToolsProvider.overrideWith(
+              (ref) => ref.watch(_toolsDriver),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = containerOf(tester);
+      begin(container);
+      container.read(_toolsDriver.notifier).set(const AsyncData({}));
+      await settle(tester);
+      expect(find.byType(AbPromptField), findsOneWidget);
+      expect(stopButton(), findsOneWidget);
+      expect(find.text('Set up an agent to start coding'), findsNothing);
+      container.read(newSessionStartProgressProvider.notifier).end();
+      await tester.pumpAndSettle();
+      expect(find.text('Set up an agent to start coding'), findsOneWidget);
+    });
 
     testWidgets('every control in the form refuses taps', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;

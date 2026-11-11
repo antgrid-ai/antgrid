@@ -288,6 +288,26 @@ final selectedTargetProjectProvider =
       () => ValueController(null),
     );
 
+final _draftProjectsBySourceProvider =
+    NotifierProvider<
+      ValueController<Map<String, PickerProject>>,
+      Map<String, PickerProject>
+    >(() => ValueController({}));
+
+void selectNewSessionSource(ProviderContainer container, PickerSource source) {
+  final target = container.read(selectedTargetProjectProvider);
+  final drafts = {...container.read(_draftProjectsBySourceProvider)};
+  if (target != null) {
+    final previousSource = target.isLocal
+        ? 'local'
+        : 'machine:${target.machineUuid}';
+    drafts[previousSource] = target;
+  }
+  container.read(_draftProjectsBySourceProvider.notifier).set(drafts);
+  container.read(selectedSourceIdProvider.notifier).set(source.id);
+  container.read(selectedTargetProjectProvider.notifier).set(drafts[source.id]);
+}
+
 /// Whether picker project [p] is the currently-focused project [focusId].
 /// Local projects key by `projectId` (== focus id). Remote projects key by the
 /// compound `<deviceUuid>.<projectId>` registration id, which equals the focus
@@ -319,11 +339,18 @@ bool pickerMatchesFocus(PickerProject p, String? focusId) {
 /// no longer be asked is not vouching for.
 final newSessionDetectedToolsProvider =
     Provider<AsyncValue<Map<String, String?>?>>((ref) {
-      final tools = ref.watch(
-        detectedToolsForProvider(
-          sessionTargetOf(ref.watch(selectedTargetProjectProvider)),
-        ),
-      );
+      final target = sessionTargetOf(ref.watch(selectedTargetProjectProvider));
+      final AsyncValue<Map<String, String?>?> tools;
+      if (target != null) {
+        tools = ref.watch(detectedToolsForProvider(target));
+      } else {
+        final source = ref.watch(visiblePickerSourceProvider);
+        tools = source?.isLocal == true
+            ? ref.watch(localDetectedToolsProvider)
+            : source?.machineUuid != null
+            ? ref.watch(remoteDetectedToolsProvider(source!.machineUuid!))
+            : const AsyncData(null);
+      }
       return tools.hasError
           ? AsyncError(tools.error!, tools.stackTrace!)
           : tools;
@@ -342,6 +369,41 @@ SessionTarget? sessionTargetOf(PickerProject? project) {
     projectId: project.projectId ?? baseProjectId(project.id),
   );
 }
+
+/// Machine-wide detection also serves onboarding before a project is opened.
+final localToolsListProvider = FutureProvider<ToolsList>((ref) async {
+  if (ref.watch(demoModeProvider)) {
+    return const ToolsList(tools: [], agents: []);
+  }
+  ref.watch(hostUpGenerationProvider);
+  final host = await ref.watch(hostControllerProvider).ensureHost();
+  final client = HostControlClient(port: host.controlPort, token: host.token);
+  try {
+    return await client.toolsList();
+  } finally {
+    client.close();
+  }
+});
+
+final localDetectedToolsProvider = FutureProvider<Map<String, String?>>((
+  ref,
+) async {
+  if (ref.watch(demoModeProvider)) {
+    return const <String, String?>{kDemoAgentTool: null};
+  }
+  final listed = await ref.watch(localToolsListProvider.future);
+  return {for (final t in listed.tools) t.tool: t.label};
+});
+
+final remoteDetectedToolsProvider = Provider.autoDispose
+    .family<AsyncValue<Map<String, String?>?>, String>((ref, machineUuid) {
+      final plane = ref.watch(controlPlaneStateProvider(machineUuid));
+      if (plane.isLoading) return const AsyncLoading();
+      if (plane.hasError) return AsyncError(plane.error!, plane.stackTrace!);
+      final state = plane.value;
+      if (state == null || !state.toolsReceived) return const AsyncLoading();
+      return AsyncData({for (final t in state.tools) t.tool: t.label});
+    });
 
 /// Tools installed on [target]'s MACHINE, keyed by the target rather than read
 /// off the composer's current pick — [newSessionDetectedToolsProvider] above
@@ -364,37 +426,19 @@ final detectedToolsForProvider =
       }
 
       if (target.isLocal) {
-        // This family is never invalidated, so a pick made before the warm-up
-        // supplied a bootstrap would hold its failed spawn for the launch
-        // without this.
-        ref.watch(hostUpGenerationProvider);
-        final host = await ref.watch(hostControllerProvider).ensureHost();
-        final client = HostControlClient(
-          port: host.controlPort,
-          token: host.token,
-        );
-        try {
-          final listed = await client.toolsList();
-          return {for (final t in listed.tools) t.tool: t.label};
-        } finally {
-          client.close();
-        }
+        return ref.watch(localDetectedToolsProvider.future);
       }
 
       // Tools are per-MACHINE, so key the control-plane state by the bare
       // deviceUuid rather than by the compound registration id.
       final machineUuid = baseDeviceUuid(target.registrationId);
-      final plane = ref.watch(controlPlaneStateProvider(machineUuid));
+      final tools = ref.watch(remoteDetectedToolsProvider(machineUuid));
       // Ahead of the value: Riverpod keeps the last advert beside an error, and
       // an unreachable machine's old list is not what it has installed now.
-      if (plane.hasError) {
-        Error.throwWithStackTrace(plane.error!, plane.stackTrace!);
+      if (tools.hasError) {
+        Error.throwWithStackTrace(tools.error!, tools.stackTrace!);
       }
-      final state = plane.value;
-      // `tools` is an empty list until the advert lands, indistinguishable
-      // from a machine with nothing installed.
-      if (state == null || !state.toolsReceived) return null;
-      return {for (final t in state.tools) t.tool: t.label};
+      return tools.value;
     });
 
 /// [sourceTool] labelled for the fork dialog to show before [handoffTargetsFor]
@@ -971,6 +1015,7 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionModeProvider.notifier).set('terminal');
   ref.read(newSessionApprovalPolicyProvider.notifier).set('default');
   ref.read(selectedTargetProjectProvider.notifier).set(null);
+  ref.read(_draftProjectsBySourceProvider.notifier).set({});
   ref.read(selectedSourceIdProvider.notifier).set('local');
   ref.read(newSessionAgentTouchedProvider.notifier).set(false);
   ref.read(newSessionPromptProvider.notifier).set('');
