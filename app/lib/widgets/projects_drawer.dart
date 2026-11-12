@@ -141,9 +141,11 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           // any one row is.
           //
           // Scaled all the same, because the rows it holds room for are: a band
-          // floors on [AbIconButton.boxExtent], so above UI Size ~1.15 a fixed
-          // 44 falls short of the FIRST row and the strip stops containing a
-          // whole one. The dock pays for it, and the dock scrolls.
+          // floors on [AbIconButton.boxExtent] (24 x scale plus padding), so
+          // above UI Size ~1.15 a fixed 44 falls short of the FIRST row and the
+          // strip stops containing a whole one. On a phone a band is 44 of
+          // content plus its 4 of margin, so even at 1.0 the strip holds a
+          // little under one row. The dock pays for it, and the dock scrolls.
           minBodyExtent: MediaQuery.textScalerOf(
             context,
           ).scale(AbTokens.rowHeightLg),
@@ -855,7 +857,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             return AbListRow(
               horizontalPadding: 0,
               density: AbRowDensity.sm,
-              contentFloor: AbRowContentFloor.iconButton,
+              contentFloor: AbRowContentFloor.touchRow,
               // No `hoverable`: matches the local project row, which never took
               // it — the fill previews selection, and this row's tap expands.
               // See `DrawerBand` for the rule.
@@ -943,10 +945,18 @@ class _RetryHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hint = _machineHint(context, text);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: _machineHint(context, text),
+      // A recoverable error's only affordance is this tap, so on touch it gets
+      // the same minimum target as the rows around it.
+      child: isMobilePlatform
+          ? ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: AbTokens.rowHeightLg),
+              child: Align(alignment: Alignment.centerLeft, child: hint),
+            )
+          : hint,
     );
   }
 }

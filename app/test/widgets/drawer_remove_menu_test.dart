@@ -13,7 +13,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -116,7 +118,11 @@ void main() {
     await stores.close();
   });
 
-  Future<void> pumpRow(WidgetTester tester, DrawerEntry entry) async {
+  Future<void> pumpRow(
+    WidgetTester tester,
+    DrawerEntry entry, {
+    double textScale = 1.0,
+  }) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -142,10 +148,17 @@ void main() {
           ),
         ],
         child: MaterialApp(
-          home: Scaffold(
-            body: Align(
-              alignment: Alignment.topLeft,
-              child: SizedBox(width: 300, child: DrawerEntryRow(entry)),
+          home: Builder(
+            builder: (context) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(textScale)),
+              child: Scaffold(
+                body: Align(
+                  alignment: Alignment.topLeft,
+                  child: SizedBox(width: 300, child: DrawerEntryRow(entry)),
+                ),
+              ),
             ),
           ),
         ),
@@ -485,9 +498,28 @@ void main() {
   });
 
   group('footprint', () {
+    testWidgets('touch @2.0: the trigger stays a 48 square in a taller cell', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await pumpRow(tester, LocalProjectEntry(_project()), textScale: 2.0);
+        await hover(tester);
+        final cell = tester.getRect(
+          find.byKey(const ValueKey('drawer-remove-cell')),
+        );
+        final trigger = tester.getRect(_actionsFor(_projectName));
+        expect(cell.height, greaterThan(48));
+        expect(trigger.size, const Size(48, 48));
+        expect(trigger.center, cell.center);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
     for (final mobile in [false, true]) {
       testWidgets(
-        '${mobile ? 'touch' : 'compact'}: the cell keeps the old trigger box',
+        '${mobile ? 'touch' : 'compact'}: the cell is the row-sized trigger box',
         (tester) async {
           debugDefaultTargetPlatformOverride = mobile
               ? TargetPlatform.android
@@ -502,14 +534,39 @@ void main() {
             final context = tester.element(find.byType(DrawerEntryRow));
             final cellRect = tester.getRect(cell);
             expect(cellRect.width, AbIconButton.footprintWidth(context));
-            expect(cellRect.height, AbIconButton.boxExtent(context));
+            // Touch is Apple's 44pt target: the cell fills the row's whole
+            // content height. Desktop keeps the 24px trigger box.
+            expect(
+              cellRect.height,
+              mobile ? 44.0 : AbIconButton.boxExtent(context),
+            );
+            if (mobile) {
+              expect(cellRect.size, const Size(44, 44));
+              // The tappable box, not the AbListRow's, which also carries the
+              // 2+2 margin around it.
+              final rowRect = tester
+                  .getRect(
+                    find
+                        .ancestor(of: cell, matching: find.byType(AbListRow))
+                        .first,
+                  )
+                  .deflate(AbTokens.space2);
+              expect(
+                rowRect.top <= cellRect.top + 0.01 &&
+                    rowRect.bottom >= cellRect.bottom - 0.01,
+                isTrue,
+                reason: 'the target lies within its own row: $cellRect vs $rowRect',
+              );
+              expect(cellRect.top - rowRect.top, closeTo(0, 0.01));
+              expect(rowRect.bottom - cellRect.bottom, closeTo(0, 0.01));
+            }
             expect(
               tester.getCenter(trigger),
               cellRect.center,
               reason: 'the trigger is centred on its cell',
             );
             if (mobile) {
-              // Touch Carbon floors the trigger at 48, taller than the row,
+              // Touch Carbon floors the trigger at 48, taller than the cell,
               // so it is clipped to the cell: nothing paints over a
               // neighbouring row.
               expect(tester.getSize(trigger), const Size(48, 48));

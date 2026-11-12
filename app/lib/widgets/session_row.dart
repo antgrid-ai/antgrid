@@ -399,7 +399,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
               : null,
           selected: selected,
           enabled: !deleting,
-          contentFloor: AbRowContentFloor.iconButton,
+          contentFloor: AbRowContentFloor.touchRow,
           onFocusChange: (v) {
             if (mounted) setState(() => _focused = v);
           },

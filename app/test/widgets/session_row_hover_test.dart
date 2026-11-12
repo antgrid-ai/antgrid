@@ -164,7 +164,8 @@ void main() {
         await pumpRow(tester, transport, session);
 
         expect(find.byTooltip('Session actions'), findsOneWidget);
-        expect(tester.getSize(find.byType(SessionRow)).height, 28.0);
+        // 44pt tappable box (Apple's minimum) plus its 1+1 margin.
+        expect(tester.getSize(find.byType(SessionRow)).height, 46.0);
 
         await tester.pumpWidget(const SizedBox());
       } finally {

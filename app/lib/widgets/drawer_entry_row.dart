@@ -348,7 +348,7 @@ class DrawerBand extends StatelessWidget {
       // On the band rather than on [MachineDrawerHeaderRow], so the local band
       // — which reveals nothing and would otherwise sit shorter — measures the
       // same as a machine band beside it.
-      contentFloor: AbRowContentFloor.iconButton,
+      contentFloor: AbRowContentFloor.touchRow,
       // Bands sit in a run of rows that all clear each other by this much; a
       // band with no rule above it has nothing else keeping it off them.
       margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -515,7 +515,7 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
         ),
         density: AbRowDensity.sm,
         horizontalPadding: 0, // gutter lives on the outer Padding
-        contentFloor: AbRowContentFloor.iconButton,
+        contentFloor: AbRowContentFloor.touchRow,
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
         onFocusChange: _setFocused,
         onTap: () => machineUuid != null
@@ -904,16 +904,26 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
     );
     // The cell keeps the footprint of every other glyph on the rail. Compact
     // Carbon's extra-small trigger is exactly that box. Touch Carbon floors
-    // every target at 48, taller than the 40px row, so the trigger is clipped
-    // to the cell: what paints is what takes the tap, and its pressed and
-    // focus states never cover a neighbouring row.
+    // every target at 48, taller than a touch row's 44 of content, so the
+    // trigger is clipped to the cell: what paints is what takes the tap, and
+    // its pressed and focus states never cover a neighbouring row. On touch
+    // the cell is the row's whole content height, so the clipped trigger is a
+    // full-height target rather than a sliver of one.
+    final touch = AbCarbonScope.platformDensity == CarbonDensity.touch;
     return SizedBox(
       key: const ValueKey('drawer-remove-cell'),
       width: AbIconButton.footprintWidth(context),
-      height: AbIconButton.boxExtent(context),
-      child: AbCarbonScope.platformDensity == CarbonDensity.touch
+      height: touch
+          ? AbListRow.touchRowContentExtent(context, density: AbRowDensity.sm)
+          : AbIconButton.boxExtent(context),
+      child: touch
           ? ClipRect(
               child: OverflowBox(
+                // No min: the cell may be taller than Carbon's 48 box at large
+                // text scales, and a tight min would stretch the trigger and
+                // its pressed/focus fill into a tall rectangle.
+                minWidth: 0,
+                minHeight: 0,
                 maxWidth: double.infinity,
                 maxHeight: double.infinity,
                 child: trigger,

@@ -11,11 +11,13 @@ import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
@@ -27,6 +29,7 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/host_status.dart';
+import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
@@ -150,11 +153,13 @@ Future<void> _pumpDrawer(
   WidgetTester tester, {
   required TestStoreOverrides stores,
   double textScale = 1.0,
+  List<Override> extraOverrides = const [],
 }) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         ...stores.overrides,
+        ...extraOverrides,
         currentUserProvider.overrideWith((_) async => null),
         accountAgentsProvider.overrideWith((_) async => const []),
         for (final id in const [_warmProjectId, _bareProjectId, _machineUuid])
@@ -611,5 +616,168 @@ void main() {
 
       await tester.pumpWidget(const SizedBox());
     });
+  });
+
+  group('row height', () {
+    Finder rowBox(String label) => find
+        .ancestor(of: find.text(label), matching: find.byType(AbListRow))
+        .first;
+
+    // Today's tappable height: the icon-button box plus the sm padding on each
+    // side. A phone row may exceed it but never fall under it.
+    double legacyHeight(double scale) => 24 * scale + 12;
+
+    for (final mobile in [true, false]) {
+      for (final scale in const [1.0, 1.5, 2.0]) {
+        testWidgets(
+          '${mobile ? 'mobile' : 'desktop'} @$scale: tappable height and pitch',
+          (tester) async {
+            await _onPlatform(
+              mobile ? TargetPlatform.android : TargetPlatform.windows,
+              () async {
+                _useTallView(tester);
+                await _seed(stores);
+                await _pumpDrawer(tester, stores: stores, textScale: scale);
+
+                final legacy = legacyHeight(scale);
+                final expected = mobile ? (legacy > 44.0 ? legacy : 44.0) : legacy;
+                final rows = <String, Finder>{
+                  'band': rowBox(_machineName),
+                  'project': rowBox(_warmName),
+                  'bare project': rowBox(_bareName),
+                  'advertised': rowBox(_advertisedName),
+                };
+                for (final e in rows.entries) {
+                  expect(
+                    // The row's box includes its 2+2 vertical margin.
+                    tester.getSize(e.value).height - 4,
+                    closeTo(expected, 0.01),
+                    reason: '${e.key} row height',
+                  );
+                }
+                // Session rows carry their own 1px padding and margin.
+                final sessionLegacy = 24 * scale + 2;
+                final sessionExpected = mobile
+                    ? (sessionLegacy > 44.0 ? sessionLegacy : 44.0)
+                    : sessionLegacy;
+                expect(
+                  tester
+                      .getSize(
+                        find
+                            .descendant(
+                              of: find.byType(SessionRow),
+                              matching: find.byType(AbListRow),
+                            )
+                            .first,
+                      )
+                      .height - 2, // its 1+1 vertical margin
+                  closeTo(sessionExpected, 0.01),
+                  reason: 'session row height',
+                );
+                if (scale == 1.0) {
+                  expect(expected, mobile ? 44.0 : 36.0);
+                }
+
+                // A machine's advertised project sits directly under its
+                // band, so the distance between their tops is the pitch a
+                // list sees: tappable height + the 2+2 margin.
+                final bandTop = tester.getTopLeft(rowBox(_machineName)).dy;
+                final advertisedTop = tester
+                    .getTopLeft(rowBox(_advertisedName))
+                    .dy;
+                expect(advertisedTop - bandTop, closeTo(expected + 4, 0.01));
+
+                await tester.pumpWidget(const SizedBox());
+              },
+            );
+          },
+        );
+      }
+
+      testWidgets(
+        '${mobile ? 'mobile' : 'desktop'}: the rail x is where the gutter '
+        'and the cell footprint put it',
+        (tester) async {
+          await _onPlatform(
+            mobile ? TargetPlatform.android : TargetPlatform.windows,
+            () async {
+              _useTallView(tester);
+              await _seed(stores);
+              await _pumpDrawer(tester, stores: stores);
+
+              final context = tester.element(find.byType(ProjectsDrawer));
+              final drawerRight = tester
+                  .getRect(find.byType(ProjectsDrawer))
+                  .right;
+              final expectedX =
+                  drawerRight -
+                  1 - // the drawer's own right border
+                  AbTokens.drawerGutter -
+                  AbIconButton.footprintWidth(context) / 2;
+              expect(_railX(tester), closeTo(expectedX, _railEpsilon));
+
+              await hoverRow(tester, find.text(_bareName));
+              expect(
+                tester.getCenter(_actionsFor(_bareName)).dx,
+                closeTo(expectedX, _railEpsilon),
+              );
+              await tester.pumpWidget(const SizedBox());
+            },
+          );
+        },
+      );
+    }
+
+    for (final mobile in [true, false]) {
+      testWidgets(
+        '${mobile ? 'mobile' : 'desktop'}: the retry hint is '
+        '${mobile ? 'a 44 target' : 'unchanged'}',
+        (tester) async {
+          await _onPlatform(
+            mobile ? TargetPlatform.android : TargetPlatform.windows,
+            () async {
+              _useTallView(tester);
+              await _seed(stores);
+              await _pumpDrawer(
+                tester,
+                stores: stores,
+                extraOverrides: [
+                  drawerProjectSessionsProvider(
+                    '$_machineUuid.$_advertisedProjectId',
+                  ).overrideWith((_) async => throw StateError('offline')),
+                ],
+              );
+              await tester.tap(find.text(_advertisedName));
+              await tester.pumpAndSettle();
+
+              final hint = find.ancestor(
+                of: find.text('Could not load sessions — tap to retry.'),
+                matching: find.byType(GestureDetector),
+              );
+              // The drawer is narrow enough to wrap the sentence, so height
+              // alone could pass without the floor: assert the floor itself.
+              final floors = find.descendant(
+                of: hint.first,
+                matching: find.byWidgetPredicate(
+                  (w) =>
+                      w is ConstrainedBox &&
+                      w.constraints.minHeight == AbTokens.rowHeightLg,
+                ),
+              );
+              if (mobile) {
+                expect(floors, findsOneWidget);
+                expect(
+                  tester.getSize(hint.first).height,
+                  greaterThanOrEqualTo(AbTokens.rowHeightLg),
+                );
+              } else {
+                expect(floors, findsNothing);
+              }
+              await tester.pumpWidget(const SizedBox());
+            },
+          );
+        },
+      );
+    }
   });
 }

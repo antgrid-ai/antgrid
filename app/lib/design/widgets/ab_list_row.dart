@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../utils/platform_utils.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
@@ -43,7 +46,16 @@ class AbRowAction {
 /// mounted and unmounted freely. An enum, not a `double`: the value is
 /// scaler-dependent, so any literal a caller could pass is right at exactly one
 /// UI Size.
-enum AbRowContentFloor { none, iconButton }
+///
+/// [touchRow] is [iconButton] on a mouse platform. On a phone or tablet it
+/// instead makes the whole row at least [AbTokens.rowHeightLg] tall (Apple's
+/// 44pt tap target) and never shorter than [iconButton] would have made it at
+/// the same text scale; the vertical padding is folded into that height so the
+/// row's box, not its content, is what reaches 44. That padding is dropped
+/// for good on a phone, so use it only for single-line rows whose content fits
+/// the floor: a taller one (a subtitle, a wrapping title) measures exactly its
+/// content there.
+enum AbRowContentFloor { none, iconButton, touchRow }
 
 /// Canonical list row: optional leading, title, optional subtitle,
 /// optional trailing actions or arbitrary trailing widget.
@@ -135,6 +147,25 @@ class AbListRow extends StatefulWidget {
     forceStrutHeight: true,
   );
 
+  static double _densityPadding(AbRowDensity density) => switch (density) {
+    AbRowDensity.sm => AbTokens.space6,
+    AbRowDensity.md => AbTokens.space8,
+    AbRowDensity.lg => AbTokens.space10,
+  };
+
+  /// Content height of a [AbRowContentFloor.touchRow] row on a touch platform,
+  /// for a caller that must fill it (a trailing control sized to the row).
+  /// [verticalPadding] is the row's own `verticalPadding` override, if any.
+  static double touchRowContentExtent(
+    BuildContext context, {
+    AbRowDensity density = AbRowDensity.md,
+    double? verticalPadding,
+  }) => math.max(
+    AbTokens.rowHeightLg,
+    AbIconButton.boxExtent(context) +
+        2 * (verticalPadding ?? _densityPadding(density)),
+  );
+
   /// Overrides [leadingGap] for this row. For a leading that is a dot rather
   /// than a glyph, the default gap is measured against a slot the dot doesn't
   /// fill, so the text reads further away than it looks — see
@@ -197,14 +228,14 @@ class _AbListRowState extends State<AbListRow> {
   bool _focused = false;
   bool _hovered = false;
 
+  bool get _touchRow =>
+      widget.contentFloor == AbRowContentFloor.touchRow && isMobilePlatform;
+
   EdgeInsets get _padding {
-    final v =
-        widget.verticalPadding ??
-        switch (widget.density) {
-          AbRowDensity.sm => AbTokens.space6,
-          AbRowDensity.md => AbTokens.space8,
-          AbRowDensity.lg => AbTokens.space10,
-        };
+    final v = _touchRow
+        ? 0.0
+        : widget.verticalPadding ??
+              AbListRow._densityPadding(widget.density);
     return EdgeInsets.symmetric(
       horizontal: widget.horizontalPadding ?? AbTokens.space12,
       vertical: v,
@@ -320,7 +351,18 @@ class _AbListRowState extends State<AbListRow> {
       child: AbCompactTapTargets(
         child: switch (widget.contentFloor) {
           AbRowContentFloor.none => rowChild,
-          AbRowContentFloor.iconButton => ConstrainedBox(
+          AbRowContentFloor.touchRow when _touchRow => ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: AbListRow.touchRowContentExtent(
+                context,
+                density: widget.density,
+                verticalPadding: widget.verticalPadding,
+              ),
+            ),
+            child: rowChild,
+          ),
+          AbRowContentFloor.iconButton || AbRowContentFloor.touchRow =>
+            ConstrainedBox(
             constraints: BoxConstraints(
               minHeight: AbIconButton.boxExtent(context),
             ),

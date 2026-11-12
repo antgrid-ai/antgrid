@@ -1,5 +1,6 @@
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -131,6 +132,41 @@ void main() {
 
       expect(natural, greaterThan(AbTokens.iconButtonBox + _smPadding));
       expect(floored, closeTo(natural, 0.01));
+    });
+
+    testWidgets('touchRow is 44 tall on mobile, iconButton-sized on desktop', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        expect(
+          await _rowHeight(tester, floor: AbRowContentFloor.touchRow),
+          closeTo(AbTokens.rowHeightLg, 0.01),
+        );
+        // Never under what iconButton gave at the same scale: 24 * 2 + 12.
+        expect(
+          await _rowHeight(
+            tester,
+            floor: AbRowContentFloor.touchRow,
+            scale: 2.0,
+          ),
+          closeTo(60, 0.01),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('touchRow on desktop is exactly iconButton', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        expect(
+          await _rowHeight(tester, floor: AbRowContentFloor.touchRow),
+          closeTo(AbTokens.iconButtonBox + _smPadding, 0.01),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
 
     testWidgets('the floor tracks the text scaler', (tester) async {
