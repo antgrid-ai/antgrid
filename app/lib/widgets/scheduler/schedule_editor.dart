@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -60,6 +61,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       _clock;
   bool _syncingParts = false;
   final _promptFocus = FocusNode();
+  final _formScroll = ScrollController();
+  final _formViewport = GlobalKey();
+
+  /// Whether the trackpad gesture in progress began outside the form and so
+  /// is ours to forward; one that began over the form is the form's own.
+  bool _forwardPan = false;
   final _cronFocus = FocusNode();
   late SchedulerDraft _draft;
   late String _project,
@@ -300,6 +307,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     }
     _promptFocus.dispose();
     _cronFocus.dispose();
+    _formScroll.dispose();
     super.dispose();
   }
 
@@ -942,11 +950,42 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     ]);
   }
 
+  void _scrollForm(double delta) {
+    if (_formScroll.hasClients) _formScroll.position.pointerScroll(delta);
+  }
+
+  /// A wheel over the pinned summary or the empty pane beside it scrolls the
+  /// form. The resolver hands the event to the deepest scrollable that wants
+  /// it, so a wheel over the form, or over a summary tall enough to scroll,
+  /// never reaches this.
+  void _wheelAnywhere(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    GestureBinding.instance.pointerSignalResolver.register(
+      event,
+      (e) => _scrollForm((e as PointerScrollEvent).scrollDelta.dy),
+    );
+  }
+
+  bool _overForm(Offset global) {
+    final box = _formViewport.currentContext?.findRenderObject();
+    return box is RenderBox &&
+        box.hasSize &&
+        (box.localToGlobal(Offset.zero) & box.size).contains(global);
+  }
+
   /// [inset] is the form's own horizontal padding, so the breadcrumb and
   /// title share the form's left edge.
   Widget _header(double inset) {
     final t = _t;
     final name = _name.text.trim();
+    // Small, so it is no taller than a compact breadcrumb's line of text.
+    final draftTag = _draft.dirty
+        ? const CarbonTag(
+            label: 'Unsaved draft',
+            color: CarbonTagColor.blue,
+            size: CarbonTagSize.small,
+          )
+        : null;
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
@@ -962,28 +1001,27 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
           crossAxisAlignment: CrossAxisAlignment.start,
           spacing: CarbonSpacing.spacing03,
           children: [
-            // Wraps rather than shares a row: at large text the breadcrumb
-            // and the draft tag together exceed a phone's width.
-            if (widget.showBreadcrumb || _draft.dirty)
+            // The draft tag rides a row that is there anyway — beside the
+            // breadcrumb, or beside the title when there is none — so typing
+            // the first character never grows the header and shoves the form
+            // down under the cursor. It wraps rather than shares the
+            // breadcrumb's row because at large text the two together exceed
+            // a phone's width.
+            if (widget.showBreadcrumb)
               Wrap(
                 spacing: CarbonSpacing.spacing04,
                 runSpacing: CarbonSpacing.spacing03,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  if (widget.showBreadcrumb)
-                    CarbonBreadcrumb(
-                      items: [
-                        CarbonBreadcrumbItem(
-                          label: 'Scheduler',
-                          onPressed: _saving ? null : widget.onClose,
-                        ),
-                      ],
-                    ),
-                  if (_draft.dirty)
-                    const CarbonTag(
-                      label: 'Unsaved draft',
-                      color: CarbonTagColor.blue,
-                    ),
+                  CarbonBreadcrumb(
+                    items: [
+                      CarbonBreadcrumbItem(
+                        label: 'Scheduler',
+                        onPressed: _saving ? null : widget.onClose,
+                      ),
+                    ],
+                  ),
+                  ?draftTag,
                 ],
               ),
             Row(
@@ -999,6 +1037,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                     ),
                   ),
                 ),
+                if (!widget.showBreadcrumb) ?draftTag,
                 CarbonToggle(
                   value: _enabled,
                   semanticLabel: 'Active',
@@ -1502,48 +1541,69 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                       wide ? CarbonSpacing.spacing06 : CarbonSpacing.spacing05,
                     ),
                     Expanded(
+                      // The summary stays pinned while the form scrolls
+                      // beside it, and the wheel or a trackpad anywhere in
+                      // the pane (over the summary or the empty space right
+                      // of it) scrolls the form, so nothing outside the form
+                      // feels dead.
                       child: wide
-                          ? Align(
-                              alignment: Alignment.topLeft,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                spacing: CarbonSpacing.spacing06,
-                                children: [
-                                  Flexible(
-                                    child: ConstrainedBox(
-                                      constraints: const BoxConstraints(
-                                        maxWidth: CarbonSpacing.spacing06 * 31,
+                          ? Listener(
+                              behavior: HitTestBehavior.opaque,
+                              onPointerSignal: _wheelAnywhere,
+                              onPointerPanZoomStart: (e) =>
+                                  _forwardPan = !_overForm(e.position),
+                              onPointerPanZoomUpdate: (e) {
+                                if (_forwardPan) _scrollForm(-e.panDelta.dy);
+                              },
+                              onPointerPanZoomEnd: (_) => _forwardPan = false,
+                              child: Align(
+                                alignment: Alignment.topLeft,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  spacing: CarbonSpacing.spacing06,
+                                  children: [
+                                    Flexible(
+                                      child: ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                          maxWidth:
+                                              CarbonSpacing.spacing06 * 31,
+                                        ),
+                                        child: SingleChildScrollView(
+                                          key: _formViewport,
+                                          controller: _formScroll,
+                                          padding: const EdgeInsets.fromLTRB(
+                                            CarbonSpacing.spacing06,
+                                            CarbonSpacing.spacing06,
+                                            0,
+                                            CarbonSpacing.spacing06,
+                                          ),
+                                          child: form,
+                                        ),
                                       ),
+                                    ),
+                                    SizedBox(
+                                      width: CarbonSpacing.spacing06 * 16,
+                                      // Scrolls only in a window too short
+                                      // for it; otherwise it lets the wheel
+                                      // through to the form.
                                       child: SingleChildScrollView(
                                         padding: const EdgeInsets.fromLTRB(
-                                          CarbonSpacing.spacing06,
-                                          CarbonSpacing.spacing06,
                                           0,
                                           CarbonSpacing.spacing06,
+                                          CarbonSpacing.spacing06,
+                                          CarbonSpacing.spacing06,
                                         ),
-                                        child: form,
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.stretch,
+                                          spacing: CarbonSpacing.spacing04,
+                                          children: [summary, ?nextRuns],
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                  SizedBox(
-                                    width: CarbonSpacing.spacing06 * 16,
-                                    child: SingleChildScrollView(
-                                      padding: const EdgeInsets.fromLTRB(
-                                        0,
-                                        CarbonSpacing.spacing06,
-                                        CarbonSpacing.spacing06,
-                                        CarbonSpacing.spacing06,
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.stretch,
-                                        spacing: CarbonSpacing.spacing04,
-                                        children: [summary, ?nextRuns],
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             )
                           : SingleChildScrollView(

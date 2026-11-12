@@ -10,6 +10,7 @@ import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -55,6 +56,7 @@ Future<SchedulerSnapshot> pumpEditor(
   bool deleted = false,
   VoidCallback? onClose,
   VoidCallback? onSaved,
+  bool showBreadcrumb = true,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -95,6 +97,7 @@ Future<SchedulerSnapshot> pumpEditor(
             schedule: schedule,
             onClose: onClose ?? () {},
             onSaved: onSaved ?? () {},
+            showBreadcrumb: showBreadcrumb,
           ),
         ),
       ),
@@ -180,6 +183,97 @@ void main() {
       );
     },
   );
+
+  group('a dirty draft does not grow the header', () {
+    for (final (platform, showBreadcrumb) in [
+      (TargetPlatform.windows, true),
+      (TargetPlatform.windows, false),
+      (TargetPlatform.android, true),
+    ]) {
+      platformTest(
+        '${platform.name}, breadcrumb ${showBreadcrumb ? 'shown' : 'hidden'}',
+        platform,
+        (tester) async {
+          await pumpEditor(tester, Host(), showBreadcrumb: showBreadcrumb);
+          final body = find
+              .descendant(
+                of: find.byType(ScheduleEditor),
+                matching: find.byType(SingleChildScrollView),
+              )
+              .first;
+          final before = tester.getTopLeft(body).dy;
+          await tester.enterText(nameInput, 'Changed');
+          await tester.pumpAndSettle();
+          expect(find.text('Unsaved draft'), findsOneWidget);
+          expect(
+            tester.getTopLeft(body).dy,
+            before,
+            reason: 'the form must not jump under the cursor on the first edit',
+          );
+        },
+      );
+    }
+  });
+
+  group('wide pane scrolling', () {
+    final summary = find.text('Summary');
+    for (final (where, at) in <(String, Offset Function(WidgetTester))>[
+      ('the empty space beside it', (tester) => const Offset(1580, 300)),
+      ('the summary', (tester) => tester.getCenter(summary)),
+    ]) {
+      platformTest(
+        'the wheel over $where scrolls the form and the summary stays put',
+        TargetPlatform.windows,
+        (tester) async {
+          await pumpEditor(
+            tester,
+            Host(),
+            size: const Size(1600, 800),
+            showBreadcrumb: false,
+          );
+          final form = tester.getTopLeft(nameInput).dy;
+          final pinned = tester.getTopLeft(summary).dy;
+          final pointer = TestPointer(1, PointerDeviceKind.mouse);
+          await tester.sendEventToBinding(pointer.hover(at(tester)));
+          await tester.sendEventToBinding(pointer.scroll(const Offset(0, 200)));
+          await tester.pumpAndSettle();
+          expect(tester.getTopLeft(nameInput).dy, lessThan(form));
+          expect(tester.getTopLeft(summary).dy, pinned);
+        },
+      );
+    }
+
+    platformTest(
+      'a trackpad swipe beside the form scrolls it exactly once',
+      TargetPlatform.windows,
+      (tester) async {
+        await pumpEditor(
+          tester,
+          Host(),
+          size: const Size(1600, 800),
+          showBreadcrumb: false,
+        );
+        Future<double> swipeAt(Offset at) async {
+          final before = tester.getTopLeft(nameInput).dy;
+          final pad = await tester.createGesture(
+            kind: PointerDeviceKind.trackpad,
+          );
+          await pad.panZoomStart(at);
+          await pad.panZoomUpdate(at, pan: const Offset(0, -60));
+          await pad.panZoomEnd();
+          await tester.pumpAndSettle();
+          return before - tester.getTopLeft(nameInput).dy;
+        }
+
+        expect(await swipeAt(const Offset(1580, 300)), closeTo(60, 1));
+        expect(
+          await swipeAt(tester.getCenter(nameInput)),
+          closeTo(60, 1),
+          reason: 'over the form only the form itself scrolls, not both',
+        );
+      },
+    );
+  });
 
   group('density', () {
     platformTest('desktop controls use the compact scale', TargetPlatform.windows, (
