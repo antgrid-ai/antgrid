@@ -1,5 +1,6 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -779,6 +780,30 @@ void main() {
         (box.decoration as BoxDecoration).color,
         CarbonThemeData().colors.backgroundInverse,
       );
+    });
+  });
+
+  group('disabled action', () {
+    testWidgets('a null onPressed disables the action', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _top(
+          const CarbonNotification(
+            kind: CarbonNotificationKind.info,
+            title: 'Update',
+            announce: false,
+            action: CarbonNotificationAction(label: 'Retry', onPressed: null),
+          ),
+        ),
+      );
+      final button = tester.widget<CarbonButton>(find.byType(CarbonButton));
+      expect(button.onPressed, isNull);
+      final node = tester.getSemantics(find.byType(CarbonButton));
+      expect(node.getSemanticsData().hasAction(SemanticsAction.tap), isFalse);
+      await tester.tap(find.text('Retry'), warnIfMissed: false);
+      expect(tester.takeException(), isNull);
+      handle.dispose();
     });
   });
 }

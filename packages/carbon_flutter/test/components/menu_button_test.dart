@@ -557,4 +557,22 @@ void main() {
       expect(item.right, closeTo(split.right, 1));
     });
   });
+
+  group('maxLines', () {
+    testWidgets('reaches the trigger button', (tester) async {
+      await _pump(
+        tester,
+        SizedBox(
+          width: 200,
+          child: CarbonMenuButton(
+            label: 'A rather long menu button label that must not wrap',
+            maxLines: 1,
+            entries: _entries(<String>[]),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(tester.widget<CarbonButton>(find.byType(CarbonButton)).maxLines, 1);
+    });
+  });
 }

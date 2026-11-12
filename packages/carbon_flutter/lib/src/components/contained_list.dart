@@ -393,9 +393,16 @@ class CarbonContainedListRow extends StatefulWidget {
     this.revealActionsOnHover = false,
     this.disabled = false,
     this.focusNode,
+    this.content,
   });
 
   final String title;
+
+  /// Arbitrary non-interactive content shown in place of the [title] and
+  /// [secondary] text; [secondary] is not shown alongside it. [title] stays required: it is still the row's
+  /// accessible name, and an activatable row hides the content from semantics.
+  /// Put controls in [actions], not here.
+  final Widget? content;
 
   /// A second line of supporting text; wraps.
   final String? secondary;
@@ -452,6 +459,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
     final selectable =
         widget.onSelectedChanged != null || widget.selected != null;
     final secondary = widget.secondary;
+    final hasContent = widget.content != null;
 
     // Hover and press belong to the content cell alone, as in Carbon, where
     // the actions are a separate grid cell; only the resting fill spans the row.
@@ -463,8 +471,12 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       padding: EdgeInsetsDirectional.only(
         start: CarbonSpacing.spacing05,
         end: CarbonSpacing.spacing03,
-        top: secondary == null ? CarbonSpacing.spacing02 : CarbonSpacing.spacing03,
-        bottom: secondary == null ? CarbonSpacing.spacing02 : CarbonSpacing.spacing03,
+        top: secondary == null || hasContent
+            ? CarbonSpacing.spacing02
+            : CarbonSpacing.spacing03,
+        bottom: secondary == null || hasContent
+            ? CarbonSpacing.spacing02
+            : CarbonSpacing.spacing03,
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -487,13 +499,18 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Text(
-                  widget.title,
-                  style: theme.typography.body.copyWith(
-                    color: disabled ? colors.textDisabled : colors.textPrimary,
+                if (widget.content != null)
+                  widget.content!
+                else
+                  Text(
+                    widget.title,
+                    style: theme.typography.body.copyWith(
+                      color: disabled
+                          ? colors.textDisabled
+                          : colors.textPrimary,
+                    ),
                   ),
-                ),
-                if (secondary != null)
+                if (secondary != null && widget.content == null)
                   Text(
                     secondary,
                     style: theme.typography.helper.copyWith(
@@ -515,7 +532,9 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
         onPressed: activate,
         focusNode: widget.focusNode,
         button: widget.onSelectedChanged == null,
-        label: secondary == null ? widget.title : '${widget.title}\n$secondary',
+        label: secondary == null || hasContent
+            ? widget.title
+            : '${widget.title}\n$secondary',
         selected: selectable ? selected : null,
         excludeChildSemantics: true,
         builder: (context, state, _) => CarbonFocusRing(
@@ -542,6 +561,10 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       target = MergeSemantics(
         child: Semantics(
           selected: selectable ? selected : null,
+          // Content is free-form, so the title names the row instead of
+          // whatever text the content happens to hold.
+          label: hasContent ? widget.title : null,
+          excludeSemantics: hasContent,
           child: ConstrainedBox(
             constraints: BoxConstraints(minHeight: theme.minTarget),
             child: Align(

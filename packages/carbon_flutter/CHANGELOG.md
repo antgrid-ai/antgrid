@@ -22,6 +22,7 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - `CarbonLicenses.register()` for the bundled font and icon notices.
 - Icons `branch`, `calendar`, `launch`, `menu`, `play` and `renew` join the
   bundled set.
+- Icons `idea` and `document` join the bundled set.
 
 ### Primitives
 
@@ -85,6 +86,13 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   success, info); notifications now draw their leading icon through it.
 - Button: `expanded` on `CarbonButton` and `CarbonButton.iconOnly` announces
   the expanded or collapsed state of a disclosure control.
+- Button: `maxLines` on `CarbonButton` and `CarbonMenuButton` clamps the label
+  with an ellipsis.
+- Contained list: `CarbonContainedListRow.content` shows free-form,
+  non-interactive content in place of the title and secondary text; `title`
+  remains the accessible name.
+- Notification: `CarbonNotificationAction.onPressed` may be null, which
+  disables the action.
 
 ### Interaction-state fixes
 

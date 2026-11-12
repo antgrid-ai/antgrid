@@ -87,6 +87,7 @@ class CarbonButton extends StatelessWidget {
     this.focusNode,
     this.autofocus = false,
     this.expanded,
+    this.maxLines,
   }) : iconSize = null,
        hoverFill = true,
        _iconOnly = false;
@@ -107,12 +108,17 @@ class CarbonButton extends StatelessWidget {
     this.hoverFill = true,
     this.expanded,
   }) : label = null,
+       maxLines = null,
        expand = false,
        minWidth = null,
        _iconOnly = true;
 
   /// The visible text; null for an icon-only button.
   final String? label;
+
+  /// Clamps the label to this many lines with an ellipsis. Null (the default)
+  /// lets the label wrap to whatever it needs. Ignored by the icon-only form.
+  final int? maxLines;
 
   /// For a button that discloses content: whether that content is showing.
   /// Null (the default) says nothing; true or false announces the expanded or
@@ -317,6 +323,8 @@ class CarbonButton extends StatelessWidget {
 
     final text = Text(
       label!,
+      maxLines: maxLines,
+      overflow: maxLines == null ? null : TextOverflow.ellipsis,
       style: theme.typography.control.copyWith(color: style.foreground),
     );
     final hasIcon = icon != null;

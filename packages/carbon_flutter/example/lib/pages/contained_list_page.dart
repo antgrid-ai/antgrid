@@ -72,6 +72,20 @@ class _ContainedListPageState extends State<ContainedListPage> {
                     ),
                   ],
                 ),
+                CarbonContainedListRow(
+                  title: 'Free-form content',
+                  leading: const CarbonIcon(CarbonIcons.document),
+                  onPressed: () => setState(() => _lastAction = 'open content'),
+                  content: Wrap(
+                    spacing: CarbonSpacing.spacing03,
+                    runSpacing: CarbonSpacing.spacing02,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: const [
+                      CarbonIcon(CarbonIcons.idea),
+                      Text('Content replaces the title and secondary text'),
+                    ],
+                  ),
+                ),
                 const CarbonContainedListRow(
                   title: 'Static row without activation',
                   secondary: 'Not focusable, not a button',

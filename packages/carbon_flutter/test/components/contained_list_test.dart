@@ -674,4 +674,116 @@ void main() {
       expect(node.hasFocus, isFalse);
     });
   });
+
+  group('content slot', () {
+    const body = Key('body');
+
+    Widget row({bool selected = false, bool withContent = true}) =>
+        CarbonContainedList(
+          label: 'Files',
+          children: [
+            CarbonContainedListRow(
+              title: 'Title text',
+              secondary: 'Secondary text',
+              selected: selected,
+              onPressed: () {},
+              content: withContent
+                  ? const SizedBox(key: body, height: 20, child: Text('Body text'))
+                  : null,
+            ),
+          ],
+        );
+
+    testWidgets('content replaces the title and secondary text', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, row());
+      expect(find.text('Body text'), findsOneWidget);
+      expect(find.text('Title text'), findsNothing);
+      expect(find.text('Secondary text'), findsNothing);
+    });
+
+    testWidgets('the title stays the accessible name', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, row());
+      final node = tester.getSemantics(
+        find.ancestor(of: find.byKey(body), matching: find.byType(CarbonInteraction)).first,
+      );
+      expect(node.label, 'Title text');
+      expect(find.bySemanticsLabel('Body text'), findsNothing);
+      handle.dispose();
+    });
+
+    testWidgets('a static row is named by its title too', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        const CarbonContainedList(
+          label: 'Files',
+          children: [
+            CarbonContainedListRow(title: 'Title text', content: Text('Body text')),
+          ],
+        ),
+      );
+      expect(find.bySemanticsLabel('Title text'), findsOneWidget);
+      expect(find.bySemanticsLabel('Body text'), findsNothing);
+      handle.dispose();
+    });
+
+    testWidgets('selected and hover fills match a row without content', (
+      tester,
+    ) async {
+      List<Color> fills() => tester
+          .widgetList<ColoredBox>(
+            find.descendant(
+              of: find.byType(CarbonContainedListRow),
+              matching: find.byType(ColoredBox),
+            ),
+          )
+          .map((b) => b.color)
+          .toList();
+
+      Future<List<List<Color>>> sample(bool withContent) async {
+        await pumpCarbon(tester, row(selected: true, withContent: withContent));
+        final rest = fills();
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        await mouse.moveTo(tester.getCenter(find.byType(CarbonContainedListRow)));
+        await tester.pump();
+        final hover = fills();
+        await mouse.removePointer();
+        await tester.pump();
+        return <List<Color>>[rest, hover];
+      }
+
+      final plain = await sample(false);
+      final custom = await sample(true);
+      expect(custom, plain);
+    });
+
+    testWidgets('no overflow at 320 wide with 2x text', (tester) async {
+      await pumpCarbon(
+        tester,
+        SizedBox(
+          width: 320,
+          child: CarbonContainedList(
+            label: 'Files',
+            children: [
+              CarbonContainedListRow(
+                title: 'Title text',
+                leading: const CarbonIcon(CarbonIcons.document),
+                content: const Text(
+                  'A long piece of free-form row content that has to wrap',
+                ),
+                onPressed: () {},
+              ),
+            ],
+          ),
+        ),
+        textScale: 2,
+        size: const Size(320, 600),
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
 }

@@ -37,6 +37,8 @@ enum CarbonIcons {
   close,
   /// Carbon `copy`.
   copy,
+  /// Carbon `document`.
+  document,
   /// Carbon `edit`.
   edit,
   /// Carbon `error`.
@@ -45,6 +47,8 @@ enum CarbonIcons {
   errorFilled,
   /// Carbon `filter`.
   filter,
+  /// Carbon `idea`.
+  idea,
   /// Carbon `information`.
   information,
   /// Carbon `information--filled`.
@@ -146,6 +150,9 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.copy: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M28,10V28H10V10H28m0-2H10a2,2,0,0,0-2,2V28a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10a2,2,0,0,0-2-2Z'), _CarbonIconPath('M4,18H2V4A2,2,0,0,1,4,2H18V4H4Z')],
   ),
+  CarbonIcons.document: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M25.7,9.3l-7-7C18.5,2.1,18.3,2,18,2H8C6.9,2,6,2.9,6,4v24c0,1.1,0.9,2,2,2h16c1.1,0,2-0.9,2-2V10C26,9.7,25.9,9.5,25.7,9.3 z M18,4.4l5.6,5.6H18V4.4z M24,28H8V4h8v6c0,1.1,0.9,2,2,2h6V28z'), _CarbonIconPath('M10 22H22V24H10z'), _CarbonIconPath('M10 16H22V18H10z')],
+  ),
   CarbonIcons.edit: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M2 26H30V28H2z'), _CarbonIconPath('M25.4,9c0.8-0.8,0.8-2,0-2.8c0,0,0,0,0,0l-3.6-3.6c-0.8-0.8-2-0.8-2.8,0c0,0,0,0,0,0l-15,15V24h6.4L25.4,9z M20.4,4L24,7.6 l-3,3L17.4,7L20.4,4z M6,22v-3.6l10-10l3.6,3.6l-10,10H6z')],
   ),
@@ -158,6 +165,9 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   ),
   CarbonIcons.filter: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M18,28H14a2,2,0,0,1-2-2V18.41L4.59,11A2,2,0,0,1,4,9.59V6A2,2,0,0,1,6,4H26a2,2,0,0,1,2,2V9.59A2,2,0,0,1,27.41,11L20,18.41V26A2,2,0,0,1,18,28ZM6,6V9.59l8,8V26h4V17.59l8-8V6Z')],
+  ),
+  CarbonIcons.idea: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M11 24H21V26H11z'), _CarbonIconPath('M13 28H19V30H13z'), _CarbonIconPath('M16,2A10,10,0,0,0,6,12a9.19,9.19,0,0,0,3.46,7.62c1,.93,1.54,1.46,1.54,2.38h2c0-1.84-1.11-2.87-2.19-3.86A7.2,7.2,0,0,1,8,12a8,8,0,0,1,16,0,7.2,7.2,0,0,1-2.82,6.14c-1.07,1-2.18,2-2.18,3.86h2c0-.92.53-1.45,1.54-2.39A9.18,9.18,0,0,0,26,12,10,10,0,0,0,16,2Z')],
   ),
   CarbonIcons.information: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M17 22 17 14 13 14 13 16 15 16 15 22 12 22 12 24 20 24 20 22 17 22z'), _CarbonIconPath('M16,8a1.5,1.5,0,1,0,1.5,1.5A1.5,1.5,0,0,0,16,8Z'), _CarbonIconPath('M16,30A14,14,0,1,1,30,16,14,14,0,0,1,16,30ZM16,4A12,12,0,1,0,28,16,12,12,0,0,0,16,4Z')],

@@ -192,6 +192,7 @@ class CarbonMenuButton extends StatelessWidget {
     this.onDismissed,
     this.onOpenChanged,
     this.semanticLabel,
+    this.maxLines,
   }) : assert(
          kind == CarbonButtonKind.primary ||
              kind == CarbonButtonKind.tertiary ||
@@ -222,6 +223,9 @@ class CarbonMenuButton extends StatelessWidget {
   /// The open menu's announced name; defaults to [label].
   final String? semanticLabel;
 
+  /// Clamps the trigger's label; see [CarbonButton.maxLines].
+  final int? maxLines;
+
   @override
   Widget build(BuildContext context) {
     return _MenuTrigger(
@@ -238,6 +242,7 @@ class CarbonMenuButton extends StatelessWidget {
         controls,
         CarbonButton(
           label: label,
+          maxLines: maxLines,
           kind: kind,
           size: size,
           // Carbon's 12rem floor on primary and tertiary triggers.

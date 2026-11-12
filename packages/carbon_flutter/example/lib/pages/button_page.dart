@@ -134,7 +134,8 @@ class ButtonPage extends StatelessWidget {
         GallerySection(
           title: 'Long labels and expansion',
           description:
-              'Labels wrap and the button grows. Expanded buttons put the '
+              'Labels wrap and the button grows, or clamp with maxLines. Expanded '
+              'buttons put the '
               'icon at the end edge in either direction.',
           children: [
             CarbonButton(
@@ -159,6 +160,30 @@ class ButtonPage extends StatelessWidget {
               kind: CarbonButtonKind.tertiary,
               expand: true,
               onPressed: () {},
+            ),
+            Wrap(
+              spacing: CarbonSpacing.spacing04,
+              runSpacing: CarbonSpacing.spacing03,
+              children: [
+                SizedBox(
+                  width: 200,
+                  child: CarbonButton(
+                    label: _longLabel,
+                    maxLines: 1,
+                    expand: true,
+                    onPressed: () {},
+                  ),
+                ),
+                SizedBox(
+                  width: 200,
+                  child: CarbonButton(
+                    label: _longLabel,
+                    maxLines: 2,
+                    kind: CarbonButtonKind.tertiary,
+                    onPressed: () {},
+                  ),
+                ),
+              ],
             ),
           ],
         ),

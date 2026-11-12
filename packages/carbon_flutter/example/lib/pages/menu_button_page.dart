@@ -74,6 +74,18 @@ class _MenuButtonPageState extends State<MenuButtonPage> {
                     entries: _entries(_report),
                   ),
                 ),
+                GalleryStateCell(
+                  'maxLines: 1',
+                  SizedBox(
+                    width: 200,
+                    child: CarbonMenuButton(
+                      label: 'Manage every connected workspace and its members',
+                      kind: CarbonButtonKind.tertiary,
+                      maxLines: 1,
+                      entries: _entries(_report),
+                    ),
+                  ),
+                ),
               ],
             ),
           ],

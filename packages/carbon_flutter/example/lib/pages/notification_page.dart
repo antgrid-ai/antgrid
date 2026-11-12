@@ -70,6 +70,16 @@ class NotificationPage extends StatelessWidget {
             ),
             const CarbonNotification(
               kind: CarbonNotificationKind.info,
+              title: 'Action unavailable',
+              subtitle: 'A null onPressed shows the action disabled.',
+              announce: false,
+              action: CarbonNotificationAction(
+                label: 'Retry',
+                onPressed: null,
+              ),
+            ),
+            const CarbonNotification(
+              kind: CarbonNotificationKind.info,
               title: 'No close button',
               subtitle: 'Without onClose the notification stays until the host removes it.',
               announce: false,

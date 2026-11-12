@@ -25,7 +25,8 @@ class CarbonNotificationAction {
   });
 
   final String label;
-  final VoidCallback onPressed;
+  /// Null renders the action disabled.
+  final VoidCallback? onPressed;
 
   /// Ghost (default) or tertiary.
   final CarbonButtonKind kind;

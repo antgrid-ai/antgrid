@@ -1,5 +1,6 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -825,6 +826,60 @@ void main() {
       final cancel = tester.getRect(find.byKey(const Key('cancel')));
       final ok = tester.getRect(find.byKey(const Key('ok')));
       expect(ok.left, cancel.right + 1);
+    });
+  });
+
+  group('maxLines', () {
+    int lines(WidgetTester tester) {
+      final text = tester.renderObject<RenderParagraph>(
+        find.descendant(of: find.byKey(_btn), matching: find.byType(RichText)).first,
+      );
+      final boxes = text.getBoxesForSelection(
+        TextSelection(
+          baseOffset: 0,
+          extentOffset: text.text.toPlainText().length,
+        ),
+      );
+      return boxes.map((b) => b.top.round()).toSet().length;
+    }
+
+    testWidgets('clamps a long label to one line with an ellipsis', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        _host(
+          CarbonButton(
+            key: _btn,
+            label: 'A rather long button label that must not wrap',
+            maxLines: 1,
+            onPressed: () {},
+          ),
+          width: 160,
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(lines(tester), 1);
+      final text = tester.widget<Text>(
+        find.descendant(of: find.byKey(_btn), matching: find.byType(Text)).first,
+      );
+      expect(text.overflow, TextOverflow.ellipsis);
+      expect(tester.getSize(find.byKey(_btn)).width, lessThanOrEqualTo(160));
+    });
+
+    testWidgets('default still wraps', (tester) async {
+      await pumpCarbon(
+        tester,
+        _host(
+          CarbonButton(
+            key: _btn,
+            label: 'A rather long button label that must wrap',
+            onPressed: () {},
+          ),
+          width: 160,
+        ),
+      );
+      expect(lines(tester), greaterThan(1));
     });
   });
 }
