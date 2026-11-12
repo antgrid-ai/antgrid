@@ -590,6 +590,22 @@ void main() {
       );
     }
 
+    testWidgets('a small tag drops its icon and pads like a plain tag', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        tag(
+          size: CarbonTagSize.small,
+          icon: const SizedBox(key: Key('icon'), width: 16, height: 16),
+        ),
+      );
+      expect(find.byKey(const Key('icon')), findsNothing);
+      final pill = tester.getRect(pillFinder());
+      final label = tester.getRect(find.text('Backend'));
+      expect(label.left - pill.left, 8);
+    });
+
     testWidgets('a tag is at least 32px wide', (tester) async {
       await pumpCarbon(tester, tag(label: 'x'));
       expect(tester.getSize(find.byKey(const Key('tag'))).width, 32);

@@ -78,7 +78,8 @@ class CarbonTag extends StatelessWidget {
   final CarbonTagColor color;
   final CarbonTagSize size;
 
-  /// Leading glyph, normally a 16px [CarbonIcon].
+  /// Leading glyph, normally a 16px [CarbonIcon]. A small tag does not draw
+  /// it, as in Carbon: the 16px glyph would fill the 18px pill edge to edge.
   final Widget? icon;
 
   /// Adds the remove action; called when the remove target is activated.
@@ -168,7 +169,8 @@ class CarbonTag extends StatelessWidget {
 
     final radius = BorderRadius.all(CarbonShape.pill);
     final style = theme.typography.label.copyWith(color: palette.foreground);
-    final hasIcon = isSelected || icon != null;
+    final leading = size == CarbonTagSize.small ? null : icon;
+    final hasIcon = isSelected || leading != null;
     final large = size == CarbonTagSize.large;
     final padEnd = large ? CarbonSpacing.spacing04 : CarbonSpacing.spacing03;
     final padStart = hasIcon
@@ -193,10 +195,10 @@ class CarbonTag extends StatelessWidget {
                   color: palette.foreground,
                 ),
                 const SizedBox(width: CarbonSpacing.spacing02),
-              ] else if (icon != null) ...[
+              ] else if (leading != null) ...[
                 IconTheme(
                   data: IconThemeData(color: palette.foreground, size: 16),
-                  child: icon!,
+                  child: leading,
                 ),
                 const SizedBox(width: CarbonSpacing.spacing02),
               ],

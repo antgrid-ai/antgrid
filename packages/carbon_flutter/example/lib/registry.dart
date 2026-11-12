@@ -13,6 +13,7 @@ import 'pages/data_table_page.dart';
 import 'pages/content_switcher_page.dart';
 import 'pages/dropdown_page.dart';
 import 'pages/form_page.dart';
+import 'pages/icon_indicator_page.dart';
 import 'pages/inline_loading_page.dart';
 import 'pages/link_page.dart';
 import 'pages/loading_page.dart';
@@ -225,6 +226,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Status icon',
     group: 'Components',
     builder: (_) => const StatusIconPage(),
+  ),
+  GalleryEntry(
+    id: 'icon-indicator',
+    title: 'Icon indicator',
+    group: 'Components',
+    builder: (_) => const IconIndicatorPage(),
   ),
   GalleryEntry(
     id: 'settings-form',

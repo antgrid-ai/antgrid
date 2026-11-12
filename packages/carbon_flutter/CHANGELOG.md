@@ -23,6 +23,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Icons `branch`, `calendar`, `launch`, `menu`, `play` and `renew` join the
   bundled set.
 - Icons `idea` and `document` join the bundled set.
+- Icons `circleDash`, `inProgress`, `incomplete`, `pendingFilled`,
+  `undefinedFilled`, `unknownFilled`, `warningAltInvertedFilled` and
+  `warningSquareFilled` join the bundled set.
 
 ### Primitives
 
@@ -84,6 +87,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   rather than buttons.
 - Status icon: `CarbonStatusIcon` and `CarbonStatusKind` (error, warning,
   success, info); notifications now draw their leading icon through it.
+- Icon indicator: `CarbonIconIndicator` and `CarbonIconIndicatorKind`, Carbon's
+  twelve status glyphs at one size with a secondary label, or icon-only with
+  the label as a tooltip.
 - Button: `expanded` on `CarbonButton` and `CarbonButton.iconOnly` announces
   the expanded or collapsed state of a disclosure control.
 - Button: `maxLines` on `CarbonButton` and `CarbonMenuButton` clamps the label
@@ -164,6 +170,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - The read-only toggle keeps its full-size handle, a disabled or read-only
   checkbox or group shows its helper text instead of the error, and the close
   button of a high-contrast tag focuses with `focus-inverse`.
+- A small tag no longer draws its custom icon, as in Carbon, where the 16 px
+  glyph filled the 18 px pill and met its border.
 
 ### Gallery
 
