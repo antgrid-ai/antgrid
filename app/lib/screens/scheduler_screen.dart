@@ -934,11 +934,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     return [
       ?(mode == null ? null : CarbonTag(label: mode, size: CarbonTagSize.small)),
       if (s.approvalPolicy == 'bypass')
-        const CarbonTag(
-          label: 'Bypass',
-          color: CarbonTagColor.red,
-          size: CarbonTagSize.small,
-        ),
+        const CarbonTag(label: 'Bypass', size: CarbonTagSize.small),
       if (s.workspace == 'worktree' && s.baseBranch != null)
         CarbonTag(
           label: s.baseBranch!,
