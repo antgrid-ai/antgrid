@@ -24,23 +24,35 @@ Color schedulerAttentionTextColor(CarbonThemeData t) =>
     ? t.colors.supportWarning
     : t.colors.textPrimary;
 
-enum _Shape { attention, error, filled, hollow }
+/// Carbon icon-indicator status for a run outcome.
+CarbonIconIndicatorKind schedulerRunIndicator(String status, {String? trigger}) {
+  // A missed record never ran, the same as a skipped one.
+  if (trigger == 'missed') return CarbonIconIndicatorKind.notStarted;
+  return switch (status) {
+    'preparing' || 'running' => CarbonIconIndicatorKind.inProgress,
+    'needs-input' => CarbonIconIndicatorKind.cautionMinor,
+    'completed' => CarbonIconIndicatorKind.succeeded,
+    'failed' => CarbonIconIndicatorKind.failed,
+    'interrupted' => CarbonIconIndicatorKind.incomplete,
+    'skipped' => CarbonIconIndicatorKind.notStarted,
+    _ => CarbonIconIndicatorKind.unknown,
+  };
+}
 
-/// The state glyph beside a schedule or run: a Carbon status icon where the
-/// state needs a person, a plain dot everywhere else.
+/// The state glyph beside a schedule or run: Carbon's icon indicator without
+/// its visible label, so every state is the same size and shape family.
 ///
-/// Every glyph shares one 16px box so the text beside it never shifts as a row
-/// changes state. Running is a static dot: a looping animation would keep
-/// widget tests from ever settling. Without a [semanticLabel] the glyph is
+/// The status word shows as a tooltip. Without a [semanticLabel] the glyph is
 /// decorative and belongs beside text that names the state.
 class SchedulerStatusGlyph extends StatelessWidget {
-  /// A run outcome, coloured by its [tone].
-  const SchedulerStatusGlyph.run(
-    SchedulerRunTone tone, {
+  /// A run outcome.
+  SchedulerStatusGlyph.run(
+    String status, {
     super.key,
+    String? trigger,
     this.semanticLabel,
-  }) : _tone = tone,
-       _resting = false;
+  }) : _kind = schedulerRunIndicator(status, trigger: trigger),
+       _word = schedulerRunStatusWord(status, trigger: trigger);
 
   /// A schedule row: [active] is its in-flight run, [resting] a paused or
   /// finished schedule, which outranks any run.
@@ -49,75 +61,36 @@ class SchedulerStatusGlyph extends StatelessWidget {
     required ScheduleRun? active,
     required bool resting,
     this.semanticLabel,
-  }) : _tone = switch (active?.status) {
-         'needs-input' => SchedulerRunTone.attention,
-         'running' || 'preparing' => SchedulerRunTone.active,
-         _ => SchedulerRunTone.muted,
-       },
-       _resting = resting;
+  }) : _kind = resting
+           ? CarbonIconIndicatorKind.notStarted
+           : switch (active?.status) {
+               'needs-input' => CarbonIconIndicatorKind.cautionMinor,
+               'running' || 'preparing' => CarbonIconIndicatorKind.inProgress,
+               _ => CarbonIconIndicatorKind.pending,
+             },
+       _word = resting
+           ? 'Not active'
+           : switch (active?.status) {
+               'needs-input' => 'Needs input',
+               'running' || 'preparing' => 'Running',
+               _ => 'Scheduled',
+             };
 
-  /// Side of the box every glyph occupies.
-  static const double extent = 16;
-  static const double _dot = 8;
+  /// The largest side a glyph takes: 20 under touch density, 16 compact.
+  static const double extent = 20;
 
-  final SchedulerRunTone _tone;
-  final bool _resting;
+  final CarbonIconIndicatorKind _kind;
+  final String _word;
   final String? semanticLabel;
-
-  _Shape get _shape {
-    if (_resting) return _Shape.hollow;
-    return switch (_tone) {
-      SchedulerRunTone.attention => _Shape.attention,
-      SchedulerRunTone.error => _Shape.error,
-      SchedulerRunTone.warning => _Shape.hollow,
-      _ => _Shape.filled,
-    };
-  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final shape = _shape;
-    final Widget glyph;
-    switch (shape) {
-      case _Shape.attention:
-        glyph = CarbonStatusIcon(
-          CarbonStatusKind.warning,
-          size: extent,
-          semanticLabel: semanticLabel,
-        );
-      case _Shape.error:
-        glyph = CarbonStatusIcon(
-          CarbonStatusKind.error,
-          size: extent,
-          semanticLabel: semanticLabel,
-        );
-      case _Shape.filled || _Shape.hollow:
-        final color = _resting
-            ? theme.colors.iconDisabled
-            : schedulerCarbonToneColor(theme, _tone);
-        final dot = Center(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: shape == _Shape.filled ? color : null,
-              border: shape == _Shape.hollow
-                  ? Border.all(color: color, width: 1.5)
-                  : null,
-            ),
-            child: const SizedBox.square(dimension: _dot),
-          ),
-        );
-        final label = semanticLabel;
-        glyph = label == null
-            ? ExcludeSemantics(child: dot)
-            : Semantics(
-                label: label,
-                image: true,
-                excludeSemantics: true,
-                child: dot,
-              );
-    }
-    return SizedBox.square(dimension: extent, child: Center(child: glyph));
+    final label = semanticLabel;
+    final glyph = CarbonIconIndicator(
+      kind: _kind,
+      label: label ?? _word,
+      compact: true,
+    );
+    return label == null ? ExcludeSemantics(child: glyph) : glyph;
   }
 }

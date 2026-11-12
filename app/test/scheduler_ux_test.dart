@@ -1706,6 +1706,60 @@ void main() {
     );
   });
 
+  testWidgets('run squares land on whole pixels from a half-pixel offset', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final runs = [
+      ScheduleRun.fromJson({
+        ...runRecord('done', 'completed', at: 0),
+        'trigger': 'cron',
+        'finishedAt': 100000,
+      }),
+      ScheduleRun.fromJson({
+        ...runRecord('gone', 'skipped', at: hour),
+        'trigger': 'missed',
+      }),
+    ];
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 0.25, top: 0.5),
+            child: SchedulerRunSquares(runs: runs),
+          ),
+        ),
+      ),
+    );
+    final squares = find.descendant(
+      of: find.byType(SchedulerRunSquares),
+      matching: find.byElementPredicate(
+        (e) =>
+            e is LeafRenderObjectElement &&
+            e.renderObject.runtimeType.toString() == '_RenderSquare',
+      ),
+    );
+    expect(squares, findsNWidgets(2));
+    // Each square sits 0.25 right and 0.5 down of a pixel; drawn from
+    // (-0.25, 0.5) it fills whole pixels at the full 9 px.
+    expect(
+      squares.first,
+      paints..rect(rect: const Rect.fromLTWH(-0.25, 0.5, 9, 9)),
+    );
+    // A missed run is a one-device-pixel outline on the same 9 px square.
+    expect(
+      squares.last,
+      paints
+        ..rect(rect: const Rect.fromLTWH(-0.25, 0.5, 9, 1))
+        ..rect(rect: const Rect.fromLTWH(-0.25, 8.5, 9, 1))
+        ..rect(rect: const Rect.fromLTWH(-0.25, 1.5, 1, 7))
+        ..rect(rect: const Rect.fromLTWH(7.75, 1.5, 1, 7)),
+    );
+  });
+
   schedulerTestWidgets('a waiting run says how long it has been waiting', (
     tester,
   ) async {
@@ -1935,7 +1989,9 @@ void main() {
         find.descendant(
           of: row,
           matching: find.byWidgetPredicate(
-            (w) => w is CarbonStatusIcon && w.kind == CarbonStatusKind.warning,
+            (w) =>
+                w is CarbonIconIndicator &&
+                w.kind == CarbonIconIndicatorKind.cautionMinor,
           ),
         ),
         findsOneWidget,
@@ -1973,7 +2029,11 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('scheduler-schedule-notes')),
-          matching: find.byType(CarbonStatusIcon),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is CarbonIconIndicator &&
+                w.kind == CarbonIconIndicatorKind.cautionMinor,
+          ),
         ),
         findsNothing,
       );
@@ -2154,6 +2214,59 @@ void main() {
     expect(tester.widget<CarbonButton>(details).expanded, isTrue);
     handle.dispose();
   });
+
+  schedulerTestWidgets(
+    'Runs rows: one glyph size, the agent named, Details beside the actions',
+    (tester) async {
+      sizeView(tester, const Size(1400, 950));
+      final host = Host()
+        ..runs = [
+          runRecord('ok', 'completed', at: nowMs() - hour),
+          runRecord('bad', 'failed', at: nowMs() - 2 * hour),
+          runRecord('cut', 'interrupted', at: nowMs() - 3 * hour),
+          runRecord('wait', 'needs-input', at: nowMs() - 4 * hour),
+          {
+            ...runRecord('late', 'completed', at: nowMs() - 5 * hour),
+            'trigger': 'catch-up',
+          },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      await tester.tap(tab('Runs'));
+      await tester.pumpAndSettle();
+
+      final glyphs = find.descendant(
+        of: find.byType(CarbonIconIndicator),
+        matching: find.byType(CarbonIcon),
+      );
+      expect(glyphs, findsNWidgets(5));
+      expect({
+        for (final e in glyphs.evaluate()) tester.getSize(find.byWidget(e.widget)),
+      }, hasLength(1));
+
+      final late = find.byKey(const ValueKey('scheduler-run-late'));
+      expect(
+        find.descendant(of: late, matching: find.textContaining('claude')),
+        findsOneWidget,
+        reason: 'the agent mark never stands alone',
+      );
+      final details = find.descendant(
+        of: late,
+        matching: find.widgetWithText(CarbonButton, 'Details'),
+      );
+      final status = find.descendant(
+        of: late,
+        matching: find.byType(CarbonIconIndicator),
+      );
+      expect(
+        tester.getRect(details).left,
+        greaterThan(tester.getRect(find.text('Duration').first).right),
+      );
+      expect(
+        tester.getCenter(details).dy,
+        moreOrLessEquals(tester.getCenter(status).dy, epsilon: 1),
+      );
+    },
+  );
 
   for (final mobile in [false, true]) {
     schedulerTestWidgets(

@@ -29,7 +29,8 @@ const double _statusColumn = 148;
 const double _timeColumn = 84;
 const double _triggerColumn = 112;
 const double _durationColumn = 96;
-const double _actionsColumn = 184;
+// Fits Stop with Open session, or Open session with Details, on one line.
+const double _actionsColumn = 304;
 const double _detailLabelWidth = 128;
 
 /// Runs of the schedules on one machine, grouped by day. Every time is shown
@@ -304,7 +305,9 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
   }
 
   String? _sub(ScheduleRun r) {
+    final schedule = _schedule(r);
     final parts = <String>[
+      if (schedule != null) widget.agentLabel(schedule.agentId),
       ?_project(r),
       if (_isCatchUp(r) && r.missedCount != null)
         '${schedulerMissedLabel(r.missedCount)} while closed'
@@ -315,42 +318,32 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
   }
 
   Widget _status(CarbonThemeData t, ScheduleRun r) {
-    final tone = schedulerRunTone(r.status, trigger: r.trigger);
-    final word = schedulerRunStatusWord(r.status, trigger: r.trigger);
-    final since = _when(r);
-    return Row(
-      spacing: CarbonSpacing.spacing03,
+    final indicator = CarbonIconIndicator(
+      kind: schedulerRunIndicator(r.status, trigger: r.trigger),
+      label: schedulerRunStatusWord(r.status, trigger: r.trigger),
+    );
+    if (r.status != 'needs-input') return indicator;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      spacing: CarbonSpacing.spacing01,
       children: [
-        // The word beside it names the state, so the glyph stays silent.
-        SchedulerStatusGlyph.run(tone),
-        Flexible(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                word,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: t.typography.heading.copyWith(
-                  color: t.colors.textPrimary,
-                ),
-              ),
-              if (r.status == 'needs-input')
-                Text(
-                  schedulerWaiting(since, widget.now),
-                  style: t.typography.helper.copyWith(
-                    color: t.colors.textSecondary,
-                  ),
-                ),
-            ],
+        indicator,
+        Padding(
+          // Under the label, past the glyph and its gap.
+          padding: EdgeInsetsDirectional.only(
+            start: t.iconSize + CarbonSpacing.spacing03,
+          ),
+          child: Text(
+            schedulerWaiting(_when(r), widget.now),
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
           ),
         ),
       ],
     );
   }
 
-  Widget _title(CarbonThemeData t, ScheduleRun r, {Widget? trailing}) {
+  Widget _title(CarbonThemeData t, ScheduleRun r) {
     final schedule = _schedule(r);
     final sub = _sub(r);
     return Column(
@@ -393,7 +386,6 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
                 ),
             ],
           ),
-        ?trailing,
       ],
     );
   }
@@ -425,7 +417,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     );
   }
 
-  Widget _actions(ScheduleRun r) {
+  Widget _actions(ScheduleRun r, {bool details = false}) {
     return Wrap(
       alignment: WrapAlignment.end,
       spacing: CarbonSpacing.spacing03,
@@ -451,6 +443,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
                 : CarbonButtonKind.ghost,
             icon: const CarbonIcon(CarbonIcons.launch),
           ),
+        if (details) _detailsToggle(r),
       ],
     );
   }
@@ -476,7 +469,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
       r.status == 'needs-input' ? '—' : schedulerDurationPadded(_elapsed(r));
 
   CarbonDataTableRow _tableRow(CarbonThemeData t, ScheduleRun r) {
-    final hasActions = r.active || r.sessionId != null;
+    final hasActions = r.active || r.sessionId != null || _isCatchUp(r);
     final open = _expanded.contains(r.id);
     return CarbonDataTableRow(
       key: ValueKey('scheduler-run-${r.id}'),
@@ -484,14 +477,17 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
       expansion: _isCatchUp(r) && open ? _details(t, r) : null,
       cells: [
         _status(t, r),
-        _title(t, r, trailing: _isCatchUp(r) ? _detailsToggle(r) : null),
+        _title(t, r),
         _time(t, r),
         Text(_trigger(r)),
         Text(
           _duration(r),
           style: t.typography.code.copyWith(color: t.colors.textSecondary),
         ),
-        if (hasActions) _actions(r) else const SizedBox.shrink(),
+        if (hasActions)
+          _actions(r, details: _isCatchUp(r))
+        else
+          const SizedBox.shrink(),
       ],
     );
   }
@@ -504,7 +500,6 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     final line = r.active
         ? schedulerActiveRunLine(r, widget.now)
         : schedulerRunStatusWord(r.status, trigger: r.trigger);
-    final tone = schedulerRunTone(r.status, trigger: r.trigger);
     final trigger = _trigger(r);
     return DecoratedBox(
       key: ValueKey('scheduler-run-${r.id}'),
@@ -529,7 +524,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
             Row(
               spacing: CarbonSpacing.spacing03,
               children: [
-                SchedulerStatusGlyph.run(tone),
+                SchedulerStatusGlyph.run(r.status, trigger: r.trigger),
                 Expanded(
                   child: Text(
                     line,

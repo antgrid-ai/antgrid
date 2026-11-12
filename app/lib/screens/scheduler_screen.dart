@@ -944,7 +944,6 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           label: s.baseBranch!,
           color: CarbonTagColor.outline,
           size: CarbonTagSize.small,
-          icon: const CarbonIcon(CarbonIcons.branch),
         ),
       if (_hasDraft(s))
         const CarbonTag(
@@ -1270,7 +1269,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           Row(
             spacing: CarbonSpacing.spacing04,
             children: [
-              const SchedulerStatusGlyph.run(SchedulerRunTone.attention),
+              SchedulerStatusGlyph.run(run.status, trigger: run.trigger),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
