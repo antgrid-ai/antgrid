@@ -1,3 +1,4 @@
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../foundations/icons.dart';
@@ -28,6 +29,7 @@ class _MenuTrigger extends StatefulWidget {
     required this.alignment,
     this.focusNode,
     this.onDismissed,
+    this.onOpenChanged,
     this.semanticLabel,
     this.enabled = true,
     this.decorate,
@@ -38,6 +40,7 @@ class _MenuTrigger extends StatefulWidget {
   final CarbonPopupAlignment alignment;
   final FocusNode? focusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
+  final ValueChanged<bool>? onOpenChanged;
   final String? semanticLabel;
 
   /// A disabled trigger closes its open menu: a dimmed control must not keep
@@ -55,6 +58,7 @@ class _MenuTrigger extends StatefulWidget {
 class _MenuTriggerState extends State<_MenuTrigger> {
   final CarbonPopupController _controller = CarbonPopupController();
   FocusNode? _ownedNode;
+  bool _reportedOpen = false;
   late final String _menuId = 'carbon-menu-$hashCode';
 
   FocusNode get _node => widget.focusNode ?? (_ownedNode ??= FocusNode());
@@ -80,6 +84,21 @@ class _MenuTriggerState extends State<_MenuTrigger> {
   }
 
   void _changed() {
+    final open = _controller.isOpen;
+    if (open != _reportedOpen) {
+      _reportedOpen = open;
+      final report = widget.onOpenChanged;
+      if (report != null) {
+        // A close forced from didUpdateWidget lands mid-build, where the
+        // owner's setState would assert; it hears about it after the frame.
+        if (SchedulerBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+          SchedulerBinding.instance.addPostFrameCallback((_) => report(open));
+        } else {
+          report(open);
+        }
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -136,6 +155,7 @@ class CarbonMenuButton extends StatelessWidget {
     this.alignment = CarbonPopupAlignment.start,
     this.focusNode,
     this.onDismissed,
+    this.onOpenChanged,
     this.semanticLabel,
   }) : assert(
          kind == CarbonButtonKind.primary ||
@@ -158,6 +178,12 @@ class CarbonMenuButton extends StatelessWidget {
   final FocusNode? focusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
 
+  /// Called with true when the menu opens and false when it closes, including
+  /// the close that precedes an item's callback. Not called if the trigger
+  /// unmounts while open. Lets an owner keep a hover-revealed trigger
+  /// mounted while the pointer is over the menu, which sits outside it.
+  final ValueChanged<bool>? onOpenChanged;
+
   /// The open menu's announced name; defaults to [label].
   final String? semanticLabel;
 
@@ -168,6 +194,7 @@ class CarbonMenuButton extends StatelessWidget {
       alignment: alignment,
       focusNode: focusNode,
       onDismissed: onDismissed,
+      onOpenChanged: onOpenChanged,
       semanticLabel: semanticLabel ?? label,
       enabled: enabled,
       builder: (context, open, toggle, node, controls) => _expandable(
@@ -203,6 +230,7 @@ class CarbonOverflowMenu extends StatelessWidget {
     this.alignment = CarbonPopupAlignment.end,
     this.focusNode,
     this.onDismissed,
+    this.onOpenChanged,
     this.semanticLabel,
     this.menuLabel,
   });
@@ -220,6 +248,12 @@ class CarbonOverflowMenu extends StatelessWidget {
   final FocusNode? focusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
 
+  /// Called with true when the menu opens and false when it closes, including
+  /// the close that precedes an item's callback. Not called if the trigger
+  /// unmounts while open. Lets an owner keep a hover-revealed trigger
+  /// mounted while the pointer is over the menu, which sits outside it.
+  final ValueChanged<bool>? onOpenChanged;
+
   /// The trigger's accessible name.
   final String? semanticLabel;
 
@@ -234,6 +268,7 @@ class CarbonOverflowMenu extends StatelessWidget {
       alignment: alignment,
       focusNode: focusNode,
       onDismissed: onDismissed,
+      onOpenChanged: onOpenChanged,
       semanticLabel: menuLabel ?? name,
       enabled: enabled,
       builder: (context, open, toggle, node, controls) => _expandable(
@@ -275,6 +310,7 @@ class CarbonSplitButton extends StatelessWidget {
     this.focusNode,
     this.triggerFocusNode,
     this.onDismissed,
+    this.onOpenChanged,
     this.menuTriggerLabel,
     this.menuLabel,
   }) : assert(
@@ -299,6 +335,12 @@ class CarbonSplitButton extends StatelessWidget {
   final FocusNode? triggerFocusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
 
+  /// Called with true when the menu opens and false when it closes, including
+  /// the close that precedes an item's callback. Not called if the trigger
+  /// unmounts while open. Lets an owner keep a hover-revealed trigger
+  /// mounted while the pointer is over the menu, which sits outside it.
+  final ValueChanged<bool>? onOpenChanged;
+
   /// The menu trigger's accessible name; the localized "Open menu" by default.
   final String? menuTriggerLabel;
 
@@ -315,6 +357,7 @@ class CarbonSplitButton extends StatelessWidget {
       alignment: alignment,
       focusNode: triggerFocusNode,
       onDismissed: onDismissed,
+      onOpenChanged: onOpenChanged,
       semanticLabel: menuLabel ?? label,
       enabled: menuEnabled,
       // Only the trigger anchors the menu: the action beside it is outside the

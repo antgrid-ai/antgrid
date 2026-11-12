@@ -54,6 +54,46 @@ void main() {
     expect(find.text('Rename'), findsNothing);
   });
 
+  testWidgets('onOpenChanged reports open, the close before an item callback, '
+      'and a close forced by disabling', (tester) async {
+    final events = <String>[];
+    final enabled = ValueNotifier<bool>(true);
+    addTearDown(enabled.dispose);
+    await pumpCarbon(
+      tester,
+      _pad(
+        ValueListenableBuilder<bool>(
+          valueListenable: enabled,
+          builder: (context, value, _) => CarbonOverflowMenu(
+            enabled: value,
+            onOpenChanged: (open) => events.add('open:$open'),
+            entries: <CarbonMenuEntry>[
+              CarbonMenuItem(
+                label: 'Forget',
+                onPressed: () => events.add('forget'),
+              ),
+            ],
+          ),
+        ),
+      ),
+      size: const Size(800, 600),
+    );
+    await tester.tap(find.byType(CarbonOverflowMenu));
+    await _settle(tester);
+    expect(events, <String>['open:true']);
+    await tester.tap(find.text('Forget'));
+    await _settle(tester);
+    expect(events, <String>['open:true', 'open:false', 'forget']);
+
+    events.clear();
+    await tester.tap(find.byType(CarbonOverflowMenu));
+    await _settle(tester);
+    enabled.value = false;
+    await _settle(tester);
+    expect(events, <String>['open:true', 'open:false']);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('disabling a trigger closes its open menu', (tester) async {
     final log = <String>[];
     final enabled = ValueNotifier<bool>(true);
