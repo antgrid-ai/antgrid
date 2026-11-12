@@ -79,6 +79,24 @@ void main() {
       expect(tester.getSize(find.byKey(_btn)), const Size(48, 48));
     });
 
+    testWidgets('extraSmall is 24 square in compact, floored to 48 on touch', (
+      tester,
+    ) async {
+      final harness = await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonOverflowMenu(
+            key: _btn,
+            size: CarbonButtonSize.extraSmall,
+            entries: const <CarbonMenuEntry>[CarbonMenuItem(label: 'Open')],
+          ),
+        ),
+      );
+      expect(tester.getSize(find.byKey(_btn)), const Size(24, 24));
+      await harness.setDensity(tester, CarbonDensity.touch);
+      expect(tester.getSize(find.byKey(_btn)), const Size(48, 48));
+    });
+
     testWidgets('large text grows a wrapped label instead of clipping', (
       tester,
     ) async {

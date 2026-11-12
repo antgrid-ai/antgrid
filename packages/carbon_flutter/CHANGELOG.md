@@ -26,7 +26,7 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 
 ### Components
 
-- Button: `CarbonButton` (seven kinds, icon-only with tooltip, four sizes,
+- Button: `CarbonButton` (seven kinds, icon-only with tooltip, five sizes,
   busy) and `CarbonButtonSet`.
 - Text input: `CarbonTextInput` with single-line, password and multiline
   variants, clear and reveal actions, and a counter.

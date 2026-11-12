@@ -40,6 +40,10 @@ enum CarbonButtonKind {
 /// Touch density never renders a button below 48 logical pixels whatever size
 /// is requested, and enlarged text grows a button past these heights.
 enum CarbonButtonSize {
+  /// Carbon's `xs`, for icon-only triggers in dense rows. Compact density
+  /// only: it is the one size allowed under the 32 compact target, and touch
+  /// density still floors it to 48.
+  extraSmall(CarbonSizes.xs),
   small(CarbonSizes.sm),
   medium(CarbonSizes.md),
   large(CarbonSizes.lg),
@@ -139,10 +143,10 @@ class CarbonButton extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final loc = CarbonLocalizations.of(context);
     final disabled = onPressed == null;
-    final height = math.max(
-      size?.height ?? theme.controlHeight,
-      theme.minTarget,
-    );
+    final extraSmall = size == CarbonButtonSize.extraSmall && !theme.isTouch;
+    final height = extraSmall
+        ? CarbonSizes.xs
+        : math.max(size?.height ?? theme.controlHeight, theme.minTarget);
     final name = semanticLabel ?? label ?? '';
 
     final button = CarbonInteraction(
@@ -186,11 +190,17 @@ class CarbonButton extends StatelessWidget {
                       ),
               ),
               child: Padding(
+                // The minimum height centres the content, so extra small
+                // needs no vertical padding to fit 24.
                 padding: EdgeInsets.symmetric(
-                  horizontal: _iconOnly
-                      ? CarbonSpacing.spacing03
-                      : CarbonSpacing.spacing05,
-                  vertical: CarbonSpacing.spacing02 + CarbonSpacing.spacing01,
+                  horizontal: switch ((_iconOnly, extraSmall)) {
+                    (true, true) => CarbonSpacing.spacing02,
+                    (true, false) || (false, true) => CarbonSpacing.spacing03,
+                    (false, false) => CarbonSpacing.spacing05,
+                  },
+                  vertical: extraSmall
+                      ? 0
+                      : CarbonSpacing.spacing02 + CarbonSpacing.spacing01,
                 ),
                 child: Align(
                   alignment: _iconOnly
