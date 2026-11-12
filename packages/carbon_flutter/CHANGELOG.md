@@ -85,8 +85,6 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Contained list rows hover and press on the content cell only, so hovering a
   trailing action leaves the content at rest, and the selection bar stays
   visible while a selected row is pressed.
-- A selected contained list row shows a check mark after its text, and every
-  row of the selection keeps room for it.
 - Notification actions hover and press with `notification-action-hover`
   (`background-inverse-hover` and `link-inverse` text in high contrast), and
   the high-contrast close icon is `icon-inverse`.
