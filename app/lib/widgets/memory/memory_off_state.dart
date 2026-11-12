@@ -1,11 +1,5 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
-
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_inline_banner.dart';
 
 class MemoryOffState extends StatelessWidget {
   const MemoryOffState({
@@ -31,72 +25,93 @@ class MemoryOffState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(AbTokens.space24),
+    final t = CarbonTheme.of(context);
+    // The scroll view fills the pane and the column centres inside it, so the
+    // wheel scrolls from anywhere rather than only over the text.
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        padding: const EdgeInsets.all(CarbonSpacing.spacing06),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              AbIcon(
-                AbIcons.lightbulb,
-                size: AbTokens.fontDisplaySm,
-                color: colors.textSecondary,
+          constraints: BoxConstraints(
+            minHeight: constraints.hasBoundedHeight
+                ? constraints.maxHeight - CarbonSpacing.spacing06 * 2
+                : 0,
+            minWidth: double.infinity,
+          ),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: CarbonSpacing.spacing06 * 22,
               ),
-              const SizedBox(height: AbTokens.space16),
-              Text(
-                'Let your agents remember what they learn',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXl,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: AbTokens.space16),
-              Text(
-                'With Memory on, a fix Codex worked out yesterday is there for Claude Code today. Agents save short notes about this repository as they work, and look them up when they need them.',
-                style: AbTokens.sansStyle(
-                  color: colors.textSecondary,
-                  height: 1.6,
-                ),
-              ),
-              const SizedBox(height: AbTokens.space16),
-              for (final bullet in _bullets)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: AbTokens.space6),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '–',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontMd,
-                          color: colors.textMuted,
-                        ),
-                      ),
-                      const SizedBox(width: AbTokens.space8),
-                      Expanded(
-                        child: Text(
-                          bullet,
-                          style: AbTokens.sansStyle(fontSize: AbTokens.fontMd),
-                        ),
-                      ),
-                    ],
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CarbonIcon(
+                    CarbonIcons.idea,
+                    size: CarbonSpacing.spacing07,
+                    color: t.colors.iconSecondary,
                   ),
-                ),
-              const SizedBox(height: AbTokens.space10),
-              if (error case final error?) ...[
-                AbInlineBanner(text: error, color: colors.error),
-                const SizedBox(height: AbTokens.space8),
-              ],
-              AbButton(
-                label: 'Turn on Memory',
-                variant: AbButtonVariant.primary,
-                onTap: busy ? null : onTurnOn,
+                  const SizedBox(height: CarbonSpacing.spacing05),
+                  Semantics(
+                    header: true,
+                    child: Text(
+                      'Let your agents remember what they learn',
+                      style: t.typography.headingLarge.copyWith(
+                        color: t.colors.textPrimary,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: CarbonSpacing.spacing05),
+                  Text(
+                    'With Memory on, a fix Codex worked out yesterday is there for Claude Code today. Agents save short notes about this repository as they work, and look them up when they need them.',
+                    style: t.typography.body.copyWith(
+                      color: t.colors.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(height: CarbonSpacing.spacing05),
+                  for (final bullet in _bullets)
+                    Padding(
+                      padding: const EdgeInsets.only(
+                        bottom: CarbonSpacing.spacing02,
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '–',
+                            style: t.typography.body.copyWith(
+                              color: t.colors.textSecondary,
+                            ),
+                          ),
+                          const SizedBox(width: CarbonSpacing.spacing03),
+                          Expanded(
+                            child: Text(
+                              bullet,
+                              style: t.typography.body.copyWith(
+                                color: t.colors.textPrimary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(height: CarbonSpacing.spacing04),
+                  if (error case final error?) ...[
+                    CarbonNotification(
+                      kind: CarbonNotificationKind.error,
+                      subtitle: error,
+                    ),
+                    const SizedBox(height: CarbonSpacing.spacing03),
+                  ],
+                  CarbonButton(
+                    label: 'Turn on Memory',
+                    busy: busy,
+                    onPressed: busy ? null : onTurnOn,
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),

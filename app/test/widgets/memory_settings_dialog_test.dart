@@ -1,8 +1,9 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/widgets/memory/memory_settings_dialog.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart' hide Fake;
@@ -34,7 +35,7 @@ Fake _fake({
     'memories': 1,
   };
 
-/// Mounts the dialog body directly, which is what the sheet hosts.
+/// Opens the dialog the way the screen does, from a context under the scope.
 Future<void> _mount(
   WidgetTester tester,
   Fake fake, {
@@ -51,14 +52,17 @@ Future<void> _mount(
       child: MaterialApp(
         theme: buildAbTheme(),
         builder: abToastHostBuilder,
-        home: Scaffold(
-          body: Center(
-            child: SizedBox(
-              width: 560,
-              child: MemorySettingsDialog(
-                target: _machine,
-                onExportAll: () async {},
-                machineName: machineName,
+        home: AbCarbonScope(
+          child: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => showMemorySettings(
+                  context,
+                  target: _machine,
+                  onExportAll: () async {},
+                  machineName: machineName,
+                ),
+                child: const Text('open'),
               ),
             ),
           ),
@@ -66,10 +70,17 @@ Future<void> _mount(
       ),
     ),
   );
+  await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
 }
 
 Iterable<Map<String, dynamic>> _settings(Fake fake) => fake.ops('settings');
+
+/// The toggle's own target: the label text is not one in Carbon.
+Finder _toggle(int index) => find.descendant(
+  of: find.byType(CarbonToggle).at(index),
+  matching: find.byType(CarbonInteraction),
+);
 
 void main() {
   testWidgets('the paused switch sends the machine-wide setting', (
@@ -78,7 +89,7 @@ void main() {
     final fake = _fake();
     await _mount(tester, fake);
     expect(find.text('Memory settings'), findsOneWidget);
-    await tester.tap(find.byType(AbSwitch).first);
+    await tester.tap(_toggle(0));
     await tester.pumpAndSettle();
     expect(_settings(fake).single, {'op': 'settings', 'paused': true});
   });
@@ -86,7 +97,7 @@ void main() {
   testWidgets('a project switch sends that project alone', (tester) async {
     final fake = _fake();
     await _mount(tester, fake);
-    await tester.tap(find.byType(AbSwitch).at(1));
+    await tester.tap(_toggle(1));
     await tester.pumpAndSettle();
     expect(_settings(fake).single, {
       'op': 'settings',
@@ -95,20 +106,17 @@ void main() {
     });
   });
 
-  testWidgets('tapping a row label toggles it as well', (tester) async {
-    final fake = _fake();
-    await _mount(tester, fake);
-    await tester.tap(find.text('antgrid'));
-    await tester.pumpAndSettle();
-    expect(_settings(fake).single, {
-      'op': 'settings',
-      'project_id': 'p1',
-      'project_paused': true,
-    });
-    fake.calls.clear();
-    await tester.tap(find.text('Let agents save memories'));
-    await tester.pumpAndSettle();
-    expect(_settings(fake).single, {'op': 'settings', 'paused': true});
+  testWidgets('the modal holds no Ab widget', (tester) async {
+    await _mount(tester, _fake());
+    final found = <String>[];
+    void visit(Element element) {
+      final name = element.widget.runtimeType.toString();
+      if (name.startsWith('Ab')) found.add(name);
+      element.visitChildren(visit);
+    }
+
+    tester.element(find.byType(CarbonModal)).visitChildren(visit);
+    expect(found, isEmpty);
   });
 
   testWidgets('a removed project is not listed', (tester) async {
@@ -121,7 +129,7 @@ void main() {
     await _mount(tester, fake);
     expect(find.text('antgrid'), findsOneWidget);
     expect(find.text('gone'), findsNothing);
-    expect(find.byType(AbSwitch), findsNWidgets(2));
+    expect(find.byType(CarbonToggle), findsNWidgets(2));
   });
 
   testWidgets('a paused machine locks every project switch off', (
@@ -131,16 +139,17 @@ void main() {
     await _mount(tester, fake);
     expect(find.text('Saving is paused for every project.'), findsOneWidget);
     expect(find.text('Paused'), findsOneWidget);
-    final machine = tester.widget<AbSwitch>(find.byType(AbSwitch).first);
-    final project = tester.widget<AbSwitch>(find.byType(AbSwitch).at(1));
+    final machine = tester.widget<CarbonToggle>(find.byType(CarbonToggle).first);
+    final project = tester.widget<CarbonToggle>(find.byType(CarbonToggle).at(1));
     expect(machine.value, isFalse);
     expect(machine.onChanged, isNotNull);
     expect(project.value, isFalse);
     expect(project.onChanged, isNull);
-    await tester.tap(find.text('antgrid'));
+    await tester.tap(_toggle(1));
     await tester.pumpAndSettle();
     expect(_settings(fake), isEmpty);
   });
+
 
   testWidgets('Turn off Memory asks first, then sends enabled false', (
     tester,
@@ -215,13 +224,14 @@ void main() {
         return null;
       };
     await _mount(tester, fake, machineName: 'Laptop');
-    await tester.tap(find.byType(AbSwitch).first);
+    await tester.tap(_toggle(0));
     await tester.pumpAndSettle();
     expect(
       find.textContaining('Remote access is off on Laptop'),
       findsOneWidget,
     );
   });
+
 
   testWidgets('a long project list scrolls and keeps the footer in view', (
     tester,
@@ -233,13 +243,9 @@ void main() {
           _project('p$i', label: 'Project number ${i.toString().padLeft(2, '0')}'),
       ],
     );
-    tester.view.physicalSize = size;
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    // The substituted test font roughly doubles label widths, so the footer
-    // buttons overflow sideways here and not on a device. Vertical overflow,
-    // which is what a long list would cause, still fails the test.
+    // The substituted test font roughly doubles label widths, so a row can
+    // overflow sideways here and not on a device. Vertical overflow, which is
+    // what a long list would cause, still fails the test.
     final onError = FlutterError.onError;
     final overflows = <String>[];
     FlutterError.onError = (details) {
@@ -249,31 +255,7 @@ void main() {
       onError?.call(details);
     };
     addTearDown(() => FlutterError.onError = onError);
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          memoryRequestProvider(_machine).overrideWithValue(fake.call),
-        ],
-        child: MaterialApp(
-          theme: buildAbTheme(),
-          builder: abToastHostBuilder,
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => showMemorySettings(
-                  context,
-                  target: _machine,
-                  onExportAll: () async {},
-                ),
-                child: const Text('open'),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
+    await _mount(tester, fake, size: size);
     expect(tester.takeException(), isNull);
     expect(overflows, isEmpty);
     for (final label in ['Export all memories', 'Turn off Memory']) {
@@ -281,6 +263,7 @@ void main() {
       expect(center.dy, inInclusiveRange(0, size.height));
     }
     final last = find.text('Project number 29');
+    // Starting off-screen is what proves the body scrolls rather than clips.
     expect(tester.getTopLeft(last).dy, greaterThan(size.height));
     await tester.ensureVisible(last);
     await tester.pumpAndSettle();

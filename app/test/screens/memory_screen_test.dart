@@ -1,8 +1,7 @@
 import 'dart:async';
 
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_search_field.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/account_machines.dart';
@@ -201,11 +200,17 @@ Future<void> mount(
   await tester.pumpAndSettle();
 }
 
-// AbSegmented uppercases its labels.
-Finder get earlierVersions => find.text('EARLIER VERSIONS');
+// The wide switcher and the compact tag both show this label as written.
+Finder get earlierVersions => find.text('Earlier versions');
+
+// byTooltip matches Material tooltips only; Carbon buttons carry their name
+// as a semantic label.
+Finder carbonButton(String semanticLabel) => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == semanticLabel,
+);
 
 Finder get searchInput => find.descendant(
-  of: find.byType(AbSearchField),
+  of: find.byType(CarbonSearch),
   matching: find.byType(EditableText),
 );
 
@@ -274,7 +279,7 @@ void main() {
     useNarrow(tester);
     await mount(tester, Fake(status: statusJson(enabled: false)));
     expect(find.text('Turn on Memory'), findsOneWidget);
-    expect(find.byTooltip('Memory settings'), findsNothing);
+    expect(carbonButton('Memory settings'), findsNothing);
   });
 
   // Memory is a surface beside the drawer; leaving it is a drawer choice.
@@ -282,9 +287,9 @@ void main() {
     testWidgets('the $name header offers no close or back', (tester) async {
       useLayout(tester);
       await mount(tester, Fake());
-      expect(find.byTooltip('Memory settings'), findsOneWidget);
-      expect(find.byTooltip('Close'), findsNothing);
-      expect(find.byTooltip('Back'), findsNothing);
+      expect(carbonButton('Memory settings'), findsOneWidget);
+      expect(carbonButton('Close'), findsNothing);
+      expect(carbonButton('Back'), findsNothing);
       tester.takeException();
     });
   }
@@ -347,8 +352,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Session progress'));
       await tester.pumpAndSettle();
-      // The substituted test font makes this label wider than the picker, and
-      // AbButton does not ellipsize it without wrapLabel. Real fonts fit.
+      // The substituted test font can make this label wider than the picker.
+      // Real fonts fit.
       tester.takeException();
       expect(fake.ops('list').last['memory_type'], 'task_state');
 
@@ -488,10 +493,9 @@ void main() {
       );
       expect(find.text("Search is off until it's rebuilt"), findsOneWidget);
       expect(
-        tester.widget<AbTextField>(find.byType(AbTextField)).enabled,
+        tester.widget<CarbonSearch>(find.byType(CarbonSearch)).enabled,
         false,
       );
-      expect(find.byType(AbSearchField), findsNothing);
       expect(find.text('Needs attention'), findsOneWidget);
       await tester.tap(find.text('Rebuild search'));
       await tester.pumpAndSettle();

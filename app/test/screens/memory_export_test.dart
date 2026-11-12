@@ -6,6 +6,7 @@ import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/screens/memory_screen.dart';
 import 'package:antgrid/widgets/file_download.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,15 +75,24 @@ Future<void> _mountExport(
   await tester.pumpAndSettle();
   switch (entry) {
     case _Entry.more:
-      await tester.tap(find.byTooltip('More actions'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is CarbonOverflowMenu && w.semanticLabel == 'More actions',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Export memories'));
     case _Entry.settings:
-      await tester.tap(find.byTooltip('Memory settings'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is CarbonButton && w.semanticLabel == 'Memory settings',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Export all memories'));
   }
-  await tester.pump();
+  // The menu or modal closes over a few frames before its action runs.
+  await tester.pumpAndSettle();
 }
 
 void main() {

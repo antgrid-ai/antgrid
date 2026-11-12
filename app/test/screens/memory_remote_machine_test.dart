@@ -3,9 +3,6 @@ import 'dart:async';
 import 'package:antgrid/demo/demo_identity.dart'
     show kDemoEntryLabel, kDemoMachineName;
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_inline_banner.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/account_agents.dart';
@@ -24,10 +21,11 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/memory_screen.dart';
 import 'package:antgrid/services/account_agents_api.dart' show InventoryAgent;
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/widgets/machine_selector_button.dart';
+import 'package:antgrid/widgets/carbon_machine_selector.dart';
 import 'package:antgrid/widgets/memory/memory_edit_form.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show CryptoService;
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -232,9 +230,9 @@ void main() {
     expect(find.text('Connect a machine to manage memories'), findsOneWidget);
     expect(find.text(kDemoEntryLabel), findsOneWidget);
     expect(rig.requests, isEmpty);
-    expect(find.byType(AbInlineBanner), findsNothing);
+    expect(find.byType(CarbonNotification), findsNothing);
     expect(find.byType(MemoryScreen), findsNothing);
-    expect(find.byType(MachineSelectorButton), findsNothing);
+    expect(find.byType(CarbonMachineSelector), findsNothing);
   }, variant: phones);
 
   testWidgets('a phone still loading its inventory shows a spinner only', (
@@ -243,7 +241,7 @@ void main() {
     final pending = Completer<List<InventoryAgent>>();
     await _mount(tester, pendingAccounts: pending.future);
     await tester.pump();
-    expect(find.byType(AbLoading), findsOneWidget);
+    expect(find.byType(CarbonLoading), findsOneWidget);
     expect(find.text('Connect a machine to manage memories'), findsNothing);
   }, variant: phones);
 
@@ -259,7 +257,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(_screen(tester).target.machineId, 'm2');
-    expect(find.widgetWithText(AbButton, 'Studio'), findsOneWidget);
+    expect(find.widgetWithText(CarbonMachineSelector, 'Studio'), findsOneWidget);
     expect(rig.container.read(machinePickProvider), 'm2');
   }, variant: phones);
 
@@ -302,7 +300,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(_screen(tester).initialProjectId, 'p1');
 
-    await tester.tap(find.widgetWithText(AbButton, 'Studio'));
+    await tester.tap(find.widgetWithText(CarbonMachineSelector, 'Studio'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Laptop'));
     await tester.pumpAndSettle();
@@ -332,7 +330,7 @@ void main() {
     await tester.pumpAndSettle();
     final first = tester.state(find.byType(MemoryScreen));
 
-    await tester.tap(find.widgetWithText(AbButton, 'Laptop'));
+    await tester.tap(find.widgetWithText(CarbonMachineSelector, 'Laptop'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Laptop').last);
     await tester.pumpAndSettle();
@@ -350,7 +348,7 @@ void main() {
       find.textContaining('Coupon codes are case-insensitive'),
       findsOneWidget,
     );
-    expect(find.widgetWithText(AbButton, kDemoMachineName), findsOneWidget);
+    expect(find.widgetWithText(CarbonMachineSelector, kDemoMachineName), findsOneWidget);
     expect(find.textContaining('unavailable'), findsNothing);
     expect(rig.container.exists(accountAgentsProvider), isFalse);
     expect(rig.requests, isEmpty);
@@ -411,7 +409,7 @@ void main() {
       find.textContaining('Remote access is off on Laptop'),
       findsOneWidget,
     );
-    expect(find.widgetWithText(AbButton, 'Retry'), findsOneWidget);
+    expect(find.widgetWithText(CarbonButton, 'Retry'), findsOneWidget);
     expect(find.text('Reconnect and retry'), findsNothing);
   }, variant: phones);
 
@@ -425,7 +423,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('A retained finding'));
     await tester.pumpAndSettle();
-    expect(find.byTooltip('Back to Memory'), findsOneWidget);
+    expect(find.byWidgetPredicate(
+        (w) => w is CarbonButton && w.semanticLabel == 'Back to Memory',
+      ), findsOneWidget);
     const banner =
         "Laptop is offline. Changes can't be saved until it reconnects.";
     expect(find.text(banner), findsNothing);
@@ -566,9 +566,9 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(_screen(tester).target.machineId, isNull);
-    expect(find.widgetWithText(AbButton, 'Local machine'), findsOneWidget);
+    expect(find.widgetWithText(CarbonMachineSelector, 'Local machine'), findsOneWidget);
 
-    await tester.tap(find.widgetWithText(AbButton, 'Local machine'));
+    await tester.tap(find.widgetWithText(CarbonMachineSelector, 'Local machine'));
     await tester.pumpAndSettle();
     expect(find.text('Laptop'), findsOneWidget);
     expect(find.text('Local machine'), findsNWidgets(2));

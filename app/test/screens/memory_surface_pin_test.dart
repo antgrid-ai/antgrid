@@ -1,7 +1,7 @@
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session_registry.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/widgets/carbon_machine_selector.dart';
 import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
@@ -66,9 +66,8 @@ Future<({ProviderContainer container, BuildContext context})> _mount(
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  // The substituted test font makes the compact picker labels wider than their
-  // box, and AbButton only ellipsizes with wrapLabel. This file pins machine
-  // demand, not geometry.
+  // The substituted test font can make the compact picker labels wider than
+  // their box. This file pins machine demand, not geometry.
   final onError = FlutterError.onError;
   FlutterError.onError = (details) {
     if (details.exception.toString().contains('overflowed')) return;
@@ -173,7 +172,7 @@ void main() {
     final h = await _mount(tester);
     openMemoryScreen(h.context, remote);
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(AbButton, 'Remote'));
+    await tester.tap(find.widgetWithText(CarbonMachineSelector, 'Remote'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Other'));
     await tester.pumpAndSettle();

@@ -1,24 +1,24 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_dialog.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_list_row.dart';
-import '../../design/widgets/ab_loading.dart';
-import '../../design/widgets/ab_scrollbar.dart';
-import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/agent_work_status.dart';
 import '../../models/memory.dart';
 import '../../providers/providers.dart';
 import '../../services/sessions_service.dart';
 import '../../util/detached.dart';
-import '../agent_work_status_dot.dart';
+
+/// [context] must sit under an `AbCarbonScope`: the modal route takes its theme
+/// and density from the presenting context.
+Future<void> showMemoryRestart(
+  BuildContext context, {
+  required MemoryTarget target,
+  required List<MemorySessionWithoutMemory> sessions,
+}) => showCarbonModal<void>(
+  context,
+  builder: (_) => MemoryRestartSheet(target: target, sessions: sessions),
+);
 
 /// Restarts sessions that were already running when Memory was turned on, which
 /// is the only way their agents gain it.
@@ -120,7 +120,6 @@ bool _isBusy(AgentWorkStatus? status) =>
 String _rowKey(MemorySessionWithoutMemory s) => '${s.projectId}/${s.sessionId}';
 
 class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
-  final _scroll = ScrollController();
   late final Set<String> _ticked = {
     for (final s in widget.sessions)
       if (s.workStatus == AgentWorkStatus.done ||
@@ -129,12 +128,6 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
   };
   final Map<String, _RowResult> _results = {};
   bool _running = false;
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
 
   void _toggle(String key) {
     setState(() {
@@ -212,146 +205,126 @@ class _MemoryRestartSheetState extends ConsumerState<MemoryRestartSheet> {
   }
 
   Widget _row(MemorySessionWithoutMemory s) {
-    final colors = context.antgrid;
+    final t = CarbonTheme.of(context);
     final key = _rowKey(s);
     final ticked = _ticked.contains(key);
     final result = _results[key];
     final restarting = _running && ticked && result == null;
     final locked = result?.locked ?? false;
-    return AbListRow(
+    final helper = t.typography.helper.copyWith(color: t.colors.textSecondary);
+    return Padding(
       key: ValueKey(key),
-      leading: Semantics(
-        checked: ticked,
-        child: AbIcon(
-          ticked ? AbIcons.circleCheck : AbIcons.circle,
-          size: AbTokens.fontBody,
-          color: ticked ? colors.accent : colors.textMuted,
-        ),
+      padding: const EdgeInsetsDirectional.symmetric(
+        horizontal: CarbonSpacing.spacing05,
       ),
-      title: Text(s.name, style: AbTokens.sansStyle(fontSize: AbTokens.fontMd)),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          if (result != null)
-            Text(
-              result.text,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: result.ok ? colors.textSecondary : colors.error,
+          Expanded(
+            child: CarbonCheckbox(
+              value: ticked,
+              onChanged: _running || locked ? null : (_) => _toggle(key),
+              label: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    s.name,
+                    style: t.typography.body.copyWith(
+                      color: t.colors.textPrimary,
+                    ),
+                  ),
+                  if (result != null)
+                    Text(
+                      result.text,
+                      style: result.ok
+                          ? helper
+                          : helper.copyWith(color: t.colors.textError),
+                    )
+                  else ...[
+                    Text(
+                      '${s.projectLabel} · ${_statusLabel(s.workStatus)}',
+                      style: helper,
+                    ),
+                    if (ticked && _isBusy(s.workStatus))
+                      Text(
+                        "Restarting interrupts what it's doing now.",
+                        style: helper,
+                      ),
+                  ],
+                ],
               ),
-            )
-          else ...[
-            Text(
-              '${s.projectLabel} · ${_statusLabel(s.workStatus)}',
-              style: AbTokens.sansStyle(fontSize: AbTokens.fontSm),
             ),
-            if (ticked && _isBusy(s.workStatus))
-              Text(
-                "Restarting interrupts what it's doing now.",
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: colors.textSecondary,
-                ),
-              ),
-          ],
-        ],
-      ),
-      subtitleMaxLines: 3,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
+          ),
           if (!s.resumable) ...[
-            const AbChip.label(label: 'Starts a new conversation'),
-            const SizedBox(width: AbTokens.space8),
+            const SizedBox(width: CarbonSpacing.spacing03),
+            const CarbonTag(
+              label: 'Starts a new conversation',
+              size: CarbonTagSize.small,
+            ),
           ],
-          if (restarting)
-            const AbLoading()
-          else if (s.workStatus case final status?)
-            AgentWorkStatusDot(status: status),
+          if (restarting) ...[
+            const SizedBox(width: CarbonSpacing.spacing03),
+            const CarbonInlineLoading(status: CarbonInlineLoadingStatus.active),
+          ],
         ],
       ),
-      onTap: _running || locked ? null : () => _toggle(key),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
+    final t = CarbonTheme.of(context);
     final count = _ticked.length;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: abDialogTitlePadding.copyWith(bottom: AbTokens.space8),
-          child: abDialogTitle(
-            'Restart to use Memory',
-            onClose: () => Navigator.of(context).pop(),
+    return CarbonModal(
+      title: 'Restart to use Memory',
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            "These sessions were already running when Memory was turned on, so they can't use it. Restarting resumes each conversation with Memory.",
+            style: t.typography.body.copyWith(color: t.colors.textSecondary),
           ),
-        ),
-        const AbSeparator.horizontal(),
-        Flexible(
-          child: AbScrollbar(
-            controller: _scroll,
-            child: SingleChildScrollView(
-              controller: _scroll,
-              padding: const EdgeInsets.all(AbTokens.space16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    "These sessions were already running when Memory was turned on, so they can't use it. Restarting resumes each conversation with Memory.",
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontMd,
-                      color: colors.textSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: AbTokens.space16),
-                  Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: colors.borderDefault),
-                      borderRadius: AbTokens.borderRadius5,
-                    ),
-                    child: Column(
-                      children: [
-                        for (final (i, s) in widget.sessions.indexed) ...[
-                          if (i > 0) const AbSeparator.horizontal(),
-                          _row(s),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+          const SizedBox(height: CarbonSpacing.spacing05),
+          CarbonLayerSurface(
+            border: true,
+            child: Builder(
+              builder: (context) {
+                final rule = CarbonTheme.of(
+                  context,
+                ).borderSubtle(CarbonLayer.of(context));
+                return Column(
+                  children: [
+                    for (final (i, s) in widget.sessions.indexed) ...[
+                      if (i > 0)
+                        SizedBox(
+                          height: CarbonBorders.hairline,
+                          child: ColoredBox(color: rule),
+                        ),
+                      _row(s),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
+        ],
+      ),
+      actions: [
+        CarbonModalAction(
+          label: 'Cancel',
+          kind: CarbonButtonKind.secondary,
+          onPressed: () => Navigator.of(context).pop(),
         ),
-        const AbSeparator.horizontal(),
-        Padding(
-          padding: const EdgeInsets.all(AbTokens.space12),
-          child: Wrap(
-            alignment: WrapAlignment.end,
-            spacing: AbTokens.space8,
-            runSpacing: AbTokens.space8,
-            children: [
-              AbButton(
-                label: 'Cancel',
-                onTap: () => Navigator.of(context).pop(),
-              ),
-              AbButton(
-                label: _running
-                    ? 'Restarting…'
-                    : count == 1
-                    ? 'Restart 1 session'
-                    : 'Restart $count sessions',
-                variant: AbButtonVariant.primary,
-                onTap: _running || count == 0
-                    ? null
-                    : () => detached('Memory', 'restart failed', _restart),
-              ),
-            ],
-          ),
+        CarbonModalAction(
+          label: _running
+              ? 'Restarting…'
+              : count == 1
+              ? 'Restart 1 session'
+              : 'Restart $count sessions',
+          onPressed: _running || count == 0
+              ? null
+              : () => detached('Memory', 'restart failed', _restart),
         ),
       ],
     );

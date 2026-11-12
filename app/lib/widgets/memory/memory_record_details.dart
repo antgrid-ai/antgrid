@@ -1,9 +1,9 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/widgets/ab_inline_banner.dart';
+import '../../design/ab_carbon.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/memory.dart';
 import '../../providers/account_machines.dart';
@@ -44,36 +44,40 @@ class _MemoryRecordDetailsState extends ConsumerState<MemoryRecordDetails> {
         machineId != null &&
         name != null &&
         !ref.watch(machineConnectedProvider(machineId));
-    return Scaffold(
-      backgroundColor: context.antgrid.bgDeepest,
-      resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        child: Column(
-          children: [
-            MemoryHeader.compact(
-              onBack: () => Navigator.of(context).pop(),
-              backTooltip: 'Back to Memory',
+    // A pushed route sits outside the screen's scope, so it carries its own.
+    return AbCarbonScope(
+      child: Builder(
+        builder: (scoped) => Scaffold(
+          backgroundColor: CarbonTheme.of(scoped).colors.background,
+          resizeToAvoidBottomInset: true,
+          body: SafeArea(
+            child: Column(
+              children: [
+                MemoryHeader.compact(
+                  onBack: () => Navigator.of(context).pop(),
+                  backTooltip: 'Back to Memory',
+                ),
+                if (offline)
+                  CarbonNotification(
+                    subtitle: memoryOfflineBannerCopy(name),
+                  ),
+                Expanded(
+                  child: MemoryDetailPane(
+                    key: ValueKey(_id),
+                    target: widget.target,
+                    id: _id,
+                    compact: true,
+                    onSaved: (id) => setState(() => _id = id),
+                    onForgotten: () => Navigator.of(context).pop(),
+                    onGone: () {
+                      showAbToast(context, 'This memory was forgotten.');
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                ),
+              ],
             ),
-            if (offline)
-              AbInlineBanner(
-                text: memoryOfflineBannerCopy(name),
-                color: context.antgrid.textMuted,
-              ),
-            Expanded(
-              child: MemoryDetailPane(
-                key: ValueKey(_id),
-                target: widget.target,
-                id: _id,
-                compact: true,
-                onSaved: (id) => setState(() => _id = id),
-                onForgotten: () => Navigator.of(context).pop(),
-                onGone: () {
-                  showAbToast(context, 'This memory was forgotten.');
-                  Navigator.of(context).pop();
-                },
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );

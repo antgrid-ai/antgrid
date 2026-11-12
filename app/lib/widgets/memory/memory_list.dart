@@ -1,17 +1,13 @@
+import 'dart:math' as math;
+
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_empty_state.dart';
-import '../../design/widgets/ab_inline_banner.dart';
-import '../../design/widgets/ab_list_row.dart';
-import '../../design/widgets/ab_loading.dart';
-import '../../design/widgets/ab_scrollbar.dart';
 import '../../models/memory.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/memory.dart';
+import 'memory_empty_state.dart';
 import 'memory_error.dart';
 import 'memory_format.dart';
 import 'memory_tag.dart';
@@ -38,61 +34,54 @@ class MemoryListRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
+    final t = CarbonTheme.of(context);
     final tag = memoryRowTag(record, projectRemoved: projectRemoved);
-    return Semantics(
-      selected: selected,
-      child: AbListRow(
-        title: Text(
-          record.displayTitle,
-          style: AbTokens.sansStyle(
-            fontSize: compact ? AbTokens.fontBody : AbTokens.fontMd,
-            height: 1.45,
+    final meta = memoryMetaLine(
+      project: projectLabel,
+      agent: agentLabel,
+      created: record.createdAt,
+    );
+    return CarbonContainedListRow(
+      // An activatable row hides its content from semantics, so the name has
+      // to carry what the content shows: rows sharing a title differ only
+      // there.
+      title: [record.displayTitle, ?record.description, meta, ?tag].join('\n'),
+      // A compact row opens a page rather than selecting, so it carries no
+      // selected state.
+      selected: compact ? null : selected,
+      onPressed: onTap,
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        spacing: CarbonSpacing.spacing02,
+        children: [
+          Text(
+            record.displayTitle,
+            maxLines: compact ? 3 : 2,
+            overflow: TextOverflow.ellipsis,
+            style: t.typography.body.copyWith(color: t.colors.textPrimary),
           ),
-        ),
-        titleMaxLines: compact ? 3 : 2,
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (record.description case final description?) ...[
-              Text(
-                description,
-                maxLines: compact ? 3 : 2,
-                overflow: TextOverflow.ellipsis,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: colors.textSecondary,
-                ),
+          if (record.description case final description?)
+            Text(
+              description,
+              maxLines: compact ? 3 : 2,
+              overflow: TextOverflow.ellipsis,
+              style: t.typography.helper.copyWith(
+                color: t.colors.textSecondary,
               ),
-              const SizedBox(height: AbTokens.space4),
-            ],
-            Wrap(
-              spacing: AbTokens.space8,
-              runSpacing: AbTokens.space4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  memoryMetaLine(
-                    project: projectLabel,
-                    agent: agentLabel,
-                    created: record.createdAt,
-                  ),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: colors.textMuted,
-                  ),
-                ),
-                if (tag != null) MemoryTag(label: tag),
-              ],
             ),
-          ],
-        ),
-        subtitleMaxLines: 2,
-        selected: selected,
-        selectionStyle: AbRowSelection.surface,
-        hoverable: true,
-        divider: true,
-        onTap: onTap,
+          Wrap(
+            spacing: CarbonSpacing.spacing03,
+            runSpacing: CarbonSpacing.spacing02,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                meta,
+                style: t.typography.helper.copyWith(color: t.colors.textHelper),
+              ),
+              if (tag != null) MemoryTag(label: tag),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -112,6 +101,7 @@ class MemoryListPane extends ConsumerStatefulWidget {
     required this.onClearFilters,
     required this.onRetry,
     required this.projects,
+    this.leading,
     this.compact = false,
   });
 
@@ -129,6 +119,10 @@ class MemoryListPane extends ConsumerStatefulWidget {
   final MemoryProjects projects;
   final bool compact;
 
+  /// Scrolls in above the rows, and above the loading, error and empty states
+  /// too, so a notice is never stranded off the list.
+  final Widget? leading;
+
   @override
   ConsumerState<MemoryListPane> createState() => _MemoryListPaneState();
 }
@@ -144,68 +138,89 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
     final first = widget.pages.first;
     final total = first.value?.total;
-    if (!first.hasValue && first.hasError) {
-      return _error(first.error!);
-    }
-    if (!first.hasValue) return const Center(child: AbLoading());
-    if (widget.visible.isEmpty && total == 0) return _empty();
+    final Widget? state = !first.hasValue && first.hasError
+        ? _error(first.error!)
+        : !first.hasValue
+        ? const Center(child: CarbonLoading())
+        : widget.visible.isEmpty && total == 0
+        ? _empty()
+        : null;
+    final leading = widget.leading;
+    if (state != null && leading == null) return state;
 
-    final labels = ref.watch(agentLabelsProvider);
-    final list = ListView.builder(
+    // Every state keeps the one scroll view with the leading sliver first, so
+    // the notices in it stay mounted across a reload rather than announcing
+    // themselves again.
+    return CustomScrollView(
       controller: _scroll,
-      itemCount: widget.visible.length + 1,
-      itemBuilder: (context, index) {
-        if (index == widget.visible.length) return _footer();
-        final record = widget.visible[index];
-        return MemoryListRow(
-          record: record,
-          projectLabel: widget.projects.labelFor(record.projectId),
-          projectRemoved: widget.projects.isRemoved(record.projectId),
-          agentLabel: memoryAgentName(record, labels),
-          selected: record.id == widget.selectedId,
-          onTap: () => widget.onSelect(record.id),
-          compact: widget.compact,
-        );
-      },
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (!widget.compact)
-          Container(
-            padding: const EdgeInsets.symmetric(
-              vertical: AbTokens.space8,
-              horizontal: AbTokens.space16,
-            ),
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: colors.borderSubtle)),
-            ),
-            child: Text(
-              memoryCountLabel(total ?? widget.visible.length),
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: colors.textMuted,
+      slivers: [
+        if (leading != null) SliverToBoxAdapter(child: leading),
+        if (state != null)
+          // Sized off the leading sliver's extent, which holds still while the
+          // view scrolls; a floor keeps the state readable under tall notices.
+          SliverLayoutBuilder(
+            builder: (context, constraints) => SliverToBoxAdapter(
+              child: SizedBox(
+                height: math.max(
+                  constraints.viewportMainAxisExtent -
+                      constraints.precedingScrollExtent,
+                  CarbonSpacing.spacing13 * 2,
+                ),
+                child: state,
               ),
             ),
-          ),
-        Expanded(
-          child: widget.compact
-              ? list
-              : AbScrollbar(controller: _scroll, child: list),
-        ),
+          )
+        else
+          ..._rows(total),
       ],
     );
   }
 
+  List<Widget> _rows(int? total) {
+    final labels = ref.watch(agentLabelsProvider);
+    // The count header is a sliver, so it scrolls with the rows and the wheel
+    // works across the whole pane. A compact list shows the count in the
+    // toolbar instead.
+    return [
+      if (widget.compact)
+        SliverList.builder(
+          itemCount: widget.visible.length,
+          itemBuilder: _row(labels),
+        )
+      else
+        CarbonContainedListSliver(
+          label: memoryCountLabel(total ?? widget.visible.length),
+          itemCount: widget.visible.length,
+          itemBuilder: _row(labels),
+        ),
+      SliverToBoxAdapter(child: _footer()),
+    ];
+  }
+
+  IndexedWidgetBuilder _row(Map<String, String> labels) => (context, index) {
+    final record = widget.visible[index];
+    return MemoryListRow(
+      record: record,
+      projectLabel: widget.projects.labelFor(record.projectId),
+      projectRemoved: widget.projects.isRemoved(record.projectId),
+      agentLabel: memoryAgentName(record, labels),
+      selected: record.id == widget.selectedId,
+      onTap: () => widget.onSelect(record.id),
+      compact: widget.compact,
+    );
+  };
+
   Widget _error(Object error) => Padding(
-    padding: const EdgeInsets.all(AbTokens.space16),
-    child: AbInlineBanner(
-      text: memoryErrorCopy(error),
-      color: context.antgrid.error,
-      footer: AbButton(label: 'Retry', compact: true, onTap: widget.onRetry),
+    padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+    child: CarbonNotification(
+      kind: CarbonNotificationKind.error,
+      subtitle: memoryErrorCopy(error),
+      action: CarbonNotificationAction(
+        label: 'Retry',
+        onPressed: widget.onRetry,
+      ),
     ),
   );
 
@@ -214,17 +229,20 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     if (!last.hasValue) {
       if (last.hasError) return _error(last.error!);
       return const Padding(
-        padding: EdgeInsets.all(AbTokens.space16),
-        child: Center(child: AbLoading()),
+        padding: EdgeInsets.all(CarbonSpacing.spacing05),
+        child: Center(
+          child: CarbonInlineLoading(status: CarbonInlineLoadingStatus.active),
+        ),
       );
     }
     if (!last.requireValue.hasMore) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.all(AbTokens.space12),
-      child: AbButton(
+      padding: const EdgeInsets.all(CarbonSpacing.spacing04),
+      child: CarbonButton(
         label: 'Show more',
+        kind: CarbonButtonKind.ghost,
         expand: true,
-        onTap: widget.onShowMore,
+        onPressed: widget.onShowMore,
       ),
     );
   }
@@ -232,14 +250,15 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
   Widget _empty() {
     final filter = widget.filter;
     final earlier = filter.versions == MemoryVersions.earlier;
-    final clear = AbButton(
+    final clear = CarbonButton(
       label: filter.isSearch || filter.memoryType != null
           ? 'Clear filters'
           : 'Show all projects',
-      onTap: widget.onClearFilters,
+      kind: CarbonButtonKind.tertiary,
+      onPressed: widget.onClearFilters,
     );
     if (filter.isSearch || filter.memoryType != null) {
-      return AbEmptyState(
+      return MemoryEmptyState(
         title: 'No memories match',
         subtitle: 'Try another word, or clear the project and kind filters.',
         action: clear,
@@ -248,7 +267,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
     final projectId = filter.projectId;
     if (projectId != null) {
       final label = widget.projects.labelFor(projectId);
-      return AbEmptyState(
+      return MemoryEmptyState(
         title: earlier
             ? 'No earlier versions for $label'
             : 'No memories for $label yet',
@@ -258,7 +277,7 @@ class _MemoryListPaneState extends ConsumerState<MemoryListPane> {
         action: clear,
       );
     }
-    return AbEmptyState(
+    return MemoryEmptyState(
       title: earlier ? 'No earlier versions' : 'No memories yet',
       subtitle: earlier
           ? 'When a memory is edited, its old text shows up here.'

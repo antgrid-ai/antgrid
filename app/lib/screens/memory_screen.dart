@@ -1,5 +1,6 @@
-import 'dart:async' show TimeoutException;
+import 'dart:async' show Timer, TimeoutException;
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart' show Scaffold;
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
@@ -8,17 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
 import '../demo/demo_identity.dart' show kDemoEntryLabel, kDemoMachineName;
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_adaptive_sheet.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_inline_banner.dart';
-import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_scrollbar.dart';
-import '../design/widgets/ab_separator.dart';
+import '../design/ab_carbon.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/memory.dart';
 import '../providers/account_machines.dart';
@@ -33,9 +24,10 @@ import '../providers/ui_attention_providers.dart';
 import '../services/memory_service.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
+import '../widgets/carbon_machine_selector.dart';
 import '../widgets/file_download.dart';
-import '../widgets/machine_selector_button.dart';
 import '../widgets/memory/memory_detail_pane.dart';
+import '../widgets/memory/memory_empty_state.dart';
 import '../widgets/memory/memory_error.dart';
 import '../widgets/memory/memory_format.dart';
 import '../widgets/memory/memory_header.dart';
@@ -89,15 +81,16 @@ class MemorySurface extends ConsumerWidget {
       return _MemoryPlaceholder(
         onOpenDrawer: onOpenDrawer,
         body: ref.watch(machinesSettlingProvider)
-            ? const Center(child: AbLoading())
-            : AbEmptyState(
-                icon: AbIcons.lightbulb,
+            ? const Center(child: CarbonLoading())
+            : MemoryEmptyState(
+                icon: CarbonIcons.idea,
                 title: 'Connect a machine to manage memories',
                 subtitle:
                     'Memory lives on your computer, in the Antgrid desktop app. Connect it to read, edit and export what your agents saved.',
-                action: AbButton(
+                action: CarbonButton(
                   label: kDemoEntryLabel,
-                  onTap: () => enterDemoMemory(ref.container),
+                  kind: CarbonButtonKind.tertiary,
+                  onPressed: () => enterDemoMemory(ref.container),
                 ),
               ),
       );
@@ -136,7 +129,7 @@ class MemorySurface extends ConsumerWidget {
         final wide = c.maxWidth >= kMediumBreakpoint;
         final selector = machines.isEmpty
             ? null
-            : MachineSelectorButton(
+            : CarbonMachineSelector(
                 machines: machines,
                 currentId: id,
                 name: name,
@@ -175,17 +168,21 @@ class _MemoryPlaceholder extends StatelessWidget {
   final Widget body;
 
   @override
-  Widget build(BuildContext context) => ColoredBox(
-    color: context.antgrid.bgDeepest,
-    child: LayoutBuilder(
-      builder: (context, c) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          c.maxWidth >= kMediumBreakpoint
-              ? const MemoryHeader()
-              : MemoryHeader.compact(onOpenDrawer: onOpenDrawer),
-          Expanded(child: body),
-        ],
+  Widget build(BuildContext context) => AbCarbonScope(
+    child: Builder(
+      builder: (scoped) => ColoredBox(
+        color: CarbonTheme.of(scoped).colors.background,
+        child: LayoutBuilder(
+          builder: (context, c) => Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              c.maxWidth >= kMediumBreakpoint
+                  ? const MemoryHeader()
+                  : MemoryHeader.compact(onOpenDrawer: onOpenDrawer),
+              Expanded(child: body),
+            ],
+          ),
+        ),
       ),
     ),
   );
@@ -246,7 +243,13 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   );
   final _detailScroll = ScrollController();
 
-  bool? _lastWide;
+  // The search field never debounces. The timer lives here, with the query
+  // it feeds, so it survives the toolbar remounting across the breakpoint.
+  Timer? _searchDebounce;
+
+  // A context under this screen's Carbon scope, which modals opened from
+  // here must use: the State's own context sits above it.
+  BuildContext? _scoped;
 
   // Written by build so the key handlers act on exactly what is on screen.
   List<MemoryRecord> _visible = const [];
@@ -254,6 +257,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _search.dispose();
     _searchFocus.dispose();
     _screenFocus.dispose();
@@ -331,7 +335,23 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     setState(() => _pages++);
   }
 
+  void _onSearchChanged(String text) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+      // A programmatic clear leaves the timer pending; never apply text the
+      // field no longer shows.
+      if (!mounted || text != _search.text) return;
+      _setFilter(_filter.copyWith(query: text));
+    });
+  }
+
+  void _onSearchCleared() {
+    _searchDebounce?.cancel();
+    _setFilter(_filter.copyWith(query: ''));
+  }
+
   void _clearFilters() {
+    _searchDebounce?.cancel();
     _search.clear();
     _setFilter(MemoryFilter(versions: _filter.versions));
   }
@@ -361,11 +381,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   }
 
   Future<void> _reviewSessions(List<MemorySessionWithoutMemory> rows) async {
-    await showAbAdaptiveSheet<void>(
-      context,
-      maxWidth: 560,
-      child: MemoryRestartSheet(target: _target, sessions: rows),
-    );
+    await showMemoryRestart(_scoped!, target: _target, sessions: rows);
     if (mounted) invalidateMemoryViews(ref, _target);
   }
 
@@ -410,28 +426,27 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     }
   }
 
-  Future<void> _openMore(BuildContext anchor) async {
-    final rect = abMenuAnchorRect(anchor);
-    if (rect == null) return;
-    final picked = await showAbMenu<String>(
-      context: anchor,
-      anchorRect: rect,
-      entries: const [
-        AbMenuItem(label: 'Export memories', value: 'export'),
-        AbMenuItem(label: 'Rebuild search', value: 'repair'),
-      ],
-    );
-    if (!mounted) return;
-    switch (picked) {
-      case 'export':
-        await _export(projectId: _filter.projectId);
-      case 'repair':
-        await _repair(announce: true);
-    }
-  }
+  List<CarbonMenuEntry> get _moreEntries => [
+    CarbonMenuItem(
+      label: 'Export memories',
+      onPressed: () => detached(
+        'Memory',
+        'export failed',
+        () => _export(projectId: _filter.projectId),
+      ),
+    ),
+    CarbonMenuItem(
+      label: 'Rebuild search',
+      onPressed: () => detached(
+        'Memory',
+        'repair failed',
+        () => _repair(announce: true),
+      ),
+    ),
+  ];
 
   Future<void> _openSettings() => showMemorySettings(
-    context,
+    _scoped!,
     target: _target,
     machineName: widget.machineName,
     onExportAll: () => _export(),
@@ -516,6 +531,7 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       // Acknowledging is best effort; the memory is still worth showing.
     }
     if (!mounted) return;
+    _searchDebounce?.cancel();
     _search.clear();
     _setFilter(const MemoryFilter());
     invalidateMemoryViews(ref, _target);
@@ -539,28 +555,42 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       header,
       ...above,
       if (mutationError case final error?)
-        AbInlineBanner(text: error, color: context.antgrid.error),
+        _notice(
+          CarbonNotification(
+            key: ValueKey(error),
+            kind: CarbonNotificationKind.error,
+            subtitle: error,
+          ),
+        ),
       Expanded(child: body),
     ],
   );
 
+  Widget _notice(Widget notification) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      CarbonSpacing.spacing05,
+      CarbonSpacing.spacing02,
+      CarbonSpacing.spacing05,
+      CarbonSpacing.spacing03,
+    ),
+    child: notification,
+  );
+
+  // Subtitle only: with a title the card renders one combined run of text.
   List<Widget> _banners(MemoryStatus? status) {
     final name = widget.machineName;
     final offline = status != null && !widget.connected && name != null;
     if (offline) _offlineShown = true;
-    final muted = context.antgrid.textMuted;
     return [
       if (offline)
-        AbInlineBanner(
-          text: memoryOfflineBannerCopy(name),
-          color: muted,
-        ),
+        _notice(CarbonNotification(subtitle: memoryOfflineBannerCopy(name))),
       if (_exporting)
-        AbInlineBanner(
-          text: name == null
-              ? 'Exporting memories…'
-              : 'Exporting memories from $name…',
-          color: muted,
+        _notice(
+          CarbonNotification(
+            subtitle: name == null
+                ? 'Exporting memories…'
+                : 'Exporting memories from $name…',
+          ),
         ),
     ];
   }
@@ -570,81 +600,98 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     final statusAsync = ref.watch(memoryStatusProvider(_target));
     final status = statusAsync.value;
     final banners = _banners(status);
-    // The Scaffold is the Material ancestor the search field needs; the
-    // surface's host provides the safe area.
-    return Scaffold(
-      backgroundColor: context.antgrid.bgDeepest,
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final wide = constraints.maxWidth >= kMediumBreakpoint;
-          Widget bareHeader() => wide
-              ? MemoryHeader(machine: widget.machineSelector)
-              : MemoryHeader.compact(
-                  onOpenDrawer: widget.onOpenDrawer,
-                  machine: widget.machineSelector,
-                );
-          final Widget body;
-          if (status == null) {
-            final error = statusAsync.error;
-            final code = error == null ? '' : memoryErrorCode(error);
-            final offline =
-                widget.machineName != null &&
-                (!widget.connected || code == 'NOT_CONNECTED');
-            // A machine that answered with a refusal is reachable, so offering
-            // to reconnect would point at the wrong fix.
-            final unreachable =
-                _target.machineId != null &&
-                (!widget.connected ||
-                    error is TimeoutException ||
-                    const {
-                      'NOT_CONNECTED',
-                      'E_TIMEOUT',
-                      'TIMEOUT',
-                      'TRANSPORT',
-                      'TRANSPORT_ERROR',
-                    }.contains(code));
-            body = statusAsync.isLoading
-                ? const Center(child: AbLoading())
-                : AbEmptyState.error(
-                    title: offline
-                        ? '${widget.machineName} is offline'
-                        : 'Memory unavailable',
-                    subtitle: offline
-                        ? 'Open Antgrid on that computer, then reconnect to see its memories.'
-                        : memoryErrorCopy(error!, machine: widget.machineName),
-                    action: AbButton(
-                      label: unreachable ? 'Reconnect and retry' : 'Retry',
-                      onTap: () =>
-                          detached('Memory', 'reconnect failed', _retry),
+    return AbCarbonScope(
+      child: Builder(
+        builder: (scoped) {
+          _scoped = scoped;
+          final t = CarbonTheme.of(scoped);
+          // The Scaffold keeps the keyboard inset handling; the surface's host
+          // provides the safe area.
+          return Scaffold(
+            backgroundColor: t.colors.background,
+            body: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= kMediumBreakpoint;
+                Widget bareHeader() => wide
+                    ? MemoryHeader(machine: widget.machineSelector)
+                    : MemoryHeader.compact(
+                        onOpenDrawer: widget.onOpenDrawer,
+                        machine: widget.machineSelector,
+                      );
+                final Widget body;
+                if (status == null) {
+                  final error = statusAsync.error;
+                  final code = error == null ? '' : memoryErrorCode(error);
+                  final offline =
+                      widget.machineName != null &&
+                      (!widget.connected || code == 'NOT_CONNECTED');
+                  // A machine that answered with a refusal is reachable, so
+                  // offering to reconnect would point at the wrong fix.
+                  final unreachable =
+                      _target.machineId != null &&
+                      (!widget.connected ||
+                          error is TimeoutException ||
+                          const {
+                            'NOT_CONNECTED',
+                            'E_TIMEOUT',
+                            'TIMEOUT',
+                            'TRANSPORT',
+                            'TRANSPORT_ERROR',
+                          }.contains(code));
+                  body = statusAsync.isLoading
+                      ? const Center(child: CarbonLoading())
+                      : MemoryEmptyState(
+                          error: true,
+                          title: offline
+                              ? '${widget.machineName} is offline'
+                              : 'Memory unavailable',
+                          subtitle: offline
+                              ? 'Open Antgrid on that computer, then reconnect to see its memories.'
+                              : memoryErrorCopy(
+                                  error!,
+                                  machine: widget.machineName,
+                                ),
+                          action: CarbonButton(
+                            label: unreachable ? 'Reconnect and retry' : 'Retry',
+                            kind: CarbonButtonKind.tertiary,
+                            onPressed: () =>
+                                detached('Memory', 'reconnect failed', _retry),
+                          ),
+                        );
+                } else if (!status.available) {
+                  body = MemoryEmptyState(
+                    error: true,
+                    title: 'Memory unavailable',
+                    subtitle:
+                        "Memory storage couldn't be opened. Saved memories stay on disk.",
+                    action: CarbonButton(
+                      label: 'Retry store recovery',
+                      kind: CarbonButtonKind.tertiary,
+                      busy: busy,
+                      onPressed: busy
+                          ? null
+                          : () => detached(
+                              'Memory',
+                              'recovery failed',
+                              () => _repair(announce: false),
+                            ),
                     ),
                   );
-          } else if (!status.available) {
-            body = AbEmptyState.error(
-              title: 'Memory unavailable',
-              subtitle:
-                  "Memory storage couldn't be opened. Saved memories stay on disk.",
-              action: AbButton(
-                label: 'Retry store recovery',
-                onTap: busy
-                    ? null
-                    : () => detached(
-                        'Memory',
-                        'recovery failed',
-                        () => _repair(announce: false),
-                      ),
-              ),
-            );
-          } else if (!status.enabled) {
-            body = MemoryOffState(
-              machineName: widget.machineName,
-              busy: busy,
-              error: _offError,
-              onTurnOn: () => detached('Memory', 'enable failed', _turnOn),
-            );
-          } else {
-            return _full(status, wide: wide, banners: banners);
-          }
-          return _frame(header: bareHeader(), above: banners, body: body);
+                } else if (!status.enabled) {
+                  body = MemoryOffState(
+                    machineName: widget.machineName,
+                    busy: busy,
+                    error: _offError,
+                    onTurnOn: () =>
+                        detached('Memory', 'enable failed', _turnOn),
+                  );
+                } else {
+                  return _full(status, wide: wide, banners: banners, t: t);
+                }
+                return _frame(header: bareHeader(), above: banners, body: body);
+              },
+            ),
+          );
         },
       ),
     );
@@ -654,8 +701,8 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
     MemoryStatus status, {
     required bool wide,
     required List<Widget> banners,
+    required CarbonThemeData t,
   }) {
-    final colors = context.antgrid;
     final projects =
         ref.watch(memoryProjectsProvider(_target)).value ?? MemoryProjects.empty;
     final applied = _applied(status);
@@ -674,17 +721,6 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
         : visible.firstOrNull?.id;
     _visible = visible;
     _effectiveId = wide ? selected : null;
-
-    // The search field is disposed with its debounce pending when the layout
-    // crosses the breakpoint, so text typed in that window is only in the
-    // controller.
-    if (_lastWide != null && _lastWide != wide) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _search.text == _filter.query) return;
-        _setFilter(_filter.copyWith(query: _search.text));
-      });
-    }
-    _lastWide = wide;
 
     final projectId = _filter.projectId;
     final projectPaused =
@@ -721,6 +757,14 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       onShowMore: () => _showMore(status),
       onClearFilters: _clearFilters,
       onRetry: () => _invalidatePages(status),
+      // Pinned on a phone, stacked notices would leave the list no room once
+      // the keyboard is up, so they scroll away with it.
+      leading: wide
+          ? null
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [...banners, problems],
+            ),
     );
 
     final toolbar = MemoryToolbar(
@@ -731,6 +775,8 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
       searchController: _search,
       searchFocus: _searchFocus,
       onChanged: _setFilter,
+      onSearchChanged: _onSearchChanged,
+      onSearchCleared: _onSearchCleared,
       countLine: wide || total == null
           ? null
           : '${memoryCountLabel(total)}  ·  ${memoryStatusWord(status, projectPaused: projectPaused).word.toLowerCase()}',
@@ -743,48 +789,44 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
           machine: widget.machineSelector,
           onSettings: () =>
               detached('Memory', 'settings failed', _openSettings),
-          onMore: (anchor) =>
-              detached('Memory', 'menu failed', () => _openMore(anchor)),
+          moreEntries: _moreEntries,
         ),
-        above: [...banners, problems, toolbar],
+        above: [toolbar],
         body: listPane,
       );
     }
 
     final Widget detail = selected == null
         ? Padding(
-            padding: const EdgeInsets.only(
-              top: 40,
-              left: AbTokens.space24,
-              right: AbTokens.space24,
+            padding: const EdgeInsets.fromLTRB(
+              CarbonSpacing.spacing06,
+              CarbonSpacing.spacing08,
+              CarbonSpacing.spacing06,
+              0,
             ),
             child: Text(
               'Select a memory to see where it came from.',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontMd,
-                color: colors.textMuted,
-              ),
+              style: t.typography.body.copyWith(color: t.colors.textSecondary),
             ),
           )
-        : AbScrollbar(
+        // The scroll view fills the pane with the content capped inside it, so
+        // the wheel scrolls from anywhere over the detail.
+        : SingleChildScrollView(
             controller: _detailScroll,
-            child: SingleChildScrollView(
-              controller: _detailScroll,
-              padding: const EdgeInsets.all(AbTokens.space24),
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    maxWidth: AbTokens.transcriptMaxWidth,
-                  ),
-                  child: MemoryDetailPane(
-                    key: ValueKey((selected, _epoch)),
-                    target: _target,
-                    id: selected,
-                    onSaved: _onSaved,
-                    onForgotten: _onForgotten,
-                    onGone: _onGone,
-                  ),
+            padding: const EdgeInsets.all(CarbonSpacing.spacing06),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxWidth: CarbonSpacing.spacing06 * 28,
+                ),
+                child: MemoryDetailPane(
+                  key: ValueKey((selected, _epoch)),
+                  target: _target,
+                  id: selected,
+                  onSaved: _onSaved,
+                  onForgotten: _onForgotten,
+                  onGone: _onGone,
                 ),
               ),
             ),
@@ -822,22 +864,24 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
             projectPaused: projectPaused,
             onSettings: () =>
                 detached('Memory', 'settings failed', _openSettings),
-            onMore: (anchor) =>
-                detached('Memory', 'menu failed', () => _openMore(anchor)),
+            moreEntries: _moreEntries,
           ),
           above: [...banners, problems, toolbar],
           body: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SizedBox(
-                width: 400,
+                width: CarbonSpacing.spacing08 * 10,
                 child: Semantics(
                   container: true,
                   label: 'Memories',
                   child: listPane,
                 ),
               ),
-              const AbSeparator.vertical(),
+              SizedBox(
+                width: CarbonBorders.hairline,
+                child: ColoredBox(color: t.borderSubtle(1)),
+              ),
               Expanded(
                 child: Semantics(
                   container: true,

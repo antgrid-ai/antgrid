@@ -1,27 +1,25 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_status_tone.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_icon_button.dart';
-import '../../design/widgets/ab_status_dot.dart';
 import '../../models/memory.dart' show MemoryStatus;
 
 /// The machine-wide status folded into one word. [projectPaused] is separate
 /// because status is machine-wide while the screen may be showing one paused
 /// project.
-({AbStatusTone tone, String word}) memoryStatusWord(
+({CarbonIconIndicatorKind kind, String word}) memoryStatusWord(
   MemoryStatus status, {
   bool projectPaused = false,
 }) {
   if (status.needsAttention) {
-    return (tone: AbStatusTone.warning, word: 'Needs attention');
+    return (
+      kind: CarbonIconIndicatorKind.cautionMinor,
+      word: 'Needs attention',
+    );
   }
   if (status.paused || projectPaused) {
-    return (tone: AbStatusTone.muted, word: 'Saving paused');
+    return (kind: CarbonIconIndicatorKind.notStarted, word: 'Saving paused');
   }
-  return (tone: AbStatusTone.success, word: 'Saving on');
+  return (kind: CarbonIconIndicatorKind.succeeded, word: 'Saving on');
 }
 
 class MemoryStatusPill extends StatelessWidget {
@@ -32,20 +30,8 @@ class MemoryStatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final word = memoryStatusWord(status, projectPaused: projectPaused);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AbStatusDot(tone: word.tone),
-        const SizedBox(width: AbTokens.space6),
-        Text(
-          word.word,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontSm,
-            color: context.antgrid.textSecondary,
-          ),
-        ),
-      ],
-    );
+    // Not compact: the word is the pill's text, not a tooltip.
+    return CarbonIconIndicator(kind: word.kind, label: word.word);
   }
 }
 
@@ -56,7 +42,7 @@ class MemoryHeader extends StatelessWidget {
     this.status,
     this.projectPaused = false,
     this.onSettings,
-    this.onMore,
+    this.moreEntries,
   }) : onBack = null,
        onOpenDrawer = null,
        backTooltip = 'Back',
@@ -68,7 +54,7 @@ class MemoryHeader extends StatelessWidget {
     this.onOpenDrawer,
     this.backTooltip = 'Back',
     this.onSettings,
-    this.onMore,
+    this.moreEntries,
     this.machine,
   }) : status = null,
        projectPaused = false,
@@ -80,8 +66,8 @@ class MemoryHeader extends StatelessWidget {
   final bool projectPaused;
   final VoidCallback? onSettings;
 
-  /// Receives the ⋯ button's own context so the menu can anchor to it.
-  final ValueChanged<BuildContext>? onMore;
+  /// The overflow menu's commands; null leaves the menu out.
+  final List<CarbonMenuEntry>? moreEntries;
   final VoidCallback? onBack;
   final VoidCallback? onOpenDrawer;
   final String backTooltip;
@@ -89,85 +75,92 @@ class MemoryHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
+    final t = CarbonTheme.of(context);
     final settings = onSettings == null
         ? null
-        : AbIconButton(
-            icon: AbIcons.settings,
-            tooltip: 'Memory settings',
-            onTap: onSettings,
+        : CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.settings),
+            semanticLabel: 'Memory settings',
+            onPressed: onSettings,
           );
-    final more = onMore == null
+    final more = moreEntries == null
         ? null
-        : Builder(
-            builder: (anchor) => AbIconButton(
-              icon: AbIcons.more,
-              tooltip: 'More actions',
-              onTap: () => onMore!(anchor),
-            ),
+        : CarbonOverflowMenu(
+            semanticLabel: 'More actions',
+            entries: moreEntries!,
           );
     final lead = onBack != null
-        ? AbIconButton(icon: AbIcons.back, tooltip: backTooltip, onTap: onBack)
+        ? CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.arrowLeft),
+            semanticLabel: backTooltip,
+            onPressed: onBack,
+          )
         : onOpenDrawer != null
-        ? AbIconButton(
-            icon: AbIcons.menu,
-            tooltip: 'Open drawer',
-            onTap: onOpenDrawer,
+        ? CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.menu),
+            semanticLabel: 'Open drawer',
+            onPressed: onOpenDrawer,
           )
         : null;
-    return Container(
-      height: AbTokens.rowHeightLg,
-      padding: EdgeInsets.only(
-        left: compact && lead != null ? AbTokens.space8 : AbTokens.space16,
-        right: AbTokens.space8,
+    final title = Semantics(
+      header: true,
+      child: Text(
+        'Memory',
+        style: t.typography.heading.copyWith(color: t.colors.textPrimary),
       ),
+    );
+    return DecoratedBox(
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: colors.borderSubtle)),
+        border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
       ),
-      child: compact
-          ? Row(
-              children: [
-                if (lead != null) ...[
-                  lead,
-                  const SizedBox(width: AbTokens.space4),
-                ],
-                Text(
-                  'Memory',
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontLg,
-                    fontWeight: FontWeight.w600,
-                  ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: CarbonSizes.lg),
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(
+            start: compact && lead != null
+                ? CarbonSpacing.spacing03
+                : CarbonSpacing.spacing05,
+            end: CarbonSpacing.spacing03,
+          ),
+          child: compact
+              ? Row(
+                  children: [
+                    if (lead != null) ...[
+                      lead,
+                      const SizedBox(width: CarbonSpacing.spacing02),
+                    ],
+                    title,
+                    const SizedBox(width: CarbonSpacing.spacing03),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: machine,
+                      ),
+                    ),
+                    ?settings,
+                    ?more,
+                  ],
+                )
+              : Row(
+                  children: [
+                    title,
+                    const SizedBox(width: CarbonSpacing.spacing04),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: machine,
+                      ),
+                    ),
+                    if (status case final status?) ...[
+                      MemoryStatusPill(status, projectPaused: projectPaused),
+                      const SizedBox(width: CarbonSpacing.spacing03),
+                    ],
+                    ?settings,
+                    ?more,
+                  ],
                 ),
-                const SizedBox(width: AbTokens.space8),
-                Expanded(
-                  child: Align(alignment: Alignment.centerLeft, child: machine),
-                ),
-                ?settings,
-                ?more,
-              ],
-            )
-          : Row(
-              children: [
-                Text(
-                  'MEMORY',
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: colors.textSecondary,
-                    letterSpacing: 1.4,
-                  ),
-                ),
-                const SizedBox(width: AbTokens.space12),
-                Expanded(
-                  child: Align(alignment: Alignment.centerLeft, child: machine),
-                ),
-                if (status case final status?) ...[
-                  MemoryStatusPill(status, projectPaused: projectPaused),
-                  const SizedBox(width: AbTokens.space8),
-                ],
-                ?settings,
-                ?more,
-              ],
-            ),
+        ),
+      ),
     );
   }
 }

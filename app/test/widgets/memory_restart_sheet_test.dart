@@ -1,15 +1,12 @@
-import 'package:antgrid/design/ab_icons.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_adaptive_sheet.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_icon.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/memory/memory_restart_sheet.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -75,15 +72,17 @@ void main() {
         child: MaterialApp(
           theme: buildAbTheme(),
           builder: abToastHostBuilder,
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => showAbAdaptiveSheet<void>(
-                  context,
-                  maxWidth: 560,
-                  child: MemoryRestartSheet(target: target, sessions: rows),
+          home: AbCarbonScope(
+            child: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showMemoryRestart(
+                    context,
+                    target: target,
+                    sessions: rows,
+                  ),
+                  child: const Text('open'),
                 ),
-                child: const Text('open'),
               ),
             ),
           ),
@@ -91,7 +90,7 @@ void main() {
       ),
     );
     await tester.tap(find.text('open'));
-    // Not pumpAndSettle: a working or attention dot pulses forever.
+    // Not pumpAndSettle: a restarting row's spinner never settles.
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
   }
@@ -121,7 +120,7 @@ void main() {
   Finder tickOf(String key) => find.descendant(
     of: find.byKey(ValueKey(key)),
     matching: find.byWidgetPredicate(
-      (w) => w is AbIcon && w.icon == AbIcons.circleCheck,
+      (w) => w is CarbonCheckbox && w.value == true,
     ),
   );
 
@@ -153,6 +152,22 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the modal holds no Ab widget', (tester) async {
+    await open(tester, [
+      _row('a'),
+      _row('b', status: AgentWorkStatus.working, resumable: false),
+    ]);
+    final found = <String>[];
+    void visit(Element element) {
+      final name = element.widget.runtimeType.toString();
+      if (name.startsWith('Ab')) found.add(name);
+      element.visitChildren(visit);
+    }
+
+    tester.element(find.byType(CarbonModal)).visitChildren(visit);
+    expect(found, isEmpty);
   });
 
   testWidgets('subtitles carry the project and a plain status label', (
@@ -208,10 +223,10 @@ void main() {
     await open(tester, [_row('a')]);
     await tester.tap(find.text('Session a'));
     await tester.pump();
-    final button = tester.widget<AbButton>(
-      find.widgetWithText(AbButton, 'Restart 0 sessions'),
+    final button = tester.widget<CarbonButton>(
+      find.widgetWithText(CarbonButton, 'Restart 0 sessions'),
     );
-    expect(button.onTap, isNull);
+    expect(button.onPressed, isNull);
   });
 
   testWidgets('a local row goes to the bare project id', (tester) async {
@@ -426,7 +441,7 @@ void main() {
     await tester.tap(find.text('Restart 1 session'));
     await tester.pump(const Duration(milliseconds: 50));
     expect(find.text("Couldn't restart. Nothing was changed."), findsNothing);
-    expect(find.byType(AbLoading), findsOneWidget);
+    expect(find.byType(CarbonInlineLoading), findsOneWidget);
     await answer(tester, {
       'a': {'ok': true, 'restarted': true},
     });

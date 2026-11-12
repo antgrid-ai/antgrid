@@ -1,9 +1,10 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/widgets/memory/memory_detail_pane.dart';
 import 'package:antgrid/widgets/memory/memory_list.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -52,22 +53,24 @@ void main() {
         child: MaterialApp(
           theme: buildAbTheme(),
           home: Scaffold(
-            body: compact
-                ? MemoryDetailPane(
-                    target: _target,
-                    id: 'current',
-                    compact: true,
-                    onSaved: (_) {},
-                    onForgotten: () {},
-                  )
-                : SingleChildScrollView(
-                    child: MemoryDetailPane(
+            body: AbCarbonScope(
+              child: compact
+                  ? MemoryDetailPane(
                       target: _target,
                       id: 'current',
+                      compact: true,
                       onSaved: (_) {},
                       onForgotten: () {},
+                    )
+                  : SingleChildScrollView(
+                      child: MemoryDetailPane(
+                        target: _target,
+                        id: 'current',
+                        onSaved: (_) {},
+                        onForgotten: () {},
+                      ),
                     ),
-                  ),
+            ),
           ),
         ),
       ),
@@ -77,7 +80,7 @@ void main() {
   }
 
   Future<void> tap(WidgetTester tester, String label) async {
-    final button = find.widgetWithText(AbButton, label);
+    final button = find.widgetWithText(CarbonButton, label);
     await tester.ensureVisible(button);
     await tester.tap(button);
     await tester.pumpAndSettle();
@@ -203,8 +206,8 @@ void main() {
       expect(find.text('Title exceeds 256 UTF-8 bytes.'), findsOneWidget);
       expect(
         tester
-            .widget<AbButton>(find.widgetWithText(AbButton, 'Save changes'))
-            .onTap,
+            .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Save changes'))
+            .onPressed,
         isNull,
       );
       expect(saves, isEmpty);
@@ -216,8 +219,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         tester
-            .widget<AbButton>(find.widgetWithText(AbButton, 'Save changes'))
-            .onTap,
+            .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Save changes'))
+            .onPressed,
         isNotNull,
       );
       expect(tester.takeException(), isNull);

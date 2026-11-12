@@ -1,21 +1,13 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_menu.dart';
-import '../../design/widgets/ab_search_field.dart';
-import '../../design/widgets/ab_segmented.dart';
-import '../../design/widgets/ab_text_field.dart';
 import '../../models/memory.dart';
-import '../../util/detached.dart';
 
-/// showAbMenu returns null on dismiss, so the "All" entries need a value of
-/// their own to be told apart from a dismissed menu.
+/// The radio group reads a null value as "none selected", so the "All"
+/// options need a value of their own to stay selectable.
 const _kAll = '*all*';
+
+const _searchOffCopy = "Search is off until it's rebuilt";
 
 class MemoryToolbar extends StatelessWidget {
   const MemoryToolbar({
@@ -25,6 +17,8 @@ class MemoryToolbar extends StatelessWidget {
     required this.searchReady,
     required this.searchController,
     required this.onChanged,
+    required this.onSearchChanged,
+    required this.onSearchCleared,
     this.searchFocus,
     this.compact = false,
     this.countLine,
@@ -34,7 +28,17 @@ class MemoryToolbar extends StatelessWidget {
   final MemoryProjects projects;
   final bool searchReady;
   final TextEditingController searchController;
+
+  /// Every filter edit except typing in the search field.
   final ValueChanged<MemoryFilter> onChanged;
+
+  /// Raw search text, undebounced: the search field never debounces, so the
+  /// owner of the query does.
+  final ValueChanged<String> onSearchChanged;
+
+  /// The clear button and Escape, which apply at once rather than waiting
+  /// out the debounce.
+  final VoidCallback onSearchCleared;
   final FocusNode? searchFocus;
   final bool compact;
   final String? countLine;
@@ -49,229 +53,198 @@ class MemoryToolbar extends StatelessWidget {
       ? 'All kinds'
       : memoryKindLabel(filter.memoryType!);
 
-  Future<void> _pickProject(BuildContext anchor) async {
-    final rect = abMenuAnchorRect(anchor);
-    if (rect == null) return;
-    final current = filter.projectId;
-    final picked = await showAbMenu<String>(
-      context: anchor,
-      anchorRect: rect,
+  Widget _picker({
+    required String field,
+    required String current,
+    required List<CarbonOption<String>> options,
+    required String selected,
+    required ValueChanged<String> onPicked,
+  }) => ConstrainedBox(
+    constraints: BoxConstraints(
+      // On a phone the pickers split the row; on desktop a long project
+      // name must not push the rest of the toolbar onto another line.
+      maxWidth: compact ? double.infinity : CarbonSpacing.spacing06 * 8,
+    ),
+    child: CarbonMenuButton(
+      label: current,
+      kind: CarbonButtonKind.ghost,
+      size: compact ? null : CarbonButtonSize.small,
+      maxLines: 1,
+      semanticLabel: field,
+      triggerSemanticLabel: '$field: $current, change',
       entries: [
-        AbMenuItem(
-          label: 'All projects',
-          value: _kAll,
-          icon: current == null ? AbIcons.check : null,
+        CarbonMenuRadioGroup<String>(
+          value: selected,
+          options: options,
+          onChanged: onPicked,
         ),
-        for (final p in projects.projects)
-          AbMenuItem(
-            label: p.stateLabel,
-            value: p.projectId,
-            icon: current == p.projectId ? AbIcons.check : null,
-          ),
       ],
-    );
-    if (picked == null) return;
-    onChanged(
+    ),
+  );
+
+  Widget _projectPicker() => _picker(
+    field: 'Project',
+    current: _projectLabel,
+    selected: filter.projectId ?? _kAll,
+    options: [
+      const CarbonOption<String>(value: _kAll, label: 'All projects'),
+      for (final p in projects.projects)
+        CarbonOption<String>(value: p.projectId, label: p.stateLabel),
+    ],
+    onPicked: (picked) => onChanged(
       picked == _kAll
           ? filter.copyWith(clearProjectId: true)
           : filter.copyWith(projectId: picked),
-    );
-  }
+    ),
+  );
 
-  Future<void> _pickKind(BuildContext anchor) async {
-    final rect = abMenuAnchorRect(anchor);
-    if (rect == null) return;
-    final current = filter.memoryType;
-    final picked = await showAbMenu<String>(
-      context: anchor,
-      anchorRect: rect,
-      entries: [
-        AbMenuItem(
-          label: 'All kinds',
-          value: _kAll,
-          icon: current == null ? AbIcons.check : null,
-        ),
-        for (final kind in kMemoryKindOrder)
-          AbMenuItem(
-            label: memoryKindLabel(kind),
-            value: kind,
-            icon: current == kind ? AbIcons.check : null,
-          ),
-      ],
-    );
-    if (picked == null) return;
-    onChanged(
+  Widget _kindPicker() => _picker(
+    field: 'Kind',
+    current: _kindLabel,
+    selected: filter.memoryType ?? _kAll,
+    options: [
+      const CarbonOption<String>(value: _kAll, label: 'All kinds'),
+      for (final kind in kMemoryKindOrder)
+        CarbonOption<String>(value: kind, label: memoryKindLabel(kind)),
+    ],
+    onPicked: (picked) => onChanged(
       picked == _kAll
           ? filter.copyWith(clearMemoryType: true)
           : filter.copyWith(memoryType: picked),
-    );
-  }
-
-  Widget _picker(
-    BuildContext context, {
-    required String field,
-    required String current,
-    required Future<void> Function(BuildContext) open,
-  }) => ConstrainedBox(
-    constraints: BoxConstraints(maxWidth: AbTokens.space24 * (compact ? 6 : 8)),
-    child: Builder(
-      builder: (anchor) {
-        void tap() =>
-            detached('Memory', '$field menu failed', () => open(anchor));
-        return Semantics(
-          label: '$field: $current, change',
-          button: true,
-          excludeSemantics: true,
-          onTap: tap,
-          child: AbButton(
-            label: current,
-            maxLines: 1,
-            wrapLabel: true,
-            trailing: AbIcon(
-              AbIcons.chevronDown,
-              size: AbTokens.fontSm,
-              color: context.antgrid.textMuted,
-            ),
-            onTap: tap,
-          ),
-        );
-      },
     ),
   );
 
   Widget _search() {
     if (!searchReady) {
-      return AbTextField(
+      // A disabled search paints its placeholder in the field colour, so the
+      // problems strip above is what tells the user why.
+      // Keyed apart from the live field: reusing its element would copy the
+      // query into a field that no longer applies it.
+      return const CarbonSearch(
+        key: ValueKey('memory-search-off'),
         enabled: false,
-        hintText: "Search is off until it's rebuilt",
-        prefixIcon: AbIcons.search,
+        placeholder: _searchOffCopy,
+        semanticLabel: _searchOffCopy,
       );
     }
-    return AbSearchField(
+    return CarbonSearch(
+      key: const ValueKey('memory-search'),
       controller: searchController,
       focusNode: searchFocus,
-      hint: 'Search memories',
-      debounce: const Duration(milliseconds: 250),
-      height: compact ? AbTokens.rowHeightLg : AbTokens.rowHeightMd,
-      onChanged: (text) {
-        // A programmatic clear leaves the debounce pending; never apply text
-        // the field no longer shows.
-        if (text != searchController.text) return;
-        onChanged(filter.copyWith(query: text));
-      },
+      placeholder: 'Search memories',
+      semanticLabel: 'Search memories',
+      onChanged: onSearchChanged,
+      onCleared: onSearchCleared,
     );
   }
 
-  Widget _label(BuildContext context, String text) => ExcludeSemantics(
-    child: Text(
-      text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontSm,
-        color: context.antgrid.textMuted,
+  Widget _label(BuildContext context, String text) {
+    final t = CarbonTheme.of(context);
+    return ExcludeSemantics(
+      child: Text(
+        text,
+        style: t.typography.label.copyWith(color: t.colors.textSecondary),
       ),
-    ),
+    );
+  }
+
+  /// The label shares the menu text's baseline: the two differ in size, so
+  /// centring them leaves the smaller label sitting low.
+  Widget _field(BuildContext context, String label, Widget picker) => Row(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.baseline,
+    textBaseline: TextBaseline.alphabetic,
+    children: [_label(context, label), picker],
   );
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
-    final project = _picker(
-      context,
-      field: 'Project',
-      current: _projectLabel,
-      open: _pickProject,
-    );
-    final kind = _picker(
-      context,
-      field: 'Kind',
-      current: _kindLabel,
-      open: _pickKind,
+    final t = CarbonTheme.of(context);
+    final rule = BoxDecoration(
+      border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
     );
     if (!compact) {
-      return Container(
-        padding: const EdgeInsets.symmetric(
-          vertical: AbTokens.space12,
-          horizontal: AbTokens.space16,
-        ),
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: colors.borderSubtle)),
-        ),
-        child: Wrap(
-          spacing: AbTokens.space8,
-          runSpacing: AbTokens.space8,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            SizedBox(width: AbTokens.space24 * 11, child: _search()),
-            Semantics(
-              label: 'Show',
-              child: AbSegmented<MemoryVersions>(
-                segments: const [
-                  AbSegment(value: MemoryVersions.current, label: 'Current'),
-                  AbSegment(
+      return DecoratedBox(
+        decoration: rule,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            vertical: CarbonSpacing.spacing04,
+            horizontal: CarbonSpacing.spacing05,
+          ),
+          child: Wrap(
+            spacing: CarbonSpacing.spacing03,
+            runSpacing: CarbonSpacing.spacing03,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              SizedBox(width: CarbonSpacing.spacing06 * 11, child: _search()),
+              CarbonContentSwitcher<MemoryVersions>(
+                size: CarbonContentSwitcherSize.small,
+                semanticLabel: 'Show',
+                options: const [
+                  CarbonOption(value: MemoryVersions.current, label: 'Current'),
+                  CarbonOption(
                     value: MemoryVersions.earlier,
                     label: 'Earlier versions',
                   ),
                 ],
-                selected: filter.versions,
-                onSelect: (v) => onChanged(filter.copyWith(versions: v)),
+                value: filter.versions,
+                onChanged: (v) => onChanged(filter.copyWith(versions: v)),
               ),
-            ),
-            _label(context, 'Project'),
-            project,
-            _label(context, 'Kind'),
-            kind,
-          ],
+              _field(context, 'Project', _projectPicker()),
+              _field(context, 'Kind', _kindPicker()),
+            ],
+          ),
         ),
       );
     }
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space12,
-        AbTokens.space16,
-        AbTokens.space8,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: colors.borderSubtle)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _search(),
-          const SizedBox(height: AbTokens.space10),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
+    final earlier = filter.versions == MemoryVersions.earlier;
+    return DecoratedBox(
+      decoration: rule,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing04,
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing03,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _search(),
+            const SizedBox(height: CarbonSpacing.spacing03),
+            Row(
+              spacing: CarbonSpacing.spacing03,
               children: [
-                project,
-                const SizedBox(width: AbTokens.space8),
-                kind,
-                const SizedBox(width: AbTokens.space8),
-                AbChip.choice(
-                  label: 'Earlier versions',
-                  selected: filter.versions == MemoryVersions.earlier,
-                  onTap: () => onChanged(
-                    filter.copyWith(
-                      versions: filter.versions == MemoryVersions.earlier
-                          ? MemoryVersions.current
-                          : MemoryVersions.earlier,
-                    ),
-                  ),
-                ),
+                Expanded(child: _projectPicker()),
+                Expanded(child: _kindPicker()),
               ],
             ),
-          ),
-          if (countLine case final line?) ...[
-            const SizedBox(height: AbTokens.space10),
-            Text(
-              line,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: colors.textMuted,
+            const SizedBox(height: CarbonSpacing.spacing02),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: CarbonTag(
+                label: 'Earlier versions',
+                selected: earlier,
+                onSelectedChanged: (on) => onChanged(
+                  filter.copyWith(
+                    versions: on
+                        ? MemoryVersions.earlier
+                        : MemoryVersions.current,
+                  ),
+                ),
               ),
             ),
+            if (countLine case final line?) ...[
+              const SizedBox(height: CarbonSpacing.spacing03),
+              Text(
+                line,
+                style: t.typography.helper.copyWith(
+                  color: t.colors.textSecondary,
+                ),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

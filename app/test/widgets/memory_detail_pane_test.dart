@@ -1,9 +1,10 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/widgets/memory/memory_detail_pane.dart';
 import 'package:antgrid/widgets/memory/memory_record_details.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -148,9 +149,13 @@ void main() {
     return h;
   }
 
-  Finder button(String label) => find.widgetWithText(AbButton, label);
+  Finder button(String label) => find.widgetWithText(CarbonButton, label);
   VoidCallback? tapOf(WidgetTester tester, String label) =>
-      tester.widget<AbButton>(button(label)).onTap;
+      tester.widget<CarbonButton>(button(label)).onPressed;
+
+  Finder remove(String source) => find.byWidgetPredicate(
+    (w) => w is CarbonButton && w.semanticLabel == 'Remove $source',
+  );
 
   Future<void> tapButton(WidgetTester tester, String label) async {
     await tester.ensureVisible(button(label));
@@ -410,8 +415,8 @@ void main() {
       findsOneWidget,
     );
     expect(tapOf(tester, 'Add'), isNull);
-    await tester.ensureVisible(find.byTooltip('Remove docs/page3.md'));
-    await tester.tap(find.byTooltip('Remove docs/page3.md'));
+    await tester.ensureVisible(remove('docs/page3.md'));
+    await tester.tap(remove('docs/page3.md'));
     await tester.pumpAndSettle();
     expect(
       find.text('Files or doc sections that back this memory up.'),
@@ -424,7 +429,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(tapOf(tester, 'Add'), isNotNull);
     await tapButton(tester, 'Add');
-    expect(find.byTooltip('Remove docs/new.md'), findsOneWidget);
+    expect(remove('docs/new.md'), findsOneWidget);
     expect(tapOf(tester, 'Add'), isNull);
   });
 
@@ -546,10 +551,35 @@ void main() {
         keyboard: 300,
       );
       await tapButton(tester, 'Edit');
-      expect(find.byTooltip('Remove docs/long/path/page7.md'), findsOneWidget);
+      expect(remove('docs/long/path/page7.md'), findsOneWidget);
       expect(button('Save changes'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+  });
+
+  testWidgets('the record page carries its own Carbon scope and no Ab widget', (
+    tester,
+  ) async {
+    await pumpPane(
+      tester,
+      page: true,
+      size: const Size(390, 844),
+      earlier: [_record(id: 'e1', content: 'older')],
+    );
+    final scopes = find.descendant(
+      of: find.byType(MemoryRecordDetails),
+      matching: find.byType(AbCarbonScope),
+    );
+    expect(scopes, findsOneWidget);
+    final found = <String>[];
+    void visit(Element element) {
+      final name = element.widget.runtimeType.toString();
+      if (name.startsWith('Ab')) found.add(name);
+      element.visitChildren(visit);
+    }
+
+    tester.element(scopes).visitChildren(visit);
+    expect(found, isEmpty);
   });
 
   testWidgets('a forgotten memory shows the gone state and reports once', (
@@ -575,12 +605,14 @@ void main() {
           theme: buildAbTheme(),
           builder: abToastHostBuilder,
           home: Scaffold(
-            body: MemoryDetailPane(
-              target: _target,
-              id: 'x',
-              onSaved: (_) {},
-              onForgotten: () {},
-              onGone: () => gone++,
+            body: AbCarbonScope(
+              child: MemoryDetailPane(
+                target: _target,
+                id: 'x',
+                onSaved: (_) {},
+                onForgotten: () {},
+                onGone: () => gone++,
+              ),
             ),
           ),
         ),
@@ -596,6 +628,8 @@ void main() {
 
 /// The wide pane does not scroll itself, so its host does; the compact pane
 /// needs a bounded height for its fixed action bar.
-Widget _host({required bool compact, required Widget child}) => compact
-    ? child
-    : SingleChildScrollView(padding: const EdgeInsets.all(24), child: child);
+Widget _host({required bool compact, required Widget child}) => AbCarbonScope(
+  child: compact
+      ? child
+      : SingleChildScrollView(padding: const EdgeInsets.all(24), child: child),
+);

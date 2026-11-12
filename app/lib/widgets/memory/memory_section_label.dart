@@ -1,15 +1,13 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
-
-/// The small muted heading above a group of fields or facts on Memory surfaces.
+/// The heading above a group of fields or facts on Memory surfaces.
 class MemorySectionLabel extends StatelessWidget {
   const MemorySectionLabel(
     this.text, {
     super.key,
     this.top = 0,
-    this.bottom = AbTokens.space6,
+    this.bottom = CarbonSpacing.spacing03,
   });
 
   final String text;
@@ -17,15 +15,17 @@ class MemorySectionLabel extends StatelessWidget {
   final double bottom;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: EdgeInsets.only(top: top, bottom: bottom),
-    child: Text(
-      text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontSm,
-        fontWeight: FontWeight.w600,
-        color: context.antgrid.textMuted,
+  Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
+    return Padding(
+      padding: EdgeInsets.only(top: top, bottom: bottom),
+      child: Semantics(
+        header: true,
+        child: Text(
+          text,
+          style: t.typography.heading.copyWith(color: t.colors.textPrimary),
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

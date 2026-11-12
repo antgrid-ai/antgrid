@@ -1,10 +1,6 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_status_tone.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_status_dot.dart';
 import '../../models/memory.dart';
 
 class MemoryProblems extends StatelessWidget {
@@ -73,23 +69,18 @@ class MemoryProblems extends StatelessWidget {
         ),
     ];
     if (lines.isEmpty) return const SizedBox.shrink();
-    return Semantics(
-      liveRegion: true,
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          vertical: AbTokens.space6,
-          horizontal: AbTokens.space16,
-        ),
-        decoration: BoxDecoration(
-          color: context.antgrid.bgSurface,
-          border: Border(
-            bottom: BorderSide(color: context.antgrid.borderSubtle),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: lines,
-        ),
+    // Each notification announces itself, so the strip needs no live region.
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing02,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing03,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: CarbonSpacing.spacing02,
+        children: lines,
       ),
     );
   }
@@ -106,32 +97,19 @@ class _ProblemLine extends StatelessWidget {
   final bool warning;
   final String text;
   final String? action;
+
+  /// Null with an [action] keeps the action but disabled, as while busy.
   final VoidCallback? onAction;
 
+  // Subtitle only: with a title the card renders one combined run of text.
   @override
-  Widget build(BuildContext context) {
-    final colors = context.antgrid;
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 32),
-      child: Row(
-        children: [
-          AbStatusDot(tone: warning ? AbStatusTone.warning : AbStatusTone.muted),
-          const SizedBox(width: AbTokens.space8),
-          Expanded(
-            child: Text(
-              text,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontMd,
-                color: warning ? null : colors.textSecondary,
-              ),
-            ),
-          ),
-          if (action != null) ...[
-            const SizedBox(width: AbTokens.space8),
-            AbButton(label: action!, compact: true, onTap: onAction),
-          ],
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => CarbonNotification(
+    kind: warning
+        ? CarbonNotificationKind.warning
+        : CarbonNotificationKind.info,
+    subtitle: text,
+    action: action == null
+        ? null
+        : CarbonNotificationAction(label: action!, onPressed: onAction),
+  );
 }

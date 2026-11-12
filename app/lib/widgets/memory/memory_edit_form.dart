@@ -1,18 +1,12 @@
 import 'dart:convert';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_icon_button.dart';
-import '../../design/widgets/ab_inline_banner.dart';
-import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/memory.dart';
 import '../../providers/memory.dart';
@@ -22,21 +16,19 @@ import 'memory_section_label.dart';
 
 const kMaxEvidenceReferences = 8;
 
-/// Lays out a row of buttons: inline on wide layouts, one full-width tap
-/// target per button on compact ones. Each button carries its own `expand`.
-Widget memoryButtonRow(List<Widget> buttons, {required bool expand}) => Row(
-  children: [
-    for (final (i, button) in buttons.indexed) ...[
-      if (i > 0) const SizedBox(width: AbTokens.space8),
-      if (expand)
-        Expanded(
-          child: SizedBox(height: AbTokens.tapTargetMin, child: button),
-        )
-      else
-        button,
-    ],
-  ],
-);
+/// Lays out a row of buttons in Carbon's reading order (secondary first,
+/// primary last): inline on wide layouts, a full-width set that stacks when
+/// narrow on compact ones.
+Widget memoryButtonRow(List<Widget> buttons, {required bool expand}) => expand
+    ? CarbonButtonSet(
+        alignment: CarbonButtonSetAlignment.fill,
+        children: buttons,
+      )
+    : Wrap(
+        spacing: CarbonSpacing.spacing03,
+        runSpacing: CarbonSpacing.spacing03,
+        children: buttons,
+      );
 
 /// Edits one memory by saving a correction that supersedes it.
 ///
@@ -186,60 +178,42 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
   /// Save and Cancel, shared by this form's own footer and the compact pane's
   /// fixed bar so the enabled rules live in one place.
   Widget actions({required bool expand}) => memoryButtonRow([
-    AbButton(
-      label: 'Save changes',
-      variant: AbButtonVariant.primary,
-      expand: expand,
-      onTap: _canSave ? () => detached('Memory', 'save failed', save) : null,
-    ),
-    AbButton(
+    CarbonButton(
       label: 'Cancel',
-      expand: expand,
-      onTap: _busy ? null : widget.onCancel,
+      kind: CarbonButtonKind.secondary,
+      onPressed: _busy ? null : widget.onCancel,
+    ),
+    CarbonButton(
+      label: 'Save changes',
+      busy: _busy,
+      onPressed: _canSave ? () => detached('Memory', 'save failed', save) : null,
     ),
   ], expand: expand);
 
-  Widget _chip(String source) {
-    final p = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.space8,
-        AbTokens.space2,
-        AbTokens.space4,
-        AbTokens.space2,
-      ),
-      decoration: BoxDecoration(
-        color: p.bgElevated,
-        borderRadius: AbTokens.borderRadius3,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              source,
-              style: AbTokens.monoStyle(fontSize: AbTokens.fontSm),
-            ),
+  Widget _sourceRow(String source) {
+    final t = CarbonTheme.of(context);
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            source,
+            style: t.typography.code.copyWith(color: t.colors.textPrimary),
           ),
-          const SizedBox(width: AbTokens.space4),
-          AbIconButton(
-            icon: AbIcons.close,
-            tooltip: 'Remove $source',
-            boxSize: 20,
-            onTap: _busy ? null : () => _removeSource(source),
-          ),
-        ],
-      ),
+        ),
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.close),
+          semanticLabel: 'Remove $source',
+          size: CarbonButtonSize.small,
+          onPressed: _busy ? null : () => _removeSource(source),
+        ),
+      ],
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final muted = AbTokens.sansStyle(
-      fontSize: AbTokens.fontSm,
-      color: p.textMuted,
-    );
+    final t = CarbonTheme.of(context);
+    final helper = t.typography.helper.copyWith(color: t.colors.textHelper);
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () {
@@ -248,97 +222,88 @@ class MemoryEditFormState extends ConsumerState<MemoryEditForm> {
       },
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        spacing: CarbonSpacing.spacing05,
         children: [
-          if ((_validationError ?? _error) case final error?) ...[
-            AbInlineBanner(text: error, color: p.error),
-            const SizedBox(height: AbTokens.space12),
-          ],
-          const MemorySectionLabel('Title (optional)'),
-          AbTextField(
+          if ((_validationError ?? _error) case final error?)
+            CarbonNotification(
+              kind: CarbonNotificationKind.error,
+              subtitle: error,
+            ),
+          CarbonTextInput(
             key: const Key('memory-edit-title'),
             controller: _title,
-            hintText: 'A short name for this finding',
-            showClearButton: true,
+            label: 'Title',
+            showOptional: true,
+            placeholder: 'A short name for this finding',
+            clearable: true,
             enabled: !_busy,
           ),
-          const SizedBox(height: AbTokens.space16),
-          const MemorySectionLabel('Description (optional)'),
-          AbTextField(
+          CarbonTextInput(
             key: const Key('memory-edit-description'),
             controller: _description,
-            hintText: 'When this finding is useful',
+            variant: CarbonTextInputVariant.multiline,
+            label: 'Description',
+            showOptional: true,
+            placeholder: 'When this finding is useful',
             minLines: 2,
             maxLines: 4,
-            showClearButton: true,
+            clearable: true,
             enabled: !_busy,
           ),
-          const SizedBox(height: AbTokens.space16),
-          const MemorySectionLabel('Memory'),
-          AbTextField(
+          CarbonTextInput(
             key: const Key('memory-edit-content'),
             controller: _content,
+            variant: CarbonTextInputVariant.multiline,
+            label: 'Memory',
             minLines: 4,
             maxLines: 12,
             autofocus: true,
             enabled: !_busy,
           ),
-          const SizedBox(height: AbTokens.space16),
-          const MemorySectionLabel('Applies when'),
-          AbTextField(
+          CarbonTextInput(
             key: const Key('memory-edit-applicability'),
             controller: _applicability,
-            hintText: 'For example: Windows builds only',
+            label: 'Applies when',
+            placeholder: 'For example: Windows builds only',
             enabled: !_busy,
           ),
-          const SizedBox(height: AbTokens.space16),
-          const MemorySectionLabel('Sources'),
-          if (_sources.isNotEmpty) ...[
-            Wrap(
-              spacing: AbTokens.space6,
-              runSpacing: AbTokens.space6,
-              children: [for (final source in _sources) _chip(source)],
-            ),
-            const SizedBox(height: AbTokens.space8),
-          ],
-          Row(
+          Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Semantics(
-                  label: 'Add a source',
-                  textField: true,
-                  child: AbTextField(
-                    key: const Key('memory-edit-source'),
-                    controller: _sourceInput,
-                    hintText: 'path/to/file.ts or docs/page.md#section',
-                    enabled: !_busy && !_atLimit,
-                    onSubmitted: (_) => _addSource(),
+              const MemorySectionLabel('Sources'),
+              for (final source in _sources) _sourceRow(source),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                spacing: CarbonSpacing.spacing03,
+                children: [
+                  Expanded(
+                    child: CarbonTextInput(
+                      key: const Key('memory-edit-source'),
+                      controller: _sourceInput,
+                      semanticLabel: 'Add a source',
+                      placeholder: 'path/to/file.ts or docs/page.md#section',
+                      enabled: !_busy && !_atLimit,
+                      onSubmitted: (_) => _addSource(),
+                    ),
                   ),
-                ),
+                  CarbonButton(
+                    label: 'Add',
+                    kind: CarbonButtonKind.tertiary,
+                    onPressed: _busy || !_canAdd ? null : _addSource,
+                  ),
+                ],
               ),
-              const SizedBox(width: AbTokens.space8),
-              AbButton(
-                label: 'Add',
-                onTap: _busy || !_canAdd ? null : _addSource,
+              const SizedBox(height: CarbonSpacing.spacing02),
+              Text(
+                _atLimit
+                    ? 'That’s the limit of $kMaxEvidenceReferences sources. Remove one to add another.'
+                    : 'Files or doc sections that back this memory up.',
+                style: helper,
               ),
             ],
           ),
-          const SizedBox(height: AbTokens.space6),
-          Text(
-            _atLimit
-                ? 'That’s the limit of $kMaxEvidenceReferences sources. Remove one to add another.'
-                : 'Files or doc sections that back this memory up.',
-            style: muted,
-          ),
-          const SizedBox(height: AbTokens.space16),
-          Text(
-            'Saving keeps the current text as an earlier version.',
-            style: muted,
-          ),
-          if (!widget.compact) ...[
-            const SizedBox(height: AbTokens.space16),
-            actions(expand: false),
-          ],
+          Text('Saving keeps the current text as an earlier version.', style: helper),
+          if (!widget.compact) actions(expand: false),
         ],
       ),
     );

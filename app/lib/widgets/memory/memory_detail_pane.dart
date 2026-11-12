@@ -1,25 +1,16 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_disclosure.dart';
-import '../../design/widgets/ab_empty_state.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_inline_banner.dart';
-import '../../design/widgets/ab_loading.dart';
-import '../../design/widgets/ab_scrollbar.dart';
 import '../../design/widgets/ab_toast.dart';
-import '../../design/widgets/ab_tooltip.dart';
 import '../../models/memory.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/memory.dart';
 import '../../util/detached.dart';
 import 'memory_edit_form.dart';
+import 'memory_empty_state.dart';
 import 'memory_error.dart';
 import 'memory_format.dart';
 import 'memory_section_label.dart';
@@ -52,7 +43,7 @@ class MemoryDetailPane extends ConsumerStatefulWidget {
   ConsumerState<MemoryDetailPane> createState() => _MemoryDetailPaneState();
 }
 
-const _sectionTop = AbTokens.space24 + AbTokens.space4;
+const _sectionTop = CarbonSpacing.spacing06 + CarbonSpacing.spacing02;
 
 class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
   bool _editing = false;
@@ -66,23 +57,9 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
   final _scroll = ScrollController();
   final _formKey = GlobalKey<MemoryEditFormState>();
 
-  // The design-system buttons take no FocusNode, so each button sits inside an
-  // inert Focus wrapper and focus is sent to the first focusable inside it.
-  final _editNode = FocusNode(
-    debugLabel: 'memory edit',
-    canRequestFocus: false,
-    skipTraversal: true,
-  );
-  final _forgetNode = FocusNode(
-    debugLabel: 'memory forget',
-    canRequestFocus: false,
-    skipTraversal: true,
-  );
-  final _keepNode = FocusNode(
-    debugLabel: 'memory keep',
-    canRequestFocus: false,
-    skipTraversal: true,
-  );
+  final _editNode = FocusNode(debugLabel: 'memory edit');
+  final _forgetNode = FocusNode(debugLabel: 'memory forget');
+  final _keepNode = FocusNode(debugLabel: 'memory keep');
 
   @override
   void dispose() {
@@ -93,13 +70,10 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     super.dispose();
   }
 
-  void _focusInside(FocusNode wrapper) {
+  // The target button only exists once this frame has built it.
+  void _focus(FocusNode node) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      for (final node in wrapper.traversalDescendants) {
-        node.requestFocus();
-        return;
-      }
+      if (mounted) node.requestFocus();
     });
   }
 
@@ -116,7 +90,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
 
   void _cancelEdit() {
     setState(() => _editing = false);
-    _focusInside(_editNode);
+    _focus(_editNode);
   }
 
   void _startConfirm() {
@@ -124,7 +98,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       _confirming = true;
       _forgetError = null;
     });
-    _focusInside(_keepNode);
+    _focus(_keepNode);
   }
 
   void _closeConfirm() {
@@ -133,7 +107,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       _confirming = false;
       _forgetError = null;
     });
-    _focusInside(_forgetNode);
+    _focus(_forgetNode);
   }
 
   Future<void> _forget() async {
@@ -189,22 +163,25 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       // A refresh must not swap the body for a spinner: that would dispose an
       // open editor.
       skipLoadingOnReload: true,
-      loading: () => const Center(child: AbLoading()),
+      loading: () =>
+          const Center(child: CarbonLoading(size: CarbonLoadingSize.small)),
       error: (error, _) {
         final code = memoryErrorCode(error);
         if (code == 'NOT_FOUND' || code == 'FORGOTTEN') {
           _notifyGone();
-          return const AbEmptyState(
+          return const MemoryEmptyState(
             title: 'This memory was forgotten.',
             subtitle: 'Pick another memory from the list.',
           );
         }
-        return AbEmptyState.error(
+        return MemoryEmptyState(
+          error: true,
           title: 'Memory unavailable',
           subtitle: memoryErrorCopy(error),
-          action: AbButton(
+          action: CarbonButton(
             label: 'Retry',
-            onTap: () => ref.invalidate(memoryDetailProvider(query)),
+            kind: CarbonButtonKind.tertiary,
+            onPressed: () => ref.invalidate(memoryDetailProvider(query)),
           ),
         );
       },
@@ -224,13 +201,10 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
         return Column(
           children: [
             Expanded(
-              child: AbScrollbar(
+              child: SingleChildScrollView(
                 controller: _scroll,
-                child: SingleChildScrollView(
-                  controller: _scroll,
-                  padding: const EdgeInsets.all(AbTokens.space16),
-                  child: body,
-                ),
+                padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+                child: body,
               ),
             ),
             _bar(context, record, canSave: canSave),
@@ -240,6 +214,45 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     );
   }
 
+  Widget _disclosure({
+    required String label,
+    required bool open,
+    required VoidCallback onToggle,
+    required Widget child,
+  }) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      // Pulled out by the ghost button's own inset so the label lines up
+      // with the text above it, as a flush Carbon accordion does; the hover
+      // fill bleeds into the margin instead.
+      Builder(
+        builder: (context) => Transform.translate(
+          offset: Offset(
+            Directionality.of(context) == TextDirection.rtl
+                ? CarbonSpacing.spacing05
+                : -CarbonSpacing.spacing05,
+            0,
+          ),
+          child: CarbonButton(
+            label: label,
+            kind: CarbonButtonKind.ghost,
+            size: CarbonButtonSize.small,
+            icon: CarbonIcon(
+              open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown,
+            ),
+            expanded: open,
+            onPressed: onToggle,
+          ),
+        ),
+      ),
+      if (open)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing03),
+          child: child,
+        ),
+    ],
+  );
+
   Widget _body(
     BuildContext context,
     MemoryDetail data, {
@@ -248,7 +261,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     required Map<String, String> labels,
     required bool canSave,
   }) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final record = data.record;
     final compact = widget.compact;
     final tagSize = compact
@@ -256,12 +269,13 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
         : MemoryTagSize.detail;
     final lifecycle = memoryLifecycleLabel(record);
     final agent = memoryAgentName(record, labels);
+    final body = t.typography.body.copyWith(color: t.colors.textPrimary);
 
     final tags = Padding(
-      padding: const EdgeInsets.only(bottom: AbTokens.space16),
+      padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing05),
       child: Wrap(
-        spacing: AbTokens.space8,
-        runSpacing: AbTokens.space8,
+        spacing: CarbonSpacing.spacing03,
+        runSpacing: CarbonSpacing.spacing03,
         children: [
           MemoryTag(label: record.kindLabel, size: tagSize),
           MemoryTag(label: memoryScopeLabel(record), size: tagSize),
@@ -297,38 +311,37 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
         tags,
         _recordText(record),
         const MemorySectionLabel('Applies when', top: _sectionTop),
-        Text(
-          memoryAppliesText(record, project: project),
-          style: AbTokens.sansStyle(fontSize: AbTokens.fontBody, height: 1.5),
-        ),
+        Text(memoryAppliesText(record, project: project), style: body),
         const MemorySectionLabel('Sources', top: _sectionTop),
         if (record.evidence.isEmpty)
           Text(
             "The agent didn't cite any files.",
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontMd,
-              color: p.textMuted,
-            ),
+            style: body.copyWith(color: t.colors.textSecondary),
           )
         else
           for (final path in record.evidence)
             Padding(
-              padding: const EdgeInsets.only(bottom: AbTokens.space4),
+              padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing02),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (!compact) ...[
                     Padding(
-                      padding: const EdgeInsets.only(top: AbTokens.space2),
-                      child: AbIcon(AbIcons.file, size: 14, color: p.textMuted),
+                      padding: const EdgeInsets.only(
+                        top: CarbonSpacing.spacing01,
+                      ),
+                      child: CarbonIcon(
+                        CarbonIcons.document,
+                        color: t.colors.iconSecondary,
+                      ),
                     ),
-                    const SizedBox(width: AbTokens.space8),
+                    const SizedBox(width: CarbonSpacing.spacing03),
                   ],
                   Expanded(
                     child: SelectableText(
                       path,
-                      style: AbTokens.monoStyle(
-                        fontSize: compact ? AbTokens.fontMd : AbTokens.fontSm,
+                      style: t.typography.code.copyWith(
+                        color: t.colors.textPrimary,
                       ),
                     ),
                   ),
@@ -336,7 +349,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
               ),
             ),
         Padding(
-          padding: const EdgeInsets.only(top: AbTokens.space24),
+          padding: const EdgeInsets.only(top: CarbonSpacing.spacing06),
           child: Text(
             memorySavedLine(
               record,
@@ -344,29 +357,26 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
               project: project,
               projectRemoved: removed,
             ),
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontMd,
-              color: p.textSecondary,
-            ),
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
           ),
         ),
         Container(
           width: double.infinity,
-          margin: const EdgeInsets.only(top: AbTokens.space16),
-          padding: const EdgeInsets.only(top: AbTokens.space4),
+          margin: const EdgeInsets.only(top: CarbonSpacing.spacing05),
+          padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
           decoration: BoxDecoration(
-            border: Border(top: BorderSide(color: p.borderSubtle)),
+            border: Border(top: BorderSide(color: t.borderSubtle(1))),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (data.earlier.isNotEmpty)
-                AbDisclosure(
+                _disclosure(
                   label: memoryEarlierLabel(
                     data.earlier.length,
                     more: data.earlierHasMore,
                   ),
-                  expanded: _earlierOpen,
+                  open: _earlierOpen,
                   onToggle: () => setState(() => _earlierOpen = !_earlierOpen),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -374,21 +384,20 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
                       for (final earlier in data.earlier)
                         Padding(
                           padding: const EdgeInsets.only(
-                            bottom: AbTokens.space12,
+                            bottom: CarbonSpacing.spacing04,
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               _recordText(earlier, earlier: true),
-                              const SizedBox(height: AbTokens.space2),
+                              const SizedBox(height: CarbonSpacing.spacing01),
                               Text(
                                 memoryEarlierWhen(
                                   earlier,
                                   agent: memoryAgentName(earlier, labels),
                                 ),
-                                style: AbTokens.sansStyle(
-                                  fontSize: AbTokens.fontSm,
-                                  color: p.textMuted,
+                                style: t.typography.helper.copyWith(
+                                  color: t.colors.textSecondary,
                                 ),
                               ),
                             ],
@@ -397,9 +406,9 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
                     ],
                   ),
                 ),
-              AbDisclosure(
+              _disclosure(
                 label: 'Technical details',
-                expanded: _techOpen,
+                open: _techOpen,
                 onToggle: () => setState(() => _techOpen = !_techOpen),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -418,7 +427,7 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
         if (!compact)
           Padding(
             padding: const EdgeInsets.only(
-              top: AbTokens.space16 + AbTokens.space4,
+              top: CarbonSpacing.spacing05 + CarbonSpacing.spacing02,
             ),
             child: _confirming
                 ? _confirmBox(context, record)
@@ -428,64 +437,62 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     );
   }
 
-  Widget _recordText(MemoryRecord record, {bool earlier = false}) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      if (record.title case final title?) ...[
-        SelectableText(
-          title,
-          style: AbTokens.sansStyle(
-            fontSize: earlier ? AbTokens.fontMd : AbTokens.fontLg,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: AbTokens.space8),
-      ],
-      if (record.description case final description?) ...[
-        SelectableText(
-          description,
-          style: AbTokens.sansStyle(
-            fontSize: earlier ? AbTokens.fontSm : AbTokens.fontBody,
-            color: context.antgrid.textSecondary,
-          ),
-        ),
-        const SizedBox(height: AbTokens.space8),
-      ],
-      SelectableText(
-        record.content,
-        style: AbTokens.sansStyle(
-          fontSize: earlier ? AbTokens.fontMd : AbTokens.fontLg,
-          height: 1.6,
-          color: earlier ? context.antgrid.textSecondary : null,
-        ),
-      ),
-    ],
-  );
-
-  Widget _tech(String label, String value) => Padding(
-    padding: const EdgeInsets.only(bottom: AbTokens.space6),
-    child: Row(
+  Widget _recordText(MemoryRecord record, {bool earlier = false}) {
+    final t = CarbonTheme.of(context);
+    final secondary = t.colors.textSecondary;
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SizedBox(
-          width: 88,
-          child: Text(
-            label,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontSm,
-              color: context.antgrid.textMuted,
-            ),
+        if (record.title case final title?) ...[
+          SelectableText(
+            title,
+            style: (earlier ? t.typography.heading : t.typography.headingLarge)
+                .copyWith(color: t.colors.textPrimary),
           ),
-        ),
-        Expanded(
-          child: SelectableText(
-            value,
-            style: AbTokens.monoStyle(fontSize: AbTokens.fontSm),
+          const SizedBox(height: CarbonSpacing.spacing03),
+        ],
+        if (record.description case final description?) ...[
+          SelectableText(
+            description,
+            style: (earlier ? t.typography.helper : t.typography.body)
+                .copyWith(color: secondary),
+          ),
+          const SizedBox(height: CarbonSpacing.spacing03),
+        ],
+        SelectableText(
+          record.content,
+          style: (earlier ? t.typography.helper : t.typography.body).copyWith(
+            color: earlier ? secondary : t.colors.textPrimary,
           ),
         ),
       ],
-    ),
-  );
+    );
+  }
+
+  Widget _tech(String label, String value) {
+    final t = CarbonTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing03),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: CarbonSpacing.spacing08 * 2 + CarbonSpacing.spacing03,
+            child: Text(
+              label,
+              style: t.typography.label.copyWith(color: t.colors.textSecondary),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: t.typography.code.copyWith(color: t.colors.textPrimary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _actionRow(
     BuildContext context,
@@ -493,57 +500,43 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     bool canSave, {
     required bool expand,
   }) => memoryButtonRow([
-    if (record.isCurrent) _editButton(canSave, expand: expand),
-    _forgetButton(context, expand: expand),
+    if (record.isCurrent) _editButton(canSave),
+    _forgetButton(),
   ], expand: expand);
 
-  Widget _editButton(bool canSave, {required bool expand}) {
-    final button = AbButton(
+  Widget _editButton(bool canSave) => CarbonTooltip(
+    enabled: !canSave,
+    message: 'Rebuild search before editing.',
+    child: CarbonButton(
       label: 'Edit',
-      expand: expand,
-      onTap: canSave ? _startEdit : null,
-    );
-    return Focus(
+      kind: CarbonButtonKind.tertiary,
       focusNode: _editNode,
-      canRequestFocus: false,
-      skipTraversal: true,
-      child: canSave
-          ? button
-          : AbTooltip(message: 'Rebuild search before editing.', child: button),
-    );
-  }
-
-  Widget _forgetButton(BuildContext context, {required bool expand}) => Focus(
-    focusNode: _forgetNode,
-    canRequestFocus: false,
-    skipTraversal: true,
-    child: AbButton(
-      label: 'Forget',
-      color: context.antgrid.error,
-      expand: expand,
-      onTap: _startConfirm,
+      onPressed: canSave ? _startEdit : null,
     ),
   );
 
+  Widget _forgetButton() => CarbonButton(
+    label: 'Forget',
+    kind: CarbonButtonKind.dangerTertiary,
+    focusNode: _forgetNode,
+    onPressed: _startConfirm,
+  );
+
   Widget _confirmBox(BuildContext context, MemoryRecord record) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final compact = widget.compact;
     final replaced = record.supersededBy != null;
-    final keep = Focus(
+    final keep = CarbonButton(
+      label: 'Keep it',
+      kind: CarbonButtonKind.secondary,
       focusNode: _keepNode,
-      canRequestFocus: false,
-      skipTraversal: true,
-      child: AbButton(
-        label: 'Keep it',
-        expand: compact,
-        onTap: _forgetting ? null : _closeConfirm,
-      ),
+      onPressed: _forgetting ? null : _closeConfirm,
     );
-    final forget = AbButton(
+    final forget = CarbonButton(
       label: 'Forget',
-      color: p.error,
-      expand: compact,
-      onTap: _forgetting
+      kind: CarbonButtonKind.danger,
+      busy: _forgetting,
+      onPressed: _forgetting
           ? null
           : () => detached('Memory', 'forget failed', _forget),
     );
@@ -554,43 +547,41 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
       child: Semantics(
         liveRegion: true,
         label: 'Forget this memory?',
-        child: Container(
+        child: SizedBox(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(
-            horizontal: AbTokens.space16,
-            vertical: AbTokens.space12,
-          ),
-          decoration: BoxDecoration(
-            color: p.bgSurface,
-            border: Border.all(color: p.borderStrong),
-            borderRadius: AbTokens.borderRadius8,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Forget this memory?',
-                style: AbTokens.sansStyle(fontSize: AbTokens.fontBody),
-              ),
-              const SizedBox(height: AbTokens.space6),
-              Text(
-                replaced
-                    ? "Agents won't recall it again, and every other version of it, including the current one, is deleted too. Your files and conversations aren't touched."
-                    : "Agents won't recall it again, and its earlier versions are deleted too. Your files and conversations aren't touched.",
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: p.textSecondary,
-                  height: 1.5,
+          child: CarbonLayerSurface(
+            border: true,
+            padding: const EdgeInsets.symmetric(
+              horizontal: CarbonSpacing.spacing05,
+              vertical: CarbonSpacing.spacing04,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              spacing: CarbonSpacing.spacing03,
+              children: [
+                Text(
+                  'Forget this memory?',
+                  style: t.typography.heading.copyWith(
+                    color: t.colors.textPrimary,
+                  ),
                 ),
-              ),
-              if (_forgetError case final error?) ...[
-                const SizedBox(height: AbTokens.space12),
-                AbInlineBanner(text: error, color: p.error),
+                Text(
+                  replaced
+                      ? "Agents won't recall it again, and every other version of it, including the current one, is deleted too. Your files and conversations aren't touched."
+                      : "Agents won't recall it again, and its earlier versions are deleted too. Your files and conversations aren't touched.",
+                  style: t.typography.body.copyWith(
+                    color: t.colors.textSecondary,
+                  ),
+                ),
+                if (_forgetError case final error?)
+                  CarbonNotification(
+                    kind: CarbonNotificationKind.error,
+                    subtitle: error,
+                  ),
+                memoryButtonRow([keep, forget], expand: compact),
               ],
-              const SizedBox(height: AbTokens.space12),
-              memoryButtonRow([forget, keep], expand: compact),
-            ],
+            ),
           ),
         ),
       ),
@@ -602,27 +593,27 @@ class _MemoryDetailPaneState extends ConsumerState<MemoryDetailPane> {
     MemoryRecord record, {
     required bool canSave,
   }) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final Widget content;
     if (_confirming) {
       content = _confirmBox(context, record);
     } else if (_editing) {
       content =
           _formKey.currentState?.actions(expand: true) ??
-          const SizedBox(height: AbTokens.tapTargetMin);
+          SizedBox(height: t.minTarget);
     } else {
       content = _actionRow(context, record, canSave, expand: true);
     }
     return Container(
       padding: EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space12,
-        AbTokens.space16,
-        AbTokens.space16 + MediaQuery.paddingOf(context).bottom,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing04,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing05 + MediaQuery.paddingOf(context).bottom,
       ),
       decoration: BoxDecoration(
-        color: p.bgDeepest,
-        border: Border(top: BorderSide(color: p.borderSubtle)),
+        color: t.colors.background,
+        border: Border(top: BorderSide(color: t.borderSubtle(1))),
       ),
       child: content,
     );

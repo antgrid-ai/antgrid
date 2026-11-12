@@ -1,34 +1,22 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_adaptive_sheet.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_confirm_dialog.dart';
-import '../../design/widgets/ab_dialog.dart';
-import '../../design/widgets/ab_inline_banner.dart';
-import '../../design/widgets/ab_list_row.dart';
-import '../../design/widgets/ab_loading.dart';
-import '../../design/widgets/ab_scrollbar.dart';
-import '../../design/widgets/ab_separator.dart';
-import '../../design/widgets/ab_switch.dart';
 import '../../models/memory.dart';
 import '../../providers/memory.dart';
 import '../../util/detached.dart';
-import '../../utils/platform_utils.dart';
 import 'memory_mutation.dart';
-import 'memory_section_label.dart';
 
+/// [context] must sit under an `AbCarbonScope`: the modal route takes its theme
+/// and density from the presenting context.
 Future<void> showMemorySettings(
   BuildContext context, {
   required MemoryTarget target,
   required Future<void> Function() onExportAll,
   String? machineName,
-}) => showAbAdaptiveSheet<void>(
+}) => showCarbonModal<void>(
   context,
-  maxWidth: 560,
-  child: MemorySettingsDialog(
+  builder: (_) => MemorySettingsDialog(
     target: target,
     onExportAll: onExportAll,
     machineName: machineName,
@@ -56,8 +44,6 @@ class MemorySettingsDialog extends ConsumerStatefulWidget {
 
 class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
     with MemoryMutation<MemorySettingsDialog> {
-  final _scroll = ScrollController();
-
   @override
   MemoryTarget get mutationTarget => widget.target;
 
@@ -66,92 +52,39 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
 
   String get _machine => widget.machineName ?? 'this machine';
 
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
-
   Future<void> _turnOff() async {
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
-      title: 'Turn off Memory?',
-      body:
-          'Agents stop saving and recalling memories. Everything saved stays on $_machine, and you can turn Memory back on here.',
-      confirmLabel: 'Turn off',
-      destructive: true,
-    );
+    final confirmed =
+        await showCarbonModal<bool>(
+          context,
+          builder: (dialog) {
+            final t = CarbonTheme.of(dialog);
+            return CarbonModal.confirmation(
+              title: 'Turn off Memory?',
+              body: Text(
+                'Agents stop saving and recalling memories. Everything saved stays on $_machine, and you can turn Memory back on here.',
+                style: t.typography.body.copyWith(color: t.colors.textPrimary),
+              ),
+              danger: true,
+              secondary: CarbonModalAction(
+                label: 'Cancel',
+                onPressed: () => Navigator.of(dialog).pop(false),
+              ),
+              primary: CarbonModalAction(
+                label: 'Turn off',
+                onPressed: () => Navigator.of(dialog).pop(true),
+              ),
+            );
+          },
+        ) ??
+        false;
     if (!confirmed || !mounted) return;
     if (await sendMutation({'op': 'settings', 'enabled': false}) && mounted) {
       Navigator.of(context).pop();
     }
   }
 
-  Widget _switchRow({
-    required String title,
-    String? description,
-    String? state,
-    required bool value,
-    required String semanticLabel,
-    required ValueChanged<bool>? onChanged,
-    bool large = false,
-  }) {
-    final colors = context.antgrid;
-    void toggle() => onChanged?.call(!value);
-    final row = AbListRow(
-      title: Text(
-        title,
-        style: AbTokens.sansStyle(
-          fontSize: large ? AbTokens.fontBody : AbTokens.fontMd,
-        ),
-      ),
-      subtitle: description == null
-          ? null
-          : Text(
-              description,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontMd,
-                color: colors.textSecondary,
-              ),
-            ),
-      subtitleMaxLines: 3,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (state != null) ...[
-            Text(
-              state,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: colors.textMuted,
-              ),
-            ),
-            const SizedBox(width: AbTokens.space8),
-          ],
-          ExcludeSemantics(
-            child: AbSwitch(value: value, onChanged: onChanged),
-          ),
-        ],
-      ),
-      onTap: onChanged == null ? null : toggle,
-    );
-    return Semantics(
-      toggled: value,
-      label: semanticLabel,
-      enabled: onChanged != null,
-      onTap: onChanged == null ? null : toggle,
-      excludeSemantics: true,
-      child: isMobilePlatform
-          ? ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: AbTokens.tapTargetMin),
-              child: row,
-            )
-          : row,
-    );
-  }
-
   Widget _body(MemoryStatus? status, MemoryProjects? projects) {
-    final colors = context.antgrid;
+    final t = CarbonTheme.of(context);
     final machinePaused = status?.paused ?? false;
     final live = [
       for (final p in projects?.projects ?? const <MemoryProjectSummary>[])
@@ -161,92 +94,86 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (mutationError case final error?) ...[
-          AbInlineBanner(text: error, color: colors.error),
-          const SizedBox(height: AbTokens.space16),
+          CarbonNotification(
+            key: ValueKey(error),
+            kind: CarbonNotificationKind.error,
+            subtitle: error,
+          ),
+          const SizedBox(height: CarbonSpacing.spacing05),
         ],
         if (status == null)
-          const Center(child: AbLoading())
-        else
-          _switchRow(
-            title: 'Let agents save memories',
-            description:
-                "When this is off, agents can still recall what's saved, and you can still edit and forget memories.",
-            value: !status.paused,
-            semanticLabel: 'Let agents save memories',
-            large: true,
-            onChanged: busy
-                ? null
-                : (v) => detached(
-                    'Memory',
-                    'pause toggle failed',
-                    () => sendMutation({'op': 'settings', 'paused': !v}),
-                  ),
+          const Center(child: CarbonLoading(size: CarbonLoadingSize.small))
+        else ...[
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: CarbonToggle(
+              labelText: 'Let agents save memories',
+              value: !status.paused,
+              onChanged: busy
+                  ? null
+                  : (v) => detached(
+                      'Memory',
+                      'pause toggle failed',
+                      () => sendMutation({'op': 'settings', 'paused': !v}),
+                    ),
+            ),
           ),
-        const SizedBox(height: AbTokens.space16),
-        const MemorySectionLabel('Saving by project', bottom: AbTokens.space8),
+          const SizedBox(height: CarbonSpacing.spacing02),
+          Text(
+            "When this is off, agents can still recall what's saved, and you can still edit and forget memories.",
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+          ),
+        ],
+        const SizedBox(height: CarbonSpacing.spacing05),
         if (machinePaused) ...[
           Text(
             'Saving is paused for every project.',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontSm,
-              color: colors.textMuted,
-            ),
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
           ),
-          const SizedBox(height: AbTokens.space8),
+          const SizedBox(height: CarbonSpacing.spacing03),
         ],
-        Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: colors.borderDefault),
-            borderRadius: AbTokens.borderRadius5,
+        CarbonContainedList(
+          label: 'Saving by project',
+          variant: CarbonContainedListVariant.disclosed,
+          status: projects == null
+              ? CarbonContainedListStatus.loading
+              : CarbonContainedListStatus.content,
+          emptyContent: Text(
+            'No projects yet.',
+            style: t.typography.body.copyWith(color: t.colors.textSecondary),
           ),
-          child: projects == null
-              ? const Padding(
-                  padding: EdgeInsets.all(AbTokens.space12),
-                  child: Center(child: AbLoading()),
-                )
-              : live.isEmpty
-              ? Padding(
-                  padding: const EdgeInsets.all(AbTokens.space12),
-                  child: Text(
-                    'No projects yet.',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontMd,
-                      color: colors.textMuted,
-                    ),
+          children: [
+            for (final p in live)
+              CarbonContainedListRow(
+                key: ValueKey(p.projectId),
+                title: p.displayName,
+                actions: [
+                  CarbonToggle(
+                    small: true,
+                    value: !machinePaused && !p.paused,
+                    semanticLabel: 'Saving for ${p.displayName}',
+                    onText: 'Saving',
+                    offText: 'Paused',
+                    onChanged: busy || machinePaused
+                        ? null
+                        : (v) => detached(
+                            'Memory',
+                            'project pause toggle failed',
+                            () => sendMutation({
+                              'op': 'settings',
+                              'project_id': p.projectId,
+                              'project_paused': !v,
+                            }),
+                          ),
                   ),
-                )
-              : Column(
-                  children: [
-                    for (final (i, p) in live.indexed) ...[
-                      if (i > 0) const AbSeparator.horizontal(),
-                      _switchRow(
-                        title: p.displayName,
-                        state: machinePaused || p.paused ? 'Paused' : 'Saving',
-                        value: !machinePaused && !p.paused,
-                        semanticLabel: 'Saving for ${p.displayName}',
-                        onChanged: busy || machinePaused
-                            ? null
-                            : (v) => detached(
-                                'Memory',
-                                'project pause toggle failed',
-                                () => sendMutation({
-                                  'op': 'settings',
-                                  'project_id': p.projectId,
-                                  'project_paused': !v,
-                                }),
-                              ),
-                      ),
-                    ],
-                  ],
-                ),
+                ],
+              ),
+          ],
         ),
-        const SizedBox(height: AbTokens.space16),
+        const SizedBox(height: CarbonSpacing.spacing05),
         Text(
           "Memories stay on $_machine. Agents treat them as notes, not instructions: your repository's own docs always win.",
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontMd,
-            color: colors.textSecondary,
-          ),
+          style: t.typography.body.copyWith(color: t.colors.textSecondary),
         ),
       ],
     );
@@ -256,53 +183,25 @@ class _MemorySettingsDialogState extends ConsumerState<MemorySettingsDialog>
   Widget build(BuildContext context) {
     final status = ref.watch(memoryStatusProvider(widget.target)).value;
     final projects = ref.watch(memoryProjectsProvider(widget.target)).value;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: abDialogTitlePadding.copyWith(bottom: AbTokens.space8),
-          child: abDialogTitle(
-            'Memory settings',
-            onClose: () => Navigator.of(context).pop(),
-          ),
+    return CarbonModal(
+      title: 'Memory settings',
+      body: _body(status, projects),
+      actions: [
+        CarbonModalAction(
+          label: 'Export all memories',
+          kind: CarbonButtonKind.secondary,
+          onPressed: () {
+            final export = widget.onExportAll;
+            Navigator.of(context).pop();
+            detached('Memory', 'export failed', export);
+          },
         ),
-        const AbSeparator.horizontal(),
-        Flexible(
-          child: AbScrollbar(
-            controller: _scroll,
-            child: SingleChildScrollView(
-              controller: _scroll,
-              padding: const EdgeInsets.all(AbTokens.space16),
-              child: _body(status, projects),
-            ),
-          ),
-        ),
-        const AbSeparator.horizontal(),
-        Padding(
-          padding: const EdgeInsets.all(AbTokens.space12),
-          child: Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            spacing: AbTokens.space8,
-            runSpacing: AbTokens.space8,
-            children: [
-              AbButton(
-                label: 'Export all memories',
-                onTap: () {
-                  final export = widget.onExportAll;
-                  Navigator.of(context).pop();
-                  detached('Memory', 'export failed', export);
-                },
-              ),
-              AbButton(
-                label: 'Turn off Memory',
-                color: context.antgrid.error,
-                onTap: busy
-                    ? null
-                    : () => detached('Memory', 'turn off failed', _turnOff),
-              ),
-            ],
-          ),
+        CarbonModalAction(
+          label: 'Turn off Memory',
+          kind: CarbonButtonKind.danger,
+          onPressed: busy
+              ? null
+              : () => detached('Memory', 'turn off failed', _turnOff),
         ),
       ],
     );
