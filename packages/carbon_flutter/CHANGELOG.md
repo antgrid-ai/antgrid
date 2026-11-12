@@ -66,6 +66,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   Carbon), `CarbonToast`, `CarbonToastController` and `CarbonToastOverlay`.
 - Loading: `CarbonLoading`, `CarbonLoadingOverlay` and `CarbonSpinner`.
 - Inline loading: `CarbonInlineLoading`.
+- Breadcrumb: `CarbonBreadcrumb` with `CarbonBreadcrumbItem` links, a plain
+  current page and an optional trailing slash.
 - Tag: `CarbonTag` (read-only, dismissible, selectable, operational).
 - Contained list: `CarbonContainedList`, `CarbonContainedListSliver` and
   `CarbonContainedListRow` (optional `disabled`).

@@ -4,6 +4,7 @@
 /// Import this library only; everything under `src/` is private.
 library;
 
+export 'src/components/breadcrumb.dart';
 export 'src/components/button.dart';
 export 'src/components/checkbox.dart';
 export 'src/components/contained_list.dart';

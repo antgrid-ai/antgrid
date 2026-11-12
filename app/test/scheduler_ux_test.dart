@@ -500,7 +500,7 @@ void main() {
 
       container.read(deviceTimezoneProvider.notifier).set('Europe/London');
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Schedules'));
+      await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
@@ -753,7 +753,7 @@ void main() {
       await tester.ensureVisible(seg('Custom'));
       await tester.tap(seg('Custom'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Schedules'));
+      await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
@@ -956,7 +956,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('This schedule was deleted'), findsOneWidget);
       expect(saveButton(tester).onPressed, isNull);
-      await tester.tap(find.text('Schedules'));
+      await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();

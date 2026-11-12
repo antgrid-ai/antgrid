@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_carbon.dart';
 import '../design/ab_colors.dart';
 import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
@@ -301,6 +303,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // A narrow editor is a page of its own with its own breadcrumb.
             if (!(_editing && !wide))
               _header(
                 wide: wide,
@@ -410,6 +413,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                       schedule: _editedSchedule,
                       request: ref.watch(schedulerRequestProvider),
                       writable: _writable,
+                      showBreadcrumb: !wide,
                       onClose: () => setState(() => _editing = false),
                       onSaved: () {
                         setState(() => _editing = false);
@@ -511,7 +515,21 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         child: Row(
           spacing: AbTokens.space12,
           children: [
-            title,
+            // While editing, the screen title becomes the editor's way back,
+            // so the name appears once, above the schedule's own title.
+            if (_editing)
+              AbCarbonScope(
+                child: CarbonBreadcrumb(
+                  items: [
+                    CarbonBreadcrumbItem(
+                      label: 'Scheduler',
+                      onPressed: () => setState(() => _editing = false),
+                    ),
+                  ],
+                ),
+              )
+            else
+              title,
             if (!_editing) segmented,
             const Spacer(),
             // A long machine name gives way before the actions do.

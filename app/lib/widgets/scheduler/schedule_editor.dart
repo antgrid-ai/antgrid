@@ -35,6 +35,7 @@ class ScheduleEditor extends ConsumerStatefulWidget {
     required this.onSaved,
     this.schedule,
     this.machineId = 'local',
+    this.showBreadcrumb = true,
   });
   final SchedulerSnapshot snapshot;
   final SchedulerRequest request;
@@ -42,6 +43,9 @@ class ScheduleEditor extends ConsumerStatefulWidget {
   final AgentSchedule? schedule;
   final String machineId;
   final VoidCallback onClose, onSaved;
+
+  /// False when the host's own header already shows the way back.
+  final bool showBreadcrumb;
   @override
   ConsumerState<ScheduleEditor> createState() => _ScheduleEditorState();
 }
@@ -938,7 +942,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     ]);
   }
 
-  Widget _header() {
+  /// [inset] is the form's own horizontal padding, so the breadcrumb and
+  /// title share the form's left edge.
+  Widget _header(double inset) {
     final t = _t;
     final name = _name.text.trim();
     return DecoratedBox(
@@ -946,32 +952,40 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: CarbonSpacing.spacing05,
-          vertical: CarbonSpacing.spacing03,
+        padding: EdgeInsets.fromLTRB(
+          inset,
+          CarbonSpacing.spacing05,
+          inset,
+          CarbonSpacing.spacing05,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: CarbonSpacing.spacing03,
           children: [
-            // Wraps rather than shares a row: at large text the back control
+            // Wraps rather than shares a row: at large text the breadcrumb
             // and the draft tag together exceed a phone's width.
-            Wrap(
-              spacing: CarbonSpacing.spacing04,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                CarbonButton(
-                  label: 'Schedules',
-                  kind: CarbonButtonKind.ghost,
-                  icon: const CarbonIcon(CarbonIcons.chevronLeft),
-                  onPressed: _saving ? null : widget.onClose,
-                ),
-                if (_draft.dirty)
-                  const CarbonTag(
-                    label: 'Unsaved draft',
-                    color: CarbonTagColor.blue,
-                  ),
-              ],
-            ),
+            if (widget.showBreadcrumb || _draft.dirty)
+              Wrap(
+                spacing: CarbonSpacing.spacing04,
+                runSpacing: CarbonSpacing.spacing03,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (widget.showBreadcrumb)
+                    CarbonBreadcrumb(
+                      items: [
+                        CarbonBreadcrumbItem(
+                          label: 'Scheduler',
+                          onPressed: _saving ? null : widget.onClose,
+                        ),
+                      ],
+                    ),
+                  if (_draft.dirty)
+                    const CarbonTag(
+                      label: 'Unsaved draft',
+                      color: CarbonTagColor.blue,
+                    ),
+                ],
+              ),
             Row(
               spacing: CarbonSpacing.spacing04,
               children: [
@@ -1484,7 +1498,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _header(),
+                    _header(
+                      wide ? CarbonSpacing.spacing06 : CarbonSpacing.spacing05,
+                    ),
                     Expanded(
                       child: wide
                           ? Align(

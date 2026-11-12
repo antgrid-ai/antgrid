@@ -126,7 +126,7 @@ void main() {
       await pumpScreen(tester, container);
       await editSchedule(tester);
       expect(timeText(tester), '2001-09-09 07:16');
-      await tester.tap(find.text('Schedules'));
+      await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();
@@ -163,7 +163,7 @@ void main() {
     await editSchedule(tester);
     await enterWhen(tester, '2100-02-02 10:00');
     await settle(tester);
-    await tester.tap(find.text('Schedules'));
+    await tester.tap(find.text('Scheduler'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('RUNS'));
     await tester.pumpAndSettle();
@@ -229,7 +229,7 @@ void main() {
       await editSchedule(tester);
       await enterWhen(tester, 'next tuesday');
       await settle(tester);
-      await tester.tap(find.text('Schedules'));
+      await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
       await tester.pumpAndSettle();

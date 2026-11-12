@@ -287,6 +287,9 @@ void main() {
       if (context == null) return null;
       final button = context.findAncestorWidgetOfExactType<CarbonButton>();
       if (button != null) return 'button:${button.label}';
+      if (context.findAncestorWidgetOfExactType<CarbonBreadcrumb>() != null) {
+        return 'breadcrumb';
+      }
       final input = context.findAncestorWidgetOfExactType<CarbonTextInput>();
       if (input != null) return 'input:${input.label}';
       if (context.findAncestorWidgetOfExactType<CarbonToggle>() != null) {
@@ -305,8 +308,8 @@ void main() {
     }
     expect(visited.last, 'button:Save changes');
     int at(String key) => visited.indexOf(key);
-    expect(at('button:Schedules'), 0, reason: 'the back control leads');
-    expect(at('toggle'), greaterThan(at('button:Schedules')));
+    expect(at('breadcrumb'), 0, reason: 'the back control leads');
+    expect(at('toggle'), greaterThan(at('breadcrumb')));
     expect(at('input:Name'), greaterThan(at('toggle')));
     expect(at('input:Prompt'), greaterThan(at('input:Name')));
     expect(

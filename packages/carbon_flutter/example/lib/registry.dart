@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import 'pages/breadcrumb_page.dart';
 import 'pages/button_page.dart';
 import 'pages/checkbox_page.dart';
 import 'pages/compositions/settings_form_page.dart';
@@ -185,6 +186,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Inline loading',
     group: 'Components',
     builder: (_) => const InlineLoadingPage(),
+  ),
+  GalleryEntry(
+    id: 'breadcrumb',
+    title: 'Breadcrumb',
+    group: 'Components',
+    builder: (_) => const BreadcrumbPage(),
   ),
   GalleryEntry(
     id: 'tag',
