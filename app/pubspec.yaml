@@ -47,6 +47,8 @@ dependencies:
     path: ../packages/antgrid_relay_client
   antgrid_peer_transport:
     path: ../packages/antgrid_peer_transport
+  carbon_flutter:
+    path: ../packages/carbon_flutter
   iroh_flutter: 1.0.3
   url_launcher: ^6.3.0
   flutter_secure_storage: ^10.3.1

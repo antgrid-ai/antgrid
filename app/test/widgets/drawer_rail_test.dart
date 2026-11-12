@@ -5,6 +5,7 @@
 // Horizontal assertions because the rail is a POSITION, not a widget: nothing
 // in the type system connects a status dot centred in one row to a button
 // centred in the next, so only a measurement can hold them together.
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
@@ -54,10 +55,16 @@ const _advertisedProjectId = 'gamma';
 const _advertisedName = 'Gamma';
 const _sessionName = 'Trace the reflow';
 
-const _removeTip = 'Remove from history';
-const _forgetTip = 'Forget agent';
 const _newSessionTip = 'New session';
 const _kebabTip = 'Session actions';
+
+/// A row's Remove/Forget trigger. Carbon names an icon-only control through
+/// semantics, which `find.byTooltip` cannot see, so it is found by its own
+/// label — one per row, since many overflow menus share the drawer.
+Finder _actionsFor(String name) => find.byWidgetPredicate(
+  (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Actions for $name',
+  description: 'overflow menu "Actions for $name"',
+);
 
 /// Slack for the comparison itself, not for misalignment: the defect this
 /// suite exists to catch moves a glyph by ~9px, and a 24px button beside a 6px
@@ -269,7 +276,7 @@ void main() {
 
           final bandTrash = _within(
             _row(_machineName),
-            find.byTooltip(_forgetTip),
+            _actionsFor(_machineName),
           );
           expect(bandTrash, findsOneWidget);
           expect(
@@ -308,7 +315,7 @@ void main() {
           name: "a local project row's outermost action",
           hoverLabel: _bareName,
           glyph: () =>
-              _within(_entryRow(_bareName), find.byTooltip(_removeTip)),
+              _within(_entryRow(_bareName), _actionsFor(_bareName)),
         ),
         (
           name: "an advertised project row's +",
@@ -378,14 +385,14 @@ void main() {
           label: _bareName,
           row: () => _entryRow(_bareName),
           action: () =>
-              _within(_entryRow(_bareName), find.byTooltip(_removeTip)),
+              _within(_entryRow(_bareName), _actionsFor(_bareName)),
           collapsedAtRest: true,
         ),
         (
           name: 'a machine band',
           label: _machineName,
           row: () => _band(_machineName),
-          action: () => _within(_row(_machineName), find.byTooltip(_forgetTip)),
+          action: () => _within(_row(_machineName), _actionsFor(_machineName)),
           // A band swaps its cell's tenant instead of collapsing it, so the
           // trash is laid out at rest and only fades in.
           collapsedAtRest: false,
@@ -500,7 +507,7 @@ void main() {
       );
       await tester.pump();
 
-      final trash = find.byTooltip(_removeTip);
+      final trash = _actionsFor(_bareName);
       final newSession = find.byTooltip(_newSessionTip);
       expect(trash, findsNothing);
       expect(newSession, findsNothing);
@@ -533,7 +540,7 @@ void main() {
 
       final band = _row(_machineName);
       final dot = _within(band, find.byType(AbStatusDot));
-      final trash = _within(band, find.byTooltip(_forgetTip));
+      final trash = _within(band, _actionsFor(_machineName));
 
       // Asserted on the dot's presence, not on the width of a slot: the slot is
       // reserved either way, so measuring it would pass with nothing in it.
@@ -568,7 +575,7 @@ void main() {
       await _seed(stores);
       await _pumpDrawer(tester, stores: stores);
 
-      final trash = _within(_entryRow(_bareName), find.byTooltip(_removeTip));
+      final trash = _within(_entryRow(_bareName), _actionsFor(_bareName));
       final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
       await gesture.addPointer(location: Offset.zero);
       addTearDown(gesture.removePointer);
@@ -577,6 +584,8 @@ void main() {
       expect(trash, findsOneWidget);
 
       await tester.tap(trash);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove from history'));
       await tester.pumpAndSettle();
       // The modal covers the row, so the pointer has already left it; moving
       // the mouse away only makes that explicit.

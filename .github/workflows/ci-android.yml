@@ -186,6 +186,19 @@ jobs:
           done
           exit $fail
 
+      # A Flutter package, so it needs `flutter`, not `dart`, for pub and tests.
+      # `flutter analyze` from the package root also covers example/. The
+      # package's `test test` stays separate from the gallery's own suite:
+      # `flutter test .` would collect example/test, which resolves against
+      # the gallery package, not this one.
+      - name: Analyze and test carbon_flutter
+        working-directory: packages/carbon_flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test test
+          (cd example && flutter test)
+
       - name: Flutter test
         working-directory: app
         run: flutter test

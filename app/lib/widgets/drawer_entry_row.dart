@@ -1,17 +1,18 @@
 // app/lib/widgets/drawer_entry_row.dart
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
+import '../design/ab_carbon.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -104,6 +105,11 @@ class _MachineDrawerHeaderRowState
   bool _focused = false;
   bool _latched = false;
 
+  // The row's focus ring wraps its content in a different widget while it is
+  // shown, which would remount the trailing action and drop its menu's focus
+  // and open state; the key carries the State across that rewrap.
+  final _removeKey = GlobalKey();
+
   void _setLatched(bool v) {
     if (!mounted || _latched == v) return;
     setState(() => _latched = v);
@@ -149,7 +155,11 @@ class _MachineDrawerHeaderRowState
               AbRowTrailingSwap(
                 revealed: revealed,
                 resting: _MachineOnlineDot(machineUuid: machineUuid),
-                action: _RemoveButton(entry: entry, onLatch: _setLatched),
+                action: _RemoveButton(
+                  key: _removeKey,
+                  entry: entry,
+                  onLatch: _setLatched,
+                ),
               )
             else
               AbRowTrailingCell(
@@ -433,6 +443,11 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
   bool _focused = false;
   bool _latched = false;
 
+  // The row's focus ring wraps its content in a different widget while it is
+  // shown, which would remount the trailing action and drop its menu's focus
+  // and open state; the key carries the State across that rewrap.
+  final _removeKey = GlobalKey();
+
   void _setLatched(bool v) {
     if (!mounted || _latched == v) return;
     setState(() => _latched = v);
@@ -496,6 +511,7 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
           revealed: hovered || _focused || _latched,
           expanded: expanded,
           onLatch: _setLatched,
+          removeKey: _removeKey,
         ),
         density: AbRowDensity.sm,
         horizontalPadding: 0, // gutter lives on the outer Padding
@@ -583,9 +599,14 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     this.showRemoteChip = true,
     this.hostsActions = true,
     this.onLatch,
+    this.removeKey,
   });
 
   final DrawerEntry entry;
+
+  /// Identity for this row's [_RemoveButton], owned by the row state above the
+  /// widget that remounts its trailing cells.
+  final Key? removeKey;
 
   /// Hover, keyboard focus, or a confirm dialog this row's own trash has open.
   final bool revealed;
@@ -675,7 +696,11 @@ class _DrawerEntryTrailing extends ConsumerWidget {
       if (offersRemove) {
         cells.add(
           AbRowTrailingCell(
-            child: _RemoveButton(entry: entry, onLatch: onLatch),
+            child: _RemoveButton(
+              key: removeKey,
+              entry: entry,
+              onLatch: onLatch,
+            ),
           ),
         );
       }
@@ -750,12 +775,13 @@ class DrawerProjectAggregateDot extends ConsumerWidget {
 class _RemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
 
-  /// Held true while the confirm dialog is up. The row that revealed this
-  /// button collapses on pointer-exit, and the pointer leaves it the moment the
-  /// modal opens — without the latch the trash unmounts under its own dialog.
+  /// Held true while the menu or the confirm dialog is up. The row that
+  /// revealed this button collapses on pointer-exit, and the pointer leaves it
+  /// for the menu's overlay and then the modal — without the latch the trigger
+  /// unmounts under its own menu or dialog.
   final ValueChanged<bool>? onLatch;
 
-  const _RemoveButton({required this.entry, this.onLatch});
+  const _RemoveButton({super.key, required this.entry, this.onLatch});
 
   /// Whether [entry] has a trash to offer at all. Asked by the row rather than
   /// answered by a self-shrinking build, because the trailing kit reserves the
@@ -795,37 +821,151 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
   // second tap can't re-enter `_confirmRemove` (matching `_NewSessionButton`).
   bool _busy = false;
 
+  // Owned so focus can be put back on a live node: the menu's own restore
+  // target is an overlay item that is gone by the time the menu closes.
+  final FocusNode _triggerFocus = FocusNode(debugLabel: 'drawer remove menu');
+
+  // The package does not report a close when the trigger unmounts under an
+  // open menu, so the latch it took would never be released.
+  bool _menuOpen = false;
+
+  bool _modalOpen = false;
+
+  void _onMenuOpenChanged(bool open) {
+    _menuOpen = open;
+    if (open) {
+      widget.onLatch?.call(true);
+      return;
+    }
+    _restoreFocus();
+    // An item's callback follows this close in the same event and takes the
+    // latch back for its modal, so the release waits to see whether it did.
+    _releaseLatchAfterFrame(() => !_modalOpen);
+  }
+
+  // The row learns that focus now sits on the trigger only after a frame, so
+  // releasing the latch at once un-reveals the row and unmounts the trigger
+  // that was just handed focus.
+  void _releaseLatchAfterFrame(bool Function() stillWanted) {
+    final onLatch = widget.onLatch;
+    if (onLatch == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (stillWanted()) onLatch(false);
+    });
+  }
+
+  // Asked twice: the menu and the modal route each restore their own captured
+  // focus target as they unwind, after this runs, and neither target survives.
+  void _restoreFocus() {
+    void request() {
+      if (!mounted || !_triggerFocus.canRequestFocus) return;
+      _triggerFocus.requestFocus();
+      FocusManager.instance.applyFocusChangesIfNeeded();
+    }
+
+    request();
+    WidgetsBinding.instance.addPostFrameCallback((_) => request());
+  }
+
+  @override
+  void dispose() {
+    final onLatch = widget.onLatch;
+    if (_menuOpen && onLatch != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => onLatch(false));
+    }
+    _triggerFocus.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isLocal = widget.entry is LocalProjectEntry;
-    return AbIconButton(
-      icon: AbIcons.trash,
-      tooltip: isLocal ? 'Remove from history' : 'Forget agent',
-      onTap: _busy ? null : () => _confirmRemove(isLocal: isLocal),
+    final trigger = AbCarbonScope(
+      child: Builder(
+        builder: (scopeContext) => CarbonOverflowMenu(
+          semanticLabel: 'Actions for ${widget.entry.displayName}',
+          enabled: !_busy,
+          size: CarbonButtonSize.extraSmall,
+          focusNode: _triggerFocus,
+          // The menu's overlay sits outside the row's hover region, so the
+          // pointer crossing into it would un-reveal the row and unmount
+          // this trigger with the menu open.
+          onOpenChanged: _onMenuOpenChanged,
+          entries: [
+            CarbonMenuItem(
+              label: isLocal ? 'Remove from history' : 'Forget agent',
+              kind: CarbonMenuItemKind.danger,
+              onPressed: () =>
+                  _confirmRemove(scopeContext, isLocal: isLocal),
+            ),
+          ],
+        ),
+      ),
+    );
+    // The cell keeps the footprint of every other glyph on the rail. Compact
+    // Carbon's extra-small trigger is exactly that box. Touch Carbon floors
+    // every target at 48, taller than the 40px row, so the trigger is clipped
+    // to the cell: what paints is what takes the tap, and its pressed and
+    // focus states never cover a neighbouring row.
+    return SizedBox(
+      key: const ValueKey('drawer-remove-cell'),
+      width: AbIconButton.footprintWidth(context),
+      height: AbIconButton.boxExtent(context),
+      child: AbCarbonScope.platformDensity == CarbonDensity.touch
+          ? ClipRect(
+              child: OverflowBox(
+                maxWidth: double.infinity,
+                maxHeight: double.infinity,
+                child: trigger,
+              ),
+            )
+          : Center(child: trigger),
     );
   }
 
-  Future<void> _confirmRemove({required bool isLocal}) async {
+  Future<void> _confirmRemove(
+    BuildContext scopeContext, {
+    required bool isLocal,
+  }) async {
     final entry = widget.entry;
     // Captured before the dialog await: the removal below must still run if the
     // drawer rebuilt this row away while the confirm was open.
     final container = ref.container;
     final onLatch = widget.onLatch;
     onLatch?.call(true);
+    _modalOpen = true;
+    // The modal route restores whatever held focus when it opened, and at this
+    // point that is the menu item, which dies with the menu overlay.
+    _triggerFocus.requestFocus();
+    FocusManager.instance.applyFocusChangesIfNeeded();
     try {
-      final ok = await AbConfirmDialog.show(
-        context: context,
-        title: isLocal
-            ? 'Remove ${entry.displayName}?'
-            : 'Forget ${entry.displayName}?',
-        body: isLocal
-            ? removeLocalProjectBody(container, entry.id)
-            : 'This clears the cached sessions and connection details for '
-                  'this machine. It comes back on its own while it is signed '
-                  'in to your account.',
-        confirmLabel: isLocal ? 'Remove' : 'Forget',
-        destructive: true,
-      );
+      final title = isLocal
+          ? 'Remove ${entry.displayName}?'
+          : 'Forget ${entry.displayName}?';
+      final body = isLocal
+          ? removeLocalProjectBody(container, entry.id)
+          : 'This clears the cached sessions and connection details for '
+                'this machine. It comes back on its own while it is signed '
+                'in to your account.';
+      final ok =
+          await showCarbonModal<bool>(
+            scopeContext,
+            builder: (modalContext) => CarbonModal.confirmation(
+              title: title,
+              body: Text(body),
+              danger: true,
+              primary: CarbonModalAction(
+                label: isLocal ? 'Remove' : 'Forget',
+                onPressed: () => Navigator.of(modalContext).pop(true),
+              ),
+              secondary: CarbonModalAction(
+                label: 'Cancel',
+                autofocus: true,
+                onPressed: () => Navigator.of(modalContext).pop(false),
+              ),
+            ),
+          ) ??
+          false;
       if (!ok) return;
       // No `mounted` EARLY RETURN here, only a guarded setState: a confirmed
       // destructive action runs off the captured container, and bailing out
@@ -854,7 +994,9 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
         if (mounted) setState(() => _busy = false);
       }
     } finally {
-      onLatch?.call(false);
+      _modalOpen = false;
+      _restoreFocus();
+      _releaseLatchAfterFrame(() => !_modalOpen && !_menuOpen);
     }
   }
 }

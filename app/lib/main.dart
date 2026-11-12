@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
+import 'package:carbon_flutter/carbon_flutter.dart' show CarbonLicenses;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     show FlutterLocalNotificationsPlugin;
@@ -137,6 +138,7 @@ Future<void> main() async {
       'JetBrains Mono NL',
     ], await rootBundle.loadString('assets/fonts/OFL.txt'));
   });
+  CarbonLicenses.register();
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(const [
       'Antgrid',

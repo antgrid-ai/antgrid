@@ -40,7 +40,7 @@ The app should feel agent command centre, not a web dashboard. It prioritizes in
 | **App** | `app/` | Flutter/Dart + Riverpod | Mobile/desktop UI: terminal viewer, file explorer, browser preview. |
 | **Web** | `web/` | TS/Bun + Hono + Postgres | Licensing, subscriptions, OAuth device-flow, Ed25519 JWT minting, Better-Auth sign-in. Entry: `src/index.ts`. |
 
-Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (MPL-2.0 pure Dart central-control client plus the peer session protocol over an injected native `PeerLink`, no Flutter), **`antgrid_peer_transport`** (MPL-2.0 native transport and authorization leases, shared by app/CLI), **`antgrid_eval_client`** (E2E eval fixtures), **`antgrid-wire`** (MPL-2.0 TS session-frame type names, stream-open records, and relay control-envelope Zod schemas, shared by bridge/relay/web/evals; the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
+Shared packages in `packages/`: **`antgrid-agents`** (MPL-2.0 TypeScript agent contracts, built-in adapters, runtime and integration assets; bridge consumes its public exports), **`antgrid_relay_client`** (MPL-2.0 pure Dart central-control client plus the peer session protocol over an injected native `PeerLink`, no Flutter), **`antgrid_peer_transport`** (MPL-2.0 native transport and authorization leases, shared by app/CLI), **`antgrid_eval_client`** (E2E eval fixtures), **`carbon_flutter`** (MPL-2.0 independent Flutter implementation of the Carbon Design System with its own gallery in `example/`; the app consumes it by path through `app/lib/design/ab_carbon.dart`), **`antgrid-wire`** (MPL-2.0 TS session-frame type names, stream-open records, and relay control-envelope Zod schemas, shared by bridge/relay/web/evals; the Dart client mirrors it **by hand**). Full breakdown, the message flow and the `antgrid.yaml` schema: `docs/architecture.md`.
 
 ## Gotchas (read before editing)
 
@@ -131,7 +131,7 @@ Full rules live in `app/AGENTS.md`, which auto-loads whenever you work under
 `app/` — all Flutter UI is there. The two that must never be violated, restated
 here because they are easy to break from outside that tree:
 
-- **NEVER use raw Material widgets, `Icons.*`, or inline color/spacing literals.** Use `app/lib/design/` — `AbIcons.*`, `AbTokens`, and the existing `AbX` widgets.
+- **NEVER use raw Material widgets, `Icons.*`, or inline color/spacing literals.** Use `app/lib/design/` — `AbIcons.*`, `AbTokens`, and the existing `AbX` widgets. The one exception is a surface migrated to `packages/carbon_flutter`, which follows the Carbon rules in `app/AGENTS.md`.
 - **Sans for chrome, mono for code/data.** Not machine-checked — `npm run check:font-tokens` only bans raw `fontSize:` literals, so the family rule is on you.
 
 ## Public roadmap maintenance
