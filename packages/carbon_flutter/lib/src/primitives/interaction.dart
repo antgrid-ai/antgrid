@@ -153,6 +153,7 @@ class CarbonInteraction extends StatefulWidget {
     this.child,
     this.onPressed,
     this.onLongPress,
+    this.cancelOnLongPress = false,
     this.onSecondaryTap,
     this.focusNode,
     this.autofocus = false,
@@ -190,6 +191,12 @@ class CarbonInteraction extends StatefulWidget {
 
   /// Long press, e.g. a touch path to a context menu. Ignored when disabled.
   final VoidCallback? onLongPress;
+
+  /// Lets a long press end the press without activating, and without offering
+  /// assistive technology a long-press action that would do nothing. For a
+  /// control whose content shows tooltips on a touch hold, so reading one
+  /// does not also activate the control on release.
+  final bool cancelOnLongPress;
 
   /// Secondary (right) click, for context menus. Ignored when disabled.
   final VoidCallback? onSecondaryTap;
@@ -533,10 +540,12 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
                 onTapCancel: enabled ? () => _setPressed(false) : null,
                 onTapUp: enabled ? _handleTapUp : null,
                 onTap: enabled ? _handlePointerTap : null,
-                onLongPress: enabled && widget.onLongPress != null
+                onLongPress:
+                    enabled &&
+                        (widget.onLongPress != null || widget.cancelOnLongPress)
                     ? () {
                         _setPressed(false);
-                        widget.onLongPress!();
+                        widget.onLongPress?.call();
                       }
                     : null,
                 onSecondaryTap: enabled ? widget.onSecondaryTap : null,

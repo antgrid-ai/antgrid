@@ -200,8 +200,26 @@ class CarbonAnchoredPopup extends StatefulWidget {
   final bool dismissOnEscape;
   final bool dismissOnBack;
 
+  /// Whether the press of [pointer] dismissed a popup by landing outside it.
+  ///
+  /// An outside tap closes the popup on its press and is then delivered to
+  /// whatever lies under it, so a control can check this on release to treat
+  /// a tap that only closed a popup as a dismissal rather than as its own
+  /// activation. Pointer ids are never reused, so a later press never matches.
+  static bool dismissedByPointer(int pointer) =>
+      _lastOutsideDismissPointer == pointer;
+
+  static int? _lastOutsideDismissPointer;
+
   @override
   State<CarbonAnchoredPopup> createState() => _CarbonAnchoredPopupState();
+}
+
+/// Records that [pointer]'s press dismissed a popup from outside, for a popup
+/// whose host judges outside taps itself (a menu, whose submenus are separate
+/// popups). Package-internal: not exported.
+void recordOutsideDismiss(int pointer) {
+  CarbonAnchoredPopup._lastOutsideDismissPointer = pointer;
 }
 
 class _CarbonAnchoredPopupState extends State<CarbonAnchoredPopup> {
@@ -532,7 +550,10 @@ class _CarbonAnchoredPopupState extends State<CarbonAnchoredPopup> {
       child: TapRegion(
         groupId: this,
         onTapOutside: widget.dismissOnOutsideTap
-            ? (_) => _dismiss(CarbonPopupDismissReason.outsideTap)
+            ? (event) {
+                recordOutsideDismiss(event.pointer);
+                _dismiss(CarbonPopupDismissReason.outsideTap);
+              }
             : null,
         child: Focus(
           focusNode: _popupFocus,

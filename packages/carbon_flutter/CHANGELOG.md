@@ -43,6 +43,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   draws a `border-subtle` bottom rule).
 - `CarbonFieldAction.pressedFill` with `CarbonFieldActionPress` (`selected` or
   `active`) for the fill of a pressed field action.
+- `CarbonAnchoredPopup.dismissedByPointer` tells a control whether the press
+  it is about to act on only closed a popup, since an outside tap passes
+  through to what lies under it.
 
 ### Components
 
@@ -121,7 +124,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Toggle: the visible label is part of the tap target and shares one semantics
   node with the switch, as upstream's `<label htmlFor>` does.
 - Contained list: `CarbonContainedListRow.onLongPress`; a long-press no longer
-  also runs `onPressed` on release.
+  also runs `onPressed` on release. `cancelOnLongPress` (also on
+  `CarbonInteraction`) claims the hold without exposing a long-press action.
 - Text input: `CarbonTextInput.bare` renders only the editable text (no fill,
   border, outline, label, helper or counter) for hosts that draw their own frame.
 

@@ -41,4 +41,4 @@ export 'src/primitives/field.dart';
 export 'src/primitives/focus_ring.dart';
 export 'src/primitives/interaction.dart';
 export 'src/primitives/option.dart';
-export 'src/primitives/popup.dart';
+export 'src/primitives/popup.dart' hide recordOutsideDismiss;

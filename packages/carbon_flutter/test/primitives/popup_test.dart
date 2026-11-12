@@ -167,6 +167,31 @@ void main() {
     ]);
   });
 
+  testWidgets('names the press that dismissed it from outside', (
+    tester,
+  ) async {
+    await pump(tester, _Subject(controller: controller));
+    controller.open();
+    await tester.pump();
+
+    final dismissing = await tester.startGesture(
+      const Offset(700, 500),
+      pointer: 901,
+    );
+    await tester.pump();
+    expect(controller.isOpen, isFalse);
+    expect(CarbonAnchoredPopup.dismissedByPointer(901), isTrue);
+    await dismissing.up();
+
+    // A later press with the popup already closed dismissed nothing.
+    final later = await tester.startGesture(
+      const Offset(700, 500),
+      pointer: 902,
+    );
+    expect(CarbonAnchoredPopup.dismissedByPointer(902), isFalse);
+    await later.up();
+  });
+
   testWidgets('Escape dismisses and restores focus to the trigger', (
     tester,
   ) async {

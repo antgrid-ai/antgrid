@@ -389,6 +389,7 @@ class CarbonContainedListRow extends StatefulWidget {
     this.actions = const <Widget>[],
     this.onPressed,
     this.onLongPress,
+    this.cancelOnLongPress = false,
     this.onSelectedChanged,
     this.selected,
     this.revealActionsOnHover = false,
@@ -421,6 +422,10 @@ class CarbonContainedListRow extends StatefulWidget {
   /// release does not also run [onPressed], which matters when a long-press
   /// opens a tooltip or menu on touch. Ignored on a static row.
   final VoidCallback? onLongPress;
+
+  /// A long-press ends the press without running [onPressed] and without
+  /// offering a long-press action; see [CarbonInteraction.cancelOnLongPress].
+  final bool cancelOnLongPress;
   final ValueChanged<bool>? onSelectedChanged;
   final bool? selected;
   final bool revealActionsOnHover;
@@ -537,6 +542,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       target = CarbonInteraction(
         onPressed: activate,
         onLongPress: widget.onLongPress,
+        cancelOnLongPress: widget.cancelOnLongPress,
         focusNode: widget.focusNode,
         button: widget.onSelectedChanged == null,
         label: secondary == null || hasContent

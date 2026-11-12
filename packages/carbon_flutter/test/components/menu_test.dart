@@ -288,6 +288,29 @@ void main() {
     expect(find.text('Cut'), findsOneWidget);
   });
 
+  testWidgets('the press that closed the menu is named; a later one is not', (
+    tester,
+  ) async {
+    await _pump(tester, const _Host());
+    await _open(tester);
+    final closing = await tester.startGesture(
+      const Offset(700, 500),
+      pointer: 911,
+    );
+    await tester.pump();
+    await closing.up();
+    await tester.pump();
+    expect(find.text('Cut'), findsNothing);
+    expect(CarbonAnchoredPopup.dismissedByPointer(911), isTrue);
+
+    final later = await tester.startGesture(
+      const Offset(700, 500),
+      pointer: 912,
+    );
+    await later.up();
+    expect(CarbonAnchoredPopup.dismissedByPointer(912), isFalse);
+  });
+
   testWidgets('a pointer down outside dismisses the whole tree', (tester) async {
     await _pump(tester, const _Host());
     final state = tester.state<_HostState>(find.byType(_Host));

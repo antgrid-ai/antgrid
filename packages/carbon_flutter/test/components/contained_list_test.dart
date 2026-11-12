@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -201,6 +203,33 @@ void main() {
       await tester.tap(find.text('Row'));
       await tester.pump();
       expect(log, ['long', 'press']);
+    });
+
+    testWidgets('cancelOnLongPress holds without pressing or a semantic action', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final log = <String>[];
+      await pumpCarbon(
+        tester,
+        CarbonContainedList(
+          label: 'L',
+          children: [
+            CarbonContainedListRow(
+              title: 'Row',
+              onPressed: () => log.add('press'),
+              cancelOnLongPress: true,
+            ),
+          ],
+        ),
+      );
+      await tester.longPress(find.text('Row'));
+      await tester.pump();
+      expect(log, isEmpty);
+      final data = tester.getSemantics(find.bySemanticsLabel('Row')).getSemanticsData();
+      expect(data.hasAction(SemanticsAction.longPress), isFalse);
+      expect(data.hasAction(SemanticsAction.tap), isTrue);
+      semantics.dispose();
     });
 
     testWidgets('row tap activates the row only', (tester) async {

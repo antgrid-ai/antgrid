@@ -433,7 +433,10 @@ class _CarbonMenuState extends State<CarbonMenu> {
     // region, and would close the whole tree.
     return TapRegion(
       groupId: host.tapGroup,
-      onTapOutside: (_) => _outsideTap(),
+      onTapOutside: (event) {
+        if (widget.controller.isOpen) recordOutsideDismiss(event.pointer);
+        _outsideTap();
+      },
       child: CarbonAnchoredPopup(
         controller: widget.controller,
         alignment: widget.alignment,
