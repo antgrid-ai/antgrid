@@ -151,7 +151,8 @@ class CarbonDataTable extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        if (title != null)
+        // Upstream draws the header for a description alone too.
+        if (title != null || description != null)
           DecoratedBox(
             decoration: BoxDecoration(color: theme.layer(level)),
             child: Padding(
@@ -164,21 +165,22 @@ class CarbonDataTable extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  Semantics(
-                    header: true,
-                    child: Text(
-                      title,
-                      style:
-                          (theme.isTouch
-                                  ? theme.typography.headingLarge
-                                  : theme.typography.title)
-                              .copyWith(color: theme.colors.textPrimary),
+                  if (title != null)
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        title,
+                        style:
+                            (theme.isTouch
+                                    ? theme.typography.headingLarge
+                                    : theme.typography.title)
+                                .copyWith(color: theme.colors.textPrimary),
+                      ),
                     ),
-                  ),
                   if (description != null)
                     Padding(
-                      padding: const EdgeInsets.only(
-                        top: CarbonSpacing.spacing03,
+                      padding: EdgeInsets.only(
+                        top: title != null ? CarbonSpacing.spacing03 : 0,
                       ),
                       child: Text(
                         description,

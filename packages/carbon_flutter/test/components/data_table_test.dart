@@ -290,6 +290,19 @@ void main() {
     );
   });
 
+  testWidgets('a description alone still gets the header block', (
+    tester,
+  ) async {
+    await pumpCarbon(tester, _table(description: 'All of them'), theme: light);
+    final description = tester.getRect(find.text('All of them'));
+    expect(description.top, CarbonSpacing.spacing05);
+    expect(find.bySemanticsLabel('Schedules'), findsNothing);
+    expect(
+      tester.getRect(find.text('Name')).top,
+      greaterThan(description.bottom),
+    );
+  });
+
   testWidgets('empty rows show the empty state below the header', (
     tester,
   ) async {

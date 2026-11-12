@@ -83,6 +83,29 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets('the trigger and the menu can carry different names', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        CarbonMenuButton(
+          label: 'Laptop',
+          triggerSemanticLabel: 'Machine: Laptop, change',
+          semanticLabel: 'Machines',
+          entries: _entries(<String>[]),
+        ),
+      );
+      expect(
+        tester.getSemantics(find.text('Laptop')),
+        isSemantics(label: 'Machine: Laptop, change', isButton: true),
+      );
+      await tester.tap(find.text('Laptop'));
+      await _settle(tester);
+      expect(find.bySemanticsLabel('Machines'), findsOneWidget);
+      handle.dispose();
+    });
+
     testWidgets('keyboard: Enter opens, Escape closes and restores focus', (
       tester,
     ) async {

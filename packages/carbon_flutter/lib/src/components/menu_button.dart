@@ -192,6 +192,7 @@ class CarbonMenuButton extends StatelessWidget {
     this.onDismissed,
     this.onOpenChanged,
     this.semanticLabel,
+    this.triggerSemanticLabel,
     this.maxLines,
   }) : assert(
          kind == CarbonButtonKind.primary ||
@@ -223,6 +224,11 @@ class CarbonMenuButton extends StatelessWidget {
   /// The open menu's announced name; defaults to [label].
   final String? semanticLabel;
 
+  /// The trigger's announced name; defaults to [label]. Use it when the
+  /// visible label is a value (a selected machine, say) that alone does not
+  /// say what the control changes.
+  final String? triggerSemanticLabel;
+
   /// Clamps the trigger's label; see [CarbonButton.maxLines].
   final int? maxLines;
 
@@ -242,6 +248,7 @@ class CarbonMenuButton extends StatelessWidget {
         controls,
         CarbonButton(
           label: label,
+          semanticLabel: triggerSemanticLabel,
           maxLines: maxLines,
           kind: kind,
           size: size,
