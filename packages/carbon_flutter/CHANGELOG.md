@@ -88,6 +88,10 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   the expanded or collapsed state of a disclosure control.
 - Button: `maxLines` on `CarbonButton` and `CarbonMenuButton` clamps the label
   with an ellipsis.
+- Button: `leading` on `CarbonButton` and `CarbonMenuButton` draws a small
+  non-interactive mark, such as a status dot, before the label.
+- Menu button: `triggerSemanticLabel` names the trigger separately from the
+  open menu.
 - Contained list: `CarbonContainedListRow.content` shows free-form,
   non-interactive content in place of the title and secondary text; `title`
   remains the accessible name.
@@ -104,6 +108,10 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   a warning no longer insets the action hover fill.
 - Controls show the keyboard focus ring on phones and tablets once a mouse is
   connected, and a control enabled under a resting pointer is hovered at once.
+- The focus ring follows `:focus-visible`: focus that lands after a pointer
+  press (a menu closed with the mouse returning focus to its trigger) shows no
+  ring until a key is pressed, while a control ringed from the keyboard keeps
+  its ring when clicked.
 - A press already in flight when `CarbonLoadingOverlay` starts loading is
   cancelled instead of activating the covered control.
 - Contained list rows hover and press on the content cell only, so hovering a

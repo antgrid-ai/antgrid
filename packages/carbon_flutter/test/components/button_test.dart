@@ -829,6 +829,37 @@ void main() {
     });
   });
 
+  testWidgets('leading sits before the label inside the button', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await pumpCarbon(
+      tester,
+      Align(
+        alignment: AlignmentDirectional.topStart,
+        child: CarbonButton(
+          key: _btn,
+          label: 'Laptop',
+          kind: CarbonButtonKind.ghost,
+          leading: const SizedBox.square(
+            key: ValueKey('dot'),
+            dimension: 8,
+          ),
+          onPressed: () {},
+        ),
+      ),
+    );
+    final button = tester.getRect(find.byKey(_btn));
+    final dot = tester.getRect(find.byKey(const ValueKey('dot')));
+    expect(button.contains(dot.center), isTrue);
+    expect(dot.right, lessThan(tester.getRect(find.text('Laptop')).left));
+    expect(
+      tester.getSemantics(find.byKey(_btn)),
+      isSemantics(label: 'Laptop', isButton: true),
+    );
+    handle.dispose();
+  });
+
   group('maxLines', () {
     int lines(WidgetTester tester) {
       final text = tester.renderObject<RenderParagraph>(

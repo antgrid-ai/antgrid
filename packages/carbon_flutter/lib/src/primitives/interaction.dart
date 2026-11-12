@@ -1,7 +1,69 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+
+/// Whether the user's last input was a key press rather than a pointer: the
+/// rule browsers apply for `:focus-visible`. Flutter's traditional highlight
+/// mode alone is not enough, because a mouse click on a desktop is also
+/// traditional; without this, a control focused programmatically after a
+/// click (a menu returning focus to its trigger) keeps a ring nobody asked
+/// for.
+class _InputModality extends ChangeNotifier {
+  _InputModality._() {
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onPointer);
+  }
+
+  static final instance = _InputModality._();
+
+  /// Re-registers the key handler, which is idempotent. A keyboard reset
+  /// (the test binding does one between tests) drops every handler, so a
+  /// one-time registration would go deaf after it.
+  void attach() {
+    HardwareKeyboard.instance
+      ..removeHandler(_onKey)
+      ..addHandler(_onKey);
+  }
+
+  static final _modifiers = <LogicalKeyboardKey>{
+    LogicalKeyboardKey.shiftLeft,
+    LogicalKeyboardKey.shiftRight,
+    LogicalKeyboardKey.controlLeft,
+    LogicalKeyboardKey.controlRight,
+    LogicalKeyboardKey.altLeft,
+    LogicalKeyboardKey.altRight,
+    LogicalKeyboardKey.metaLeft,
+    LogicalKeyboardKey.metaRight,
+  };
+
+  // Programmatic focus before any input shows a ring, as in browsers.
+  bool _keyboard = true;
+  bool get keyboard => _keyboard;
+
+  bool _onKey(KeyEvent event) {
+    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
+      _set(true);
+    }
+    return false;
+  }
+
+  void _onPointer(PointerEvent event) {
+    if (event is PointerDownEvent) _set(false);
+  }
+
+  void _set(bool keyboard) {
+    if (_keyboard == keyboard) return;
+    _keyboard = keyboard;
+    notifyListeners();
+  }
+}
+
+/// Forgets the last input, so the next programmatic focus shows its ring as
+/// if nothing had been pressed yet. For test isolation: the modality is
+/// process-wide and would otherwise carry a pointer press into the next test.
+@visibleForTesting
+void debugResetCarbonInputModality() => _InputModality.instance._set(true);
 
 /// The transient interaction state [CarbonInteraction] hands its builder.
 ///
@@ -201,6 +263,12 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   bool _pressed = false;
   bool _focused = false;
 
+  // Whether this focus arrived by keyboard (or with no input yet), latched
+  // when focus lands as browsers do for :focus-visible: a click on a control
+  // already ringed from the keyboard keeps its ring, and a key press while it
+  // holds focus from a click brings the ring up.
+  bool _keyboardFocus = false;
+
   // What the host was last told through onHoverChange / onFocusChange. Kept
   // apart from the live flags because changes found during build are
   // reported after the frame, and a later live change may already have
@@ -245,8 +313,12 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
     // node that takes focus while the old one held it.
     _node.addListener(_handleNodeChange);
     _focused = _node.hasFocus;
+    _keyboardFocus = _InputModality.instance.keyboard;
     _reportedFocus = _focused;
     FocusManager.instance.addHighlightModeListener(_handleHighlightMode);
+    _InputModality.instance
+      ..attach()
+      ..addListener(_handleModality);
   }
 
   @override
@@ -263,6 +335,7 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
       _node.addListener(_handleNodeChange);
       if (_focused != _node.hasFocus) {
         _focused = _node.hasFocus;
+        if (_focused) _keyboardFocus = _InputModality.instance.keyboard;
         _reportAfterFrame();
       }
     }
@@ -279,6 +352,7 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   @override
   void dispose() {
     FocusManager.instance.removeHighlightModeListener(_handleHighlightMode);
+    _InputModality.instance.removeListener(_handleModality);
     _node.removeListener(_handleNodeChange);
     _ownedNode?.dispose();
     super.dispose();
@@ -312,7 +386,10 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   void _handleNodeChange() {
     final focused = _node.hasFocus;
     if (_focused == focused) return;
-    setState(() => _focused = focused);
+    setState(() {
+      _focused = focused;
+      if (focused) _keyboardFocus = _InputModality.instance.keyboard;
+    });
     _reportFocus();
   }
 
@@ -322,6 +399,12 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
     // notifying listeners.
     if (!mounted || !_focused) return;
     setState(() {});
+  }
+
+  void _handleModality() {
+    if (!mounted || !_focused || _keyboardFocus) return;
+    if (!_InputModality.instance.keyboard) return;
+    setState(() => _keyboardFocus = true);
   }
 
   void _activate() {
@@ -393,7 +476,9 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
       pressed: enabled && _pressed,
       focused: _focused,
       focusVisible:
-          _focused && _isTraditional(FocusManager.instance.highlightMode),
+          _focused &&
+          _isTraditional(FocusManager.instance.highlightMode) &&
+          _keyboardFocus,
       enabled: enabled,
     );
     // Excluded below the focus detector so its focusable and focused flags

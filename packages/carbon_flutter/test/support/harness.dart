@@ -97,6 +97,7 @@ Future<CarbonHarness> pumpCarbon(
   Size? size,
   bool reduceMotion = false,
 }) async {
+  addTearDown(debugResetCarbonInputModality);
   if (size != null) {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;

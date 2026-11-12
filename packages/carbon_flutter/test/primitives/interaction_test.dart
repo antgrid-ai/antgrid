@@ -286,6 +286,41 @@ void main() {
     expect(pressed, 0);
   });
 
+  testWidgets('focus after a mouse press shows no ring until a key is '
+      'pressed', (tester) async {
+    final node = FocusNode();
+    addTearDown(node.dispose);
+    CarbonInteractionState? last;
+    await pumpCarbon(
+      tester,
+      _button(onPressed: () {}, focusNode: node, onState: (s) => last = s),
+    );
+    FocusManager.instance.highlightStrategy =
+        FocusHighlightStrategy.alwaysTraditional;
+    // A desktop click is traditional highlight mode too, so the mode alone
+    // would ring a control a menu focuses after being closed with the mouse.
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.down(const Offset(5, 5));
+    await mouse.up();
+    await mouse.removePointer();
+    node.requestFocus();
+    await tester.pump();
+    expect(last!.focused, isTrue);
+    expect(last!.focusVisible, isFalse);
+    expect(_ringPainted(tester), isFalse);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(last!.focusVisible, isFalse, reason: 'a modifier alone is not '
+        'keyboard navigation');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyA);
+    await tester.pump();
+    expect(last!.focusVisible, isTrue);
+    expect(_ringPainted(tester), isTrue);
+  });
+
   testWidgets('focusVisible follows keyboard highlight mode only', (
     tester,
   ) async {

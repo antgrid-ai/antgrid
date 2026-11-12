@@ -88,6 +88,7 @@ class CarbonButton extends StatelessWidget {
     this.autofocus = false,
     this.expanded,
     this.maxLines,
+    this.leading,
   }) : iconSize = null,
        hoverFill = true,
        _iconOnly = false;
@@ -109,6 +110,7 @@ class CarbonButton extends StatelessWidget {
     this.expanded,
   }) : label = null,
        maxLines = null,
+       leading = null,
        expand = false,
        minWidth = null,
        _iconOnly = true;
@@ -134,6 +136,11 @@ class CarbonButton extends StatelessWidget {
   final CarbonButtonSize? size;
 
   final Widget? icon;
+
+  /// A small non-interactive mark before the label, such as a status dot
+  /// that belongs to the value the label names. Excluded from semantics; say
+  /// what it means in [semanticLabel].
+  final Widget? leading;
 
   /// A host-owned pending flag; see the class documentation.
   final bool busy;
@@ -321,12 +328,23 @@ class CarbonButton extends StatelessWidget {
   ) {
     if (_iconOnly) return _iconBox(theme, style);
 
-    final text = Text(
+    final Widget labelText = Text(
       label!,
       maxLines: maxLines,
       overflow: maxLines == null ? null : TextOverflow.ellipsis,
       style: theme.typography.control.copyWith(color: style.foreground),
     );
+    final leading = this.leading;
+    final text = leading == null
+        ? labelText
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            spacing: CarbonSpacing.spacing03,
+            children: [
+              ExcludeSemantics(child: leading),
+              Flexible(child: labelText),
+            ],
+          );
     final hasIcon = icon != null;
     final floor = minWidth;
     final labelWidget = hasIcon || !busy
