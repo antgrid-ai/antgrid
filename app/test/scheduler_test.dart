@@ -5,7 +5,7 @@ import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
+
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
@@ -26,6 +26,7 @@ import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/material.dart';
@@ -491,9 +492,9 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Workspace settings locked'), findsOneWidget);
-      expect(find.byType(AbPromptField), findsOneWidget);
+      expect(find.byWidgetPredicate((w) => w is CarbonTextInput && w.variant == CarbonTextInputVariant.multiline), findsOneWidget);
       expect(find.text('main'), findsOneWidget);
-      await tester.tap(find.text('WEEKDAY'));
+      await tester.tap(find.text('Weekday'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(host.calls.last.params['cron'], schedulerPresets['Weekdays']);

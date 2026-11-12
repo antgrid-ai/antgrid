@@ -1,27 +1,13 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../constants/breakpoints.dart';
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
+import '../../design/ab_carbon.dart';
 import '../../design/widgets/ab_agent_mark.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_confirm_dialog.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_inline_banner.dart';
-import '../../design/widgets/ab_prompt_field.dart';
-import '../../design/widgets/ab_segmented.dart';
-import '../../design/widgets/ab_switch.dart';
-import '../../design/widgets/ab_tap_target.dart';
-import '../../design/widgets/ab_text_field.dart';
-import '../../design/widgets/ab_tooltip.dart';
-import '../../design/widgets/ab_touch_sizing.dart';
 import '../../launcher/host_control_client.dart';
 import '../../models/scheduler.dart';
 import '../../providers/agent_catalog.dart' show agentLabelsProvider;
@@ -89,6 +75,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
   List<DateTime> _occurrences = const [];
   int _previewGeneration = 0;
   Timer? _debounce;
+
+  /// A context under the pane's [AbCarbonScope]. This State's own context sits
+  /// above it, so Carbon theme lookups and the discard modal's scope relay must
+  /// start here.
+  BuildContext? _scoped;
+  CarbonThemeData get _t => CarbonTheme.of(_scoped!);
   SchedulerDraftKey get _key =>
       (machine: widget.machineId, scheduleId: widget.schedule?.id);
   AgentSchedule? get _current => widget.snapshot.schedules
@@ -488,14 +480,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
   Future<void> _cancel() async {
     if (_saving) return;
     if (_draft.dirty) {
-      final discard = await AbConfirmDialog.show(
-        context: context,
-        title: 'Discard changes?',
-        body: 'Your draft for this schedule will be deleted.',
-        confirmLabel: 'Discard draft',
-        cancelLabel: 'Keep editing',
-        destructive: true,
-      );
+      final discard = await _confirmDiscard();
       if (!mounted || !discard) return;
     }
     _closed = true;
@@ -582,59 +567,67 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     }
   }
 
-  Widget _notice(String text, {bool error = false}) => Semantics(
-    liveRegion: true,
-    child: AbInlineBanner(
-      text: text,
-      color: error ? context.antgrid.error : context.antgrid.warning,
-    ),
-  );
+  Future<bool> _confirmDiscard() async {
+    final scoped = _scoped;
+    if (scoped == null || !scoped.mounted) return false;
+    final discard = await showCarbonModal<bool>(
+      scoped,
+      builder: (dialog) => CarbonModal.confirmation(
+        title: 'Discard changes?',
+        body: const Text('Your draft for this schedule will be deleted.'),
+        danger: true,
+        secondary: CarbonModalAction(
+          label: 'Keep editing',
+          autofocus: true,
+          onPressed: () => Navigator.of(dialog).pop(false),
+        ),
+        primary: CarbonModalAction(
+          label: 'Discard draft',
+          onPressed: () => Navigator.of(dialog).pop(true),
+        ),
+      ),
+    );
+    return discard ?? false;
+  }
 
-  Widget _label(String text) => Text(
-    text,
-    style: AbTokens.sansStyle(
-      fontSize: AbTokens.fontSm,
-      fontWeight: FontWeight.w600,
-    ),
-  );
+  void _pickAgent(String id) {
+    // A pick of the selected agent must not clear a chat mode no picker shows
+    // (an agent without a listed set keeps its stored one).
+    if (id == _agent) return;
+    final capability = widget.snapshot.capabilities.agents.firstWhere(
+      (a) => a.agentId == id,
+    );
+    setState(() {
+      _agent = id;
+      _mode = capability.modes.first;
+      // Mode ids belong to one agent's chat backend.
+      _chatMode = null;
+    });
+    _persist();
+  }
+
+  // Slotted rather than keyed by text: a failed save and a capability notice
+  // can carry the same sentence at once.
+  Widget _notice(String slot, String text, {bool error = false}) =>
+      CarbonNotification(
+        key: ValueKey('scheduler-notice-$slot'),
+        kind: error
+            ? CarbonNotificationKind.error
+            : CarbonNotificationKind.warning,
+        title: text,
+      );
 
   Widget _hint(String text) => Text(
     text,
-    style: AbTokens.sansStyle(
-      fontSize: AbTokens.fontSm,
-      color: context.antgrid.textSecondary,
-    ),
+    style: _t.typography.helper.copyWith(color: _t.colors.textSecondary),
   );
 
-  Widget _field(String label, Widget child) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    spacing: AbTokens.space6,
-    children: [
-      _label(label),
-      Semantics(label: label, child: child),
-    ],
-  );
-
-  Widget _card(String title, List<Widget> children) => Container(
-    padding: const EdgeInsets.all(AbTokens.space16),
-    decoration: BoxDecoration(
-      color: context.antgrid.bgSurface,
-      border: Border.all(color: context.antgrid.borderDefault),
-      borderRadius: AbTokens.borderRadius8,
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: AbTokens.space16,
-      children: [
-        Text(
-          title,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontMd,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        ...children,
-      ],
+  Widget _section(String title, List<Widget> children) => CarbonLayerSurface(
+    padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+    child: CarbonFormSection(
+      title: title,
+      spacing: CarbonSpacing.spacing05,
+      children: children,
     ),
   );
 
@@ -643,148 +636,82 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     List<(T, String)> items,
     T selected,
     ValueChanged<T> select,
-  ) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    spacing: AbTokens.space6,
+  ) {
+    // A stored value the host no longer offers stays visible, disabled, so the
+    // switcher never asserts on a selection it cannot show.
+    final options = [
+      for (final (value, text) in items)
+        CarbonOption<T>(value: value, label: text, enabled: _editable),
+      if (!items.any((i) => i.$1 == selected))
+        CarbonOption<T>(value: selected, label: '$selected', enabled: false),
+    ];
+    return LayoutBuilder(
+      builder: (context, box) {
+        // Four or more segments outgrow a phone pane, and a clipped horizontal
+        // scroll would hide the last option with no affordance.
+        if (options.length >= 4 && box.maxWidth < kCompactBreakpoint) {
+          return CarbonSelect<T>(
+            label: label,
+            options: options,
+            value: selected,
+            onChanged: _editable ? select : null,
+          );
+        }
+        return CarbonFieldFrame(
+          label: label,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: CarbonContentSwitcher<T>(
+              options: options,
+              value: selected,
+              onChanged: select,
+              // Arrows only move focus; selecting rewrites the draft (cron,
+              // approvals), so it needs an explicit Enter, Space or tap.
+              activation: CarbonActivationMode.manual,
+              semanticLabel: label,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _choiceList(
+    String label,
+    List<
+      ({String title, String? description, bool selected, VoidCallback onTap})
+    >
+    choices,
+  ) => CarbonContainedList(
+    label: label,
     children: [
-      _label(label),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: AbSegmented<T>(
-          segments: [
-            for (final (value, text) in items)
-              AbSegment<T>(value: value, label: text, enabled: _editable),
-          ],
-          selected: selected,
-          onSelect: select,
-        ),
-      ),
+      for (final c in choices)
+        _choiceRow(c),
     ],
   );
 
-  Widget _choices(
-    String label,
-    Map<String, String> choices,
-    String value,
-    ValueChanged<String> select,
-  ) => _field(
-    label,
-    Wrap(
-      spacing: AbTokens.space6,
-      runSpacing: AbTokens.space6,
-      children: [
-        for (final c in choices.entries)
-          AbChip.choice(
-            label: c.value,
-            selected: c.key == value,
-            enabled: _editable,
-            onTap: () {
-              setState(() => select(c.key));
+  Widget _choiceRow(
+    ({String title, String? description, bool selected, VoidCallback onTap}) c,
+  ) {
+    final row = CarbonContainedListRow(
+      key: ValueKey('scheduler-option-${c.title}'),
+      title: c.title,
+      secondary: (c.description?.isEmpty ?? true) ? null : c.description,
+      selected: c.selected,
+      onPressed: _editable
+          ? () {
+              setState(c.onTap);
               _persist();
-            },
-          ),
-      ],
-    ),
-  );
-
-  Widget _grid(List<Widget> items, {int columns = 2}) => LayoutBuilder(
-    builder: (context, box) {
-      final n = box.maxWidth >= kCompactBreakpoint ? columns : 1;
-      final width = (box.maxWidth - AbTokens.space8 * (n - 1)) / n;
-      return Wrap(
-        spacing: AbTokens.space8,
-        runSpacing: AbTokens.space8,
-        children: [
-          for (final item in items) SizedBox(width: width, child: item),
-        ],
-      );
-    },
-  );
-
-  Widget _option({
-    required String title,
-    required bool selected,
-    required VoidCallback onTap,
-    String? description,
-    Widget? leading,
-  }) {
-    final colors = context.antgrid;
-    return Semantics(
-      key: ValueKey('scheduler-option-$title'),
-      inMutuallyExclusiveGroup: true,
-      checked: selected,
-      button: true,
-      label: title,
-      child: MouseRegion(
-        cursor: _editable ? SystemMouseCursors.click : MouseCursor.defer,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _editable
-              ? () {
-                  setState(onTap);
-                  _persist();
-                }
-              : null,
-          child: Opacity(
-            opacity: _editable ? 1 : AbTokens.opacityDisabled,
-            child: Container(
-              constraints: isMobilePlatform
-                  ? const BoxConstraints(minHeight: AbTokens.tapTargetMin)
-                  : null,
-              padding: const EdgeInsets.symmetric(
-                horizontal: AbTokens.space12,
-                vertical: AbTokens.space10,
-              ),
-              decoration: BoxDecoration(
-                color: selected ? colors.bgRaised : colors.bgSurface,
-                border: Border.all(
-                  color: selected ? colors.accent : colors.borderDefault,
-                ),
-                borderRadius: AbTokens.borderRadius5,
-              ),
-              child: Row(
-                crossAxisAlignment: leading == null
-                    ? CrossAxisAlignment.start
-                    : CrossAxisAlignment.center,
-                spacing: AbTokens.space10,
-                children: [
-                  leading ??
-                      Container(
-                        width: AbTokens.space14,
-                        height: AbTokens.space14,
-                        margin: const EdgeInsets.only(top: AbTokens.space2),
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: selected ? colors.accent : colors.textMuted,
-                            width: selected ? AbTokens.space4 : 1,
-                          ),
-                        ),
-                      ),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      spacing: AbTokens.space2,
-                      children: [
-                        Text(
-                          title,
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontMd,
-                            fontWeight: selected
-                                ? FontWeight.w600
-                                : FontWeight.w500,
-                          ),
-                        ),
-                        if (description != null && description.isNotEmpty)
-                          _hint(description),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+            }
+          : null,
+    );
+    if (_editable) return row;
+    // A non-interactive row emits no selected state of its own.
+    return MergeSemantics(
+      child: Semantics(
+        selected: c.selected,
+        inMutuallyExclusiveGroup: true,
+        child: row,
       ),
     );
   }
@@ -802,63 +729,55 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     // A mode the agent no longer lists (or one carried over from earlier
     // chats) stays selectable, so saving does not silently replace it.
     final unlisted = stored != null && !listed.any((m) => m.id == stored);
-    return _field(
-      'Permission mode',
-      _grid([
-        // Not plain "Default": claude-code lists its own mode with that name,
-        // and no mode (the agent's configured default) is a different setting.
-        _option(
-          title: 'Agent default',
-          description: 'Whatever $agentLabel is set to',
-          selected: stored == null,
-          onTap: () => _chatMode = null,
+    return _choiceList('Permission mode', [
+      // Not plain "Default": claude-code lists its own mode with that name,
+      // and no mode (the agent's configured default) is a different setting.
+      (
+        title: 'Agent default',
+        description: 'Whatever $agentLabel is set to',
+        selected: stored == null,
+        onTap: () => _chatMode = null,
+      ),
+      for (final m in listed)
+        (
+          title: m.name,
+          description:
+              m.description ?? _modeFallbackDescriptions[m.name.toLowerCase()],
+          selected: m.id == stored,
+          onTap: () => _chatMode = m.id,
         ),
-        for (final m in listed)
-          _option(
-            title: m.name,
-            description:
-                m.description ??
-                _modeFallbackDescriptions[m.name.toLowerCase()],
-            selected: m.id == stored,
-            onTap: () => _chatMode = m.id,
-          ),
-        if (unlisted)
-          _option(
-            title: stored,
-            selected: true,
-            onTap: () => _chatMode = stored,
-          ),
-      ]),
-    );
+      if (unlisted)
+        (
+          title: stored,
+          description: null,
+          selected: true,
+          onTap: () => _chatMode = stored,
+        ),
+    ]);
   }
 
-  Widget _fact(String label, String value) => _field(
-    label,
-    Text(
+  Widget _fact(String label, String value) => CarbonFieldFrame(
+    label: label,
+    child: Text(
       value,
-      style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
+      style: _t.typography.body.copyWith(color: _t.colors.textPrimary),
     ),
   );
 
-  double get _fieldHeight =>
-      math.max(AbTokens.rowHeightSm, AbTouchSizing.extentOf(context));
-
-  Widget _readOnlyBox(String text) => AbTooltip(
-    message: text,
-    child: Container(
-      height: _fieldHeight,
-      alignment: Alignment.centerLeft,
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-      decoration: BoxDecoration(
-        color: context.antgrid.bgDeep,
-        border: Border.all(color: context.antgrid.borderDefault),
-        borderRadius: AbTokens.borderRadius5,
-      ),
-      child: Text(
-        text,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: AbTokens.monoStyle(fontSize: AbTokens.fontMd),
+  Widget _readOnlyBox(String label, String text) => CarbonFieldFrame(
+    label: label,
+    readOnly: true,
+    child: CarbonTooltip(
+      message: text,
+      child: CarbonActionFieldBox(
+        readOnly: true,
+        minHeight: _t.controlHeight,
+        child: Text(
+          text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: _t.typography.code.copyWith(color: _t.colors.textPrimary),
+        ),
       ),
     ),
   );
@@ -866,13 +785,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
   String get _machineName =>
       ref.read(schedulerMachinesProvider)[widget.machineId] ?? 'this machine';
 
-  Widget _summaryCard(String machineName, String agentLabel) {
-    final colors = context.antgrid;
-    final bold = AbTokens.sansStyle(
-      fontSize: AbTokens.fontMd,
-      fontWeight: FontWeight.w600,
+  Widget _summarySection(String machineName, String agentLabel) {
+    final t = _t;
+    final base = t.typography.body.copyWith(
+      color: t.colors.textPrimary,
+      height: 1.55,
     );
-    final mono = AbTokens.monoStyle(fontSize: AbTokens.fontMd);
+    final bold = base.copyWith(fontWeight: FontWeight.w600);
+    final mono = t.typography.code.copyWith(color: t.colors.textPrimary);
     final zone =
         '${_timezone.trim().split('/').last.replaceAll('_', ' ')} time';
     final project =
@@ -904,10 +824,10 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
     ];
     final checking =
         _previewInputsReady && _validated == null && _previewError == null;
-    return _card('Summary', [
+    return _section('Summary', [
       Text.rich(
         TextSpan(
-          style: AbTokens.sansStyle(fontSize: AbTokens.fontMd, height: 1.55),
+          style: base,
           children: [
             ...cadence,
             TextSpan(text: agentLabel, style: bold),
@@ -936,155 +856,208 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
       ),
       if (_validated == _previewKey)
         Row(
-          spacing: AbTokens.space6,
+          spacing: CarbonSpacing.spacing03,
           children: [
-            AbIcon(AbIcons.check, color: colors.success),
+            CarbonIcon(
+              CarbonIcons.checkmarkFilled,
+              color: t.colors.supportSuccess,
+            ),
             Expanded(
               child: Text(
                 'Checked on $machineName',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: colors.success,
+                style: t.typography.helper.copyWith(
+                  color: t.colors.textPrimary,
                 ),
               ),
             ),
           ],
         )
       else if (checking)
-        _hint('Checking on $machineName…'),
-    ]);
-  }
-
-  Widget _nextRunsCard(String localZone, bool detected) {
-    if (_validated != _previewKey || _occurrences.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final colors = context.antgrid;
-    final now = DateTime.now().toUtc();
-    return _card('Next runs', [
-      _hint('${detected ? 'your time' : 'machine time'} · $localZone'),
-      for (final (i, time) in _occurrences.indexed)
-        Container(
-          padding: EdgeInsets.only(top: i == 0 ? 0 : AbTokens.space8),
-          decoration: i == 0
-              ? null
-              : BoxDecoration(
-                  border: Border(top: BorderSide(color: colors.borderDefault)),
-                ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            spacing: AbTokens.space12,
-            children: [
-              Flexible(
-                child: Text(
-                  schedulerWallCompact(time, localZone, now),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AbTokens.monoStyle(fontSize: AbTokens.fontMd),
-                ),
-              ),
-              Flexible(
-                child: Text(
-                  schedulerRelative(time, now),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: colors.textSecondary,
-                  ),
-                ),
-              ),
-            ],
-          ),
+        CarbonInlineLoading(
+          status: CarbonInlineLoadingStatus.active,
+          description: 'Checking on $machineName…',
         ),
     ]);
   }
 
-  Widget _header() {
-    final colors = context.antgrid;
-    final name = _name.text.trim();
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space16,
-        vertical: AbTokens.space12,
-      ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: colors.borderDefault)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        spacing: AbTokens.space6,
+  Widget? _nextRunsSection(String localZone, bool detected) {
+    if (_validated != _previewKey || _occurrences.isEmpty) return null;
+    final t = _t;
+    final now = DateTime.now().toUtc();
+    return _section('Next runs', [
+      _hint('${detected ? 'your time' : 'machine time'} · $localZone'),
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_draft.dirty)
-            AbChip.label(label: 'Unsaved draft', color: colors.unread),
-          Row(
-            spacing: AbTokens.space10,
-            children: [
-              Expanded(
+          for (final (i, time) in _occurrences.indexed)
+            // Sections sit on layer 02, so their rules take that level.
+            DecoratedBox(
+              decoration: i == 0
+                  ? const BoxDecoration()
+                  : BoxDecoration(
+                      border: Border(
+                        top: BorderSide(color: t.borderSubtle(2)),
+                      ),
+                    ),
+              child: Padding(
+                padding: EdgeInsets.only(
+                  top: i == 0 ? 0 : CarbonSpacing.spacing03,
+                  bottom: CarbonSpacing.spacing03,
+                ),
                 child: Row(
-                  spacing: AbTokens.space10,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  spacing: CarbonSpacing.spacing04,
                   children: [
                     Flexible(
-                      child: AbTapTarget(
-                        onTap: _saving ? null : widget.onClose,
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          spacing: AbTokens.space4,
-                          children: [
-                            AbIcon(
-                              AbIcons.chevronLeft,
-                              color: colors.textSecondary,
-                            ),
-                            Flexible(
-                              child: Text(
-                                'Schedules',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: AbTokens.sansStyle(
-                                  fontSize: AbTokens.fontMd,
-                                  color: colors.textSecondary,
-                                ),
-                              ),
-                            ),
-                          ],
+                      child: Text(
+                        schedulerWallCompact(time, localZone, now),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: t.typography.code.copyWith(
+                          color: t.colors.textPrimary,
                         ),
                       ),
                     ),
-                    Text(
-                      '/',
-                      style: AbTokens.sansStyle(color: colors.textMuted),
-                    ),
                     Flexible(
                       child: Text(
-                        name.isEmpty ? 'New schedule' : name,
+                        schedulerRelative(time, now),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
+                        style: t.typography.helper.copyWith(
+                          color: t.colors.textSecondary,
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              Text(
-                'Active',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: colors.textSecondary,
-                ),
-              ),
-              AbSwitch(
-                value: _enabled,
-                semanticLabel: 'Active',
-                onChanged: _editable
-                    ? (v) {
-                        setState(() => _enabled = v);
-                        _persist();
-                      }
-                    : null,
-              ),
-            ],
-          ),
+            ),
         ],
+      ),
+    ]);
+  }
+
+  Widget _header() {
+    final t = _t;
+    final name = _name.text.trim();
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: CarbonSpacing.spacing05,
+          vertical: CarbonSpacing.spacing03,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Wraps rather than shares a row: at large text the back control
+            // and the draft tag together exceed a phone's width.
+            Wrap(
+              spacing: CarbonSpacing.spacing04,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                CarbonButton(
+                  label: 'Schedules',
+                  kind: CarbonButtonKind.ghost,
+                  icon: const CarbonIcon(CarbonIcons.chevronLeft),
+                  onPressed: _saving ? null : widget.onClose,
+                ),
+                if (_draft.dirty)
+                  const CarbonTag(
+                    label: 'Unsaved draft',
+                    color: CarbonTagColor.blue,
+                  ),
+              ],
+            ),
+            Row(
+              spacing: CarbonSpacing.spacing04,
+              children: [
+                Expanded(
+                  child: Text(
+                    name.isEmpty ? 'New schedule' : name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: t.typography.title.copyWith(
+                      color: t.colors.textPrimary,
+                    ),
+                  ),
+                ),
+                CarbonToggle(
+                  value: _enabled,
+                  semanticLabel: 'Active',
+                  onText: 'Active',
+                  offText: 'Inactive',
+                  onChanged: _editable
+                      ? (v) {
+                          setState(() => _enabled = v);
+                          _persist();
+                        }
+                      : null,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _footer() {
+    final t = _t;
+    final cancel = CarbonButton(
+      label: 'Cancel',
+      kind: CarbonButtonKind.secondary,
+      onPressed: _saving
+          ? null
+          : () => detached('ScheduleEditor', 'cancel failed', _cancel),
+    );
+    final save = CarbonButton(
+      label: _saving
+          ? 'Saving…'
+          : widget.schedule == null
+          ? 'Create schedule'
+          : 'Save changes',
+      busy: _saving,
+      // Stays enabled while saving so focus survives a failed save; the busy
+      // button ignores presses itself.
+      onPressed: _canSave || _saving
+          ? () => detached('ScheduleEditor', 'save failed', _save)
+          : null,
+    );
+    final hint = Text(
+      'Draft kept if you leave',
+      style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+    );
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: t.colors.layer01,
+        border: Border(top: BorderSide(color: t.borderSubtle(1))),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+          child: LayoutBuilder(
+            builder: (context, box) => box.maxWidth >= kCompactBreakpoint
+                ? Row(
+                    spacing: CarbonSpacing.spacing05,
+                    children: [
+                      Expanded(child: hint),
+                      CarbonButtonSet(children: [cancel, save]),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    spacing: CarbonSpacing.spacing04,
+                    children: [
+                      hint,
+                      CarbonButtonSet(children: [cancel, save]),
+                    ],
+                  ),
+          ),
+        ),
       ),
     );
   }
@@ -1109,492 +1082,460 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
             .firstOrNull
             ?.isGitRepository ??
         false;
-    final task = _card('Task', [
-      _field(
-        'Name',
-        AbTextField(
-          controller: _name,
-          enabled: _editable,
-          hintText: 'Schedule name',
-        ),
-      ),
-      _field(
-        'Prompt',
-        Container(
-          padding: const EdgeInsets.all(AbTokens.space8),
-          decoration: BoxDecoration(
-            border: Border.all(color: context.antgrid.borderDefault),
-            borderRadius: AbTokens.borderRadius5,
-          ),
-          child: AbPromptField(
-            controller: _prompt,
-            focusNode: _promptFocus,
-            hintText: 'What should the agent do each run?',
-            enabled: _editable || _deleted,
-            readOnly: !_editable,
-          ),
-        ),
-      ),
-    ]);
-    final when = _card('When', [
-      Wrap(
-        spacing: AbTokens.space16,
-        runSpacing: AbTokens.space12,
-        children: [
-          if (widget.snapshot.capabilities.supportsOneOff || _once)
-            _segmented<String>(
-              'Runs',
-              const [('Repeats', 'Repeats'), ('Once', 'Once')],
-              _once ? 'Once' : 'Repeats',
-              _selectKind,
-            ),
-          if (!_once)
-            _segmented<String>(
-              'Every',
-              const [
-                ('Hourly', 'Hour'),
-                ('Daily', 'Day'),
-                ('Weekdays', 'Weekday'),
-                ('Custom', 'Custom'),
-              ],
-              _frequency,
-              _selectFrequency,
-            ),
-        ],
-      ),
-      Wrap(
-        spacing: AbTokens.space12,
-        runSpacing: AbTokens.space12,
-        crossAxisAlignment: WrapCrossAlignment.end,
-        children: [
-          if (_once) ...[
-            SizedBox(
-              width: AbTokens.space24 * 6,
-              child: _field(
-                'Date',
-                AbTextField(
-                  controller: _date,
-                  enabled: _editable,
-                  height: _fieldHeight,
-                  hintText: 'yyyy-MM-dd',
-                  autocorrect: false,
-                ),
-              ),
-            ),
-            SizedBox(
-              width: AbTokens.space24 * 4,
-              child: _field(
-                'Time',
-                AbTextField(
-                  controller: _clock,
-                  enabled: _editable,
-                  height: _fieldHeight,
-                  hintText: 'HH:mm',
-                  autocorrect: false,
-                ),
-              ),
-            ),
-          ] else if (_frequency == 'Daily' || _frequency == 'Weekdays')
-            SizedBox(
-              width: AbTokens.space24 * 4,
-              child: _field(
-                'At',
-                AbTextField(
-                  controller: _time,
-                  enabled: _editable,
-                  height: _fieldHeight,
-                  hintText: '09:00',
-                  autocorrect: false,
-                ),
-              ),
-            ),
-          SizedBox(
-            width: AbTokens.space24 * 9,
-            child: _field('Timezone', _readOnlyBox(_timezone)),
-          ),
-          if (!_once && _frequency != 'Custom')
-            Padding(
-              padding: const EdgeInsets.only(bottom: AbTokens.space12),
-              child: Text.rich(
-                TextSpan(
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: context.antgrid.textSecondary,
-                  ),
-                  children: [
-                    const TextSpan(text: 'cron '),
-                    TextSpan(
-                      text: _cron.text,
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: context.antgrid.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-      if (!_once && _frequency == 'Custom')
-        _field(
-          'Cron',
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: AbTokens.space6,
-            children: [
-              AbTextField(
-                controller: _cron,
-                focusNode: _cronFocus,
-                enabled: _editable,
-                hintText: '0 9 * * 1-5',
-                autocorrect: false,
-              ),
-              _hint('minute hour day-of-month month day-of-week'),
-            ],
-          ),
-        ),
-      if (_invalidTime)
-        _notice(
-          _once
-              ? 'Enter a date and time like 2026-10-09 09:00.'
-              : 'Enter a valid time from 00:00 to 23:59.',
-          error: true,
-        ),
-      if (_previewError != null) ...[
-        _notice(_previewError!, error: _invalidPreview),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: AbButton(
-            label: 'Retry validation',
-            onTap: _editable
-                ? () => detached('ScheduleEditor', 'preview failed', _preview)
-                : null,
-          ),
-        ),
-      ],
-    ]);
-    final agent = _card('Agent', [
-      _grid([
-        for (final a in agents)
-          _option(
-            title: agentName(a.agentId),
-            selected: a.agentId == _agent,
-            leading: AbAgentMark(
-              toolKey: a.agentId,
-              label: agentName(a.agentId),
-              size: AbTokens.space16,
-            ),
-            onTap: () {
-              // A tap on the selected tile must not clear a chat mode no
-              // picker shows (an agent without a listed set keeps its stored
-              // one).
-              if (a.agentId == _agent) return;
-              _agent = a.agentId;
-              _mode = a.modes.first;
-              // Mode ids belong to one agent's chat backend.
-              _chatMode = null;
-            },
-          ),
-      ], columns: 3),
-      Wrap(
-        spacing: AbTokens.space16,
-        runSpacing: AbTokens.space12,
-        children: [
-          _segmented<String>(
-            'Opens as',
-            [for (final m in modes) (m, m == 'chat' ? 'Chat' : 'Terminal')],
-            _mode,
-            (v) {
-              setState(() => _mode = v);
-              _persist();
-            },
-          ),
-          _segmented<String>(
-            'Approvals',
-            const [('default', 'Ask as usual'), ('bypass', 'Bypass all')],
-            _approvals,
-            (v) {
-              setState(() => _approvals = v);
-              _persist();
-            },
-          ),
-        ],
-      ),
-      if (_carriesChatMode && _chatModes != null)
-        _permissionMode(agentName(_agent)),
-    ]);
-    final workspace = _card('Workspace', [
-      if (_locked) ...[
-        Row(
-          children: [
-            AbIcon(AbIcons.lock, color: context.antgrid.textSecondary),
-            const SizedBox(width: AbTokens.space6),
-            Expanded(
-              child: Text(
-                'Workspace settings locked',
-                style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
-              ),
-            ),
-          ],
-        ),
-        _fact(
-          'Project',
-          widget.snapshot.projects
-                  .where((p) => p.projectId == _current!.projectId)
-                  .firstOrNull
-                  ?.name ??
-              _current!.projectId,
-        ),
-        _fact(
-          'Workspace',
-          _current!.workspace == 'worktree' ? 'Own worktree' : 'Project folder',
-        ),
-        _fact(
-          'Base branch',
-          _current!.baseBranch ?? 'Current branch at creation',
-        ),
-        _fact(
-          'Retained checkout',
-          _current!.checkoutId ??
-              (_current!.workspace == 'worktree'
-                  ? 'Preparing workspace'
-                  : 'Shared project workspace'),
-        ),
-        _hint(
-          _current!.workspace == 'worktree'
-              ? _worktreeHint
-              : _projectFolderHint,
-        ),
-      ] else ...[
-        _choices(
-          'Project',
-          {for (final p in widget.snapshot.projects) p.projectId: p.name},
-          _project,
-          (v) {
-            _project = v;
-            _workspace =
-                widget.snapshot.projects
-                    .firstWhere((p) => p.projectId == v)
-                    .isGitRepository
-                ? 'worktree'
-                : 'shared';
-          },
-        ),
-        if (_workspace == 'worktree')
-          _field(
-            'Base branch',
-            AbTextField(
-              controller: _branch,
+    return AbCarbonScope(
+      child: Builder(
+        builder: (scoped) {
+          _scoped = scoped;
+          // Subscribing here, not only in the helpers, is what rebuilds the
+          // pane when the app theme or density changes.
+          final t = CarbonTheme.of(scoped);
+          const fieldWidth = CarbonSpacing.spacing09;
+          final task = _section('Task', [
+            CarbonTextInput(
+              controller: _name,
               enabled: _editable,
-              hintText: 'current branch',
-              autocorrect: false,
+              label: 'Name',
+              placeholder: 'Schedule name',
             ),
-          ),
-        _grid([
-          if (isGit)
-            _option(
-              title: 'Own worktree',
-              description: _worktreeHint,
-              selected: _workspace == 'worktree',
-              onTap: () => _workspace = 'worktree',
+            CarbonTextInput(
+              controller: _prompt,
+              focusNode: _promptFocus,
+              variant: CarbonTextInputVariant.multiline,
+              minLines: 3,
+              label: 'Prompt',
+              placeholder: 'What should the agent do each run?',
+              enabled: _editable || _deleted,
+              readOnly: !_editable,
             ),
-          _option(
-            title: 'Project folder',
-            description: _projectFolderHint,
-            selected: _workspace == 'shared',
-            onTap: () => _workspace = 'shared',
-          ),
-        ]),
-      ],
-    ]);
-    final catchUp = widget.snapshot.capabilities.supportsCatchUp
-        ? _card('If Antgrid was closed', [
-            _grid([
-              _option(
-                title: schedulerCatchUpOnceLabel,
-                description: _once
-                    ? 'Runs when Antgrid next opens'
-                    : 'Runs the latest missed time when Antgrid opens',
-                selected: _catchUp != 'skip',
-                onTap: () => _catchUp = 'latest',
-              ),
-              _option(
-                title: schedulerCatchUpSkipLabel,
-                description: _once
-                    ? 'Skipped if Antgrid is not open then'
-                    : 'Waits for the next scheduled time',
-                selected: _catchUp == 'skip',
-                onTap: () => _catchUp = 'skip',
-              ),
-            ]),
-            _hint('Schedules run only while Antgrid is open on $machineName.'),
-          ])
-        : null;
-    final summary = _summaryCard(machineName, agentName(_agent));
-    final nextRuns = _nextRunsCard(localZone, localTimezone.value != null);
-    final notices = [
-      if (_error != null) _notice(_error!, error: true),
-      if (!_deleted && _executionError != null)
-        _notice(_executionError!, error: true),
-      if (!widget.writable)
-        _notice(
-          '$machineName is offline. Changes are paused until it reconnects.',
-        ),
-      if (_deleted)
-        _notice(
-          'This schedule was deleted. Your draft is retained for copying; Save is unavailable.',
-        ),
-      if (_unsupportedClear)
-        _notice(
-          'Update Antgrid on $machineName to clear the saved base branch. Other edits remain available.',
-        ),
-      if (_conflict) ...[
-        _notice(
-          _locked
-              ? 'This schedule changed and its workspace is now locked. Keep mine uses the saved workspace settings.'
-              : 'This schedule changed while you were editing.',
-        ),
-        Wrap(
-          spacing: AbTokens.space8,
-          runSpacing: AbTokens.space8,
-          children: [
-            AbButton(
-              label: 'Use saved version',
-              onTap: _saving ? null : _reload,
+          ]);
+          final when = _section('When', [
+            Wrap(
+              spacing: CarbonSpacing.spacing05,
+              runSpacing: CarbonSpacing.spacing04,
+              children: [
+                if (widget.snapshot.capabilities.supportsOneOff || _once)
+                  _segmented<String>(
+                    'Runs',
+                    const [('Repeats', 'Repeats'), ('Once', 'Once')],
+                    _once ? 'Once' : 'Repeats',
+                    _selectKind,
+                  ),
+                if (!_once)
+                  _segmented<String>(
+                    'Every',
+                    const [
+                      ('Hourly', 'Hour'),
+                      ('Daily', 'Day'),
+                      ('Weekdays', 'Weekday'),
+                      ('Custom', 'Custom'),
+                    ],
+                    _frequency,
+                    _selectFrequency,
+                  ),
+              ],
             ),
-            AbButton(label: 'Keep mine', onTap: _saving ? null : _keepChanges),
-          ],
-        ),
-      ],
-    ];
-    return LayoutBuilder(
-      builder: (context, c) {
-        final wide = c.maxWidth >= kMediumBreakpoint && !isMobilePlatform;
-        final form = Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: AbTokens.space16,
-          children: [
-            ...notices,
-            task,
-            when,
-            if (!wide) ...[summary, nextRuns],
-            agent,
-            workspace,
-            ?catchUp,
-          ],
-        );
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _header(),
-            Expanded(
-              child: wide
-                  ? Align(
-                      alignment: Alignment.topLeft,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        spacing: AbTokens.space24,
+            Wrap(
+              spacing: CarbonSpacing.spacing04,
+              runSpacing: CarbonSpacing.spacing04,
+              crossAxisAlignment: WrapCrossAlignment.end,
+              children: [
+                if (_once) ...[
+                  SizedBox(
+                    width: fieldWidth * 4,
+                    child: CarbonTextInput(
+                      controller: _date,
+                      enabled: _editable,
+                      label: 'Date',
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      placeholder: 'yyyy-MM-dd',
+                    ),
+                  ),
+                  SizedBox(
+                    width: fieldWidth * 3,
+                    child: CarbonTextInput(
+                      controller: _clock,
+                      enabled: _editable,
+                      label: 'Time',
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      placeholder: 'HH:mm',
+                    ),
+                  ),
+                ] else if (_frequency == 'Daily' || _frequency == 'Weekdays')
+                  SizedBox(
+                    width: fieldWidth * 3,
+                    child: CarbonTextInput(
+                      controller: _time,
+                      enabled: _editable,
+                      label: 'At',
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      placeholder: '09:00',
+                    ),
+                  ),
+                SizedBox(
+                  width: fieldWidth * 5,
+                  child: _readOnlyBox('Timezone', _timezone),
+                ),
+                if (!_once && _frequency != 'Custom')
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      bottom: CarbonSpacing.spacing03,
+                    ),
+                    child: Text.rich(
+                      TextSpan(
+                        style: t.typography.helper.copyWith(
+                          color: t.colors.textSecondary,
+                        ),
                         children: [
-                          Flexible(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                maxWidth:
-                                    AbTokens.space24 * 30 + AbTokens.space24,
-                              ),
-                              child: SingleChildScrollView(
-                                padding: const EdgeInsets.fromLTRB(
-                                  AbTokens.space24,
-                                  AbTokens.space24,
-                                  0,
-                                  AbTokens.space24,
-                                ),
-                                child: form,
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: AbTokens.space24 * 16,
-                            child: SingleChildScrollView(
-                              padding: const EdgeInsets.fromLTRB(
-                                0,
-                                AbTokens.space24,
-                                AbTokens.space24,
-                                AbTokens.space24,
-                              ),
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.stretch,
-                                spacing: AbTokens.space12,
-                                children: [summary, nextRuns],
-                              ),
+                          const TextSpan(text: 'cron '),
+                          TextSpan(
+                            text: _cron.text,
+                            style: t.typography.code.copyWith(
+                              color: t.colors.textPrimary,
                             ),
                           ),
                         ],
                       ),
-                    )
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.all(AbTokens.space16),
-                      child: form,
                     ),
+                  ),
+              ],
             ),
-            Container(
-              padding: const EdgeInsets.all(AbTokens.space12),
-              decoration: BoxDecoration(
-                color: context.antgrid.bgSurface,
-                border: Border(
-                  top: BorderSide(color: context.antgrid.borderDefault),
+            if (!_once && _frequency == 'Custom')
+              CarbonTextInput(
+                controller: _cron,
+                focusNode: _cronFocus,
+                enabled: _editable,
+                label: 'Cron',
+                autocorrect: false,
+                enableSuggestions: false,
+                placeholder: '0 9 * * 1-5',
+                helperText: 'minute hour day-of-month month day-of-week',
+              ),
+            if (_invalidTime)
+              _notice(
+                'time',
+                _once
+                    ? 'Enter a date and time like 2026-10-09 09:00.'
+                    : 'Enter a valid time from 00:00 to 23:59.',
+                error: true,
+              ),
+            if (_previewError != null) ...[
+              _notice('preview', _previewError!, error: _invalidPreview),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: CarbonButton(
+                  label: 'Retry validation',
+                  kind: CarbonButtonKind.tertiary,
+                  onPressed: _editable
+                      ? () => detached(
+                          'ScheduleEditor',
+                          'preview failed',
+                          _preview,
+                        )
+                      : null,
                 ),
               ),
-              child: SafeArea(
-                top: false,
-                child: Row(
-                  spacing: AbTokens.space8,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Draft kept if you leave',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontSm,
-                          color: context.antgrid.textSecondary,
-                        ),
-                      ),
+            ],
+          ]);
+          final agent = _section('Agent', [
+            CarbonSelect<String>(
+              label: 'Agent',
+              placeholder: 'Choose an agent',
+              enabled: _editable,
+              options: [
+                for (final a in agents)
+                  CarbonOption<String>(
+                    value: a.agentId,
+                    label: agentName(a.agentId),
+                    icon: AbAgentMark(
+                      toolKey: a.agentId,
+                      label: agentName(a.agentId),
+                      size: t.iconSize,
+                      color: t.colors.iconPrimary,
                     ),
-                    AbButton(
-                      label: 'Cancel',
-                      onTap: _saving
-                          ? null
-                          : () => detached(
-                              'ScheduleEditor',
-                              'cancel failed',
-                              _cancel,
+                  ),
+              ],
+              value: agents.any((a) => a.agentId == _agent) ? _agent : null,
+              onChanged: _pickAgent,
+            ),
+            Wrap(
+              spacing: CarbonSpacing.spacing05,
+              runSpacing: CarbonSpacing.spacing04,
+              children: [
+                _segmented<String>(
+                  'Opens as',
+                  [
+                    for (final m in {...modes, _mode})
+                      (m, m == 'chat' ? 'Chat' : 'Terminal'),
+                  ],
+                  _mode,
+                  (v) {
+                    setState(() => _mode = v);
+                    _persist();
+                  },
+                ),
+                _segmented<String>(
+                  'Approvals',
+                  const [('default', 'Ask as usual'), ('bypass', 'Bypass all')],
+                  _approvals,
+                  (v) {
+                    setState(() => _approvals = v);
+                    _persist();
+                  },
+                ),
+              ],
+            ),
+            if (_carriesChatMode && _chatModes != null)
+              _permissionMode(agentName(_agent)),
+          ]);
+          final workspace = _section('Workspace', [
+            if (_locked) ...[
+              Text(
+                'Workspace settings locked',
+                style: t.typography.heading.copyWith(
+                  color: t.colors.textPrimary,
+                ),
+              ),
+              _fact(
+                'Project',
+                widget.snapshot.projects
+                        .where((p) => p.projectId == _current!.projectId)
+                        .firstOrNull
+                        ?.name ??
+                    _current!.projectId,
+              ),
+              _fact(
+                'Workspace',
+                _current!.workspace == 'worktree'
+                    ? 'Own worktree'
+                    : 'Project folder',
+              ),
+              _fact(
+                'Base branch',
+                _current!.baseBranch ?? 'Current branch at creation',
+              ),
+              _fact(
+                'Retained checkout',
+                _current!.checkoutId ??
+                    (_current!.workspace == 'worktree'
+                        ? 'Preparing workspace'
+                        : 'Shared project workspace'),
+              ),
+              _hint(
+                _current!.workspace == 'worktree'
+                    ? _worktreeHint
+                    : _projectFolderHint,
+              ),
+            ] else ...[
+              CarbonSelect<String>(
+                label: 'Project',
+                placeholder: 'Choose a project',
+                enabled: _editable,
+                options: [
+                  for (final p in widget.snapshot.projects)
+                    CarbonOption<String>(value: p.projectId, label: p.name),
+                ],
+                value:
+                    widget.snapshot.projects.any((p) => p.projectId == _project)
+                    ? _project
+                    : null,
+                onChanged: (v) {
+                  setState(() {
+                    _project = v;
+                    _workspace =
+                        widget.snapshot.projects
+                            .firstWhere((p) => p.projectId == v)
+                            .isGitRepository
+                        ? 'worktree'
+                        : 'shared';
+                  });
+                  _persist();
+                },
+              ),
+              if (_workspace == 'worktree')
+                CarbonTextInput(
+                  controller: _branch,
+                  enabled: _editable,
+                  label: 'Base branch',
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  placeholder: 'current branch',
+                ),
+              _choiceList('Run in', [
+                if (isGit)
+                  (
+                    title: 'Own worktree',
+                    description: _worktreeHint,
+                    selected: _workspace == 'worktree',
+                    onTap: () => _workspace = 'worktree',
+                  ),
+                (
+                  title: 'Project folder',
+                  description: _projectFolderHint,
+                  selected: _workspace == 'shared',
+                  onTap: () => _workspace = 'shared',
+                ),
+              ]),
+            ],
+          ]);
+          final catchUp = widget.snapshot.capabilities.supportsCatchUp
+              ? _section('If Antgrid was closed', [
+                  _choiceList('Missed runs', [
+                    (
+                      title: schedulerCatchUpOnceLabel,
+                      description: _once
+                          ? 'Runs when Antgrid next opens'
+                          : 'Runs the latest missed time when Antgrid opens',
+                      selected: _catchUp != 'skip',
+                      onTap: () => _catchUp = 'latest',
+                    ),
+                    (
+                      title: schedulerCatchUpSkipLabel,
+                      description: _once
+                          ? 'Skipped if Antgrid is not open then'
+                          : 'Waits for the next scheduled time',
+                      selected: _catchUp == 'skip',
+                      onTap: () => _catchUp = 'skip',
+                    ),
+                  ]),
+                  _hint(
+                    'Schedules run only while Antgrid is open on $machineName.',
+                  ),
+                ])
+              : null;
+          final summary = _summarySection(machineName, agentName(_agent));
+          final nextRuns = _nextRunsSection(
+            localZone,
+            localTimezone.value != null,
+          );
+          final notices = [
+            if (_error != null) _notice('error', _error!, error: true),
+            if (!_deleted && _executionError != null)
+              _notice('execution', _executionError!, error: true),
+            if (!widget.writable)
+              _notice(
+                'offline',
+                '$machineName is offline. Changes are paused until it reconnects.',
+              ),
+            if (_deleted)
+              _notice(
+                'deleted',
+                'This schedule was deleted. Your draft is retained for copying; Save is unavailable.',
+              ),
+            if (_unsupportedClear)
+              _notice(
+                'branch-clear',
+                'Update Antgrid on $machineName to clear the saved base branch. Other edits remain available.',
+              ),
+            if (_conflict) ...[
+              _notice(
+                'conflict',
+                _locked
+                    ? 'This schedule changed and its workspace is now locked. Keep mine uses the saved workspace settings.'
+                    : 'This schedule changed while you were editing.',
+              ),
+              Wrap(
+                spacing: CarbonSpacing.spacing03,
+                runSpacing: CarbonSpacing.spacing03,
+                children: [
+                  CarbonButton(
+                    label: 'Use saved version',
+                    kind: CarbonButtonKind.tertiary,
+                    onPressed: _saving ? null : _reload,
+                  ),
+                  CarbonButton(
+                    label: 'Keep mine',
+                    kind: CarbonButtonKind.secondary,
+                    onPressed: _saving ? null : _keepChanges,
+                  ),
+                ],
+              ),
+            ],
+          ];
+          return ColoredBox(
+            color: t.colors.background,
+            child: LayoutBuilder(
+              builder: (context, c) {
+                final wide =
+                    c.maxWidth >= kMediumBreakpoint && !isMobilePlatform;
+                final form = CarbonForm(
+                  spacing: CarbonSpacing.spacing05,
+                  children: [
+                    ...notices,
+                    task,
+                    when,
+                    if (!wide) ...[summary, ?nextRuns],
+                    agent,
+                    workspace,
+                    ?catchUp,
+                  ],
+                );
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _header(),
+                    Expanded(
+                      child: wide
+                          ? Align(
+                              alignment: Alignment.topLeft,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                spacing: CarbonSpacing.spacing06,
+                                children: [
+                                  Flexible(
+                                    child: ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: CarbonSpacing.spacing06 * 31,
+                                      ),
+                                      child: SingleChildScrollView(
+                                        padding: const EdgeInsets.fromLTRB(
+                                          CarbonSpacing.spacing06,
+                                          CarbonSpacing.spacing06,
+                                          0,
+                                          CarbonSpacing.spacing06,
+                                        ),
+                                        child: form,
+                                      ),
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    width: CarbonSpacing.spacing06 * 16,
+                                    child: SingleChildScrollView(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        0,
+                                        CarbonSpacing.spacing06,
+                                        CarbonSpacing.spacing06,
+                                        CarbonSpacing.spacing06,
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        spacing: CarbonSpacing.spacing04,
+                                        children: [summary, ?nextRuns],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : SingleChildScrollView(
+                              padding: const EdgeInsets.all(
+                                CarbonSpacing.spacing05,
+                              ),
+                              child: form,
                             ),
                     ),
-                    AbButton(
-                      label: _saving
-                          ? 'Saving…'
-                          : widget.schedule == null
-                          ? 'Create schedule'
-                          : 'Save changes',
-                      variant: AbButtonVariant.primary,
-                      onTap: _canSave
-                          ? () => detached(
-                              'ScheduleEditor',
-                              'save failed',
-                              _save,
-                            )
-                          : null,
-                    ),
+                    _footer(),
                   ],
-                ),
-              ),
+                );
+              },
             ),
-          ],
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }

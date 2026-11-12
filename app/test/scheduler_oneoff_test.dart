@@ -3,11 +3,10 @@ import 'dart:ui' show Size;
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -42,8 +41,8 @@ Future<void> settle(WidgetTester tester) async {
 Finder chip(String label) => find.widgetWithText(AbChip, label);
 
 String timeText(WidgetTester tester) =>
-    '${tester.widget<AbTextField>(field('yyyy-MM-dd')).controller!.text} '
-    '${tester.widget<AbTextField>(field('HH:mm')).controller!.text}';
+    '${tester.widget<CarbonTextInput>(field('yyyy-MM-dd')).controller!.text} '
+    '${tester.widget<CarbonTextInput>(field('HH:mm')).controller!.text}';
 
 Map<String, dynamic> lastPatch(Host host) =>
     host.calls.lastWhere((c) => c.method == 'scheduler.update').params['patch']
@@ -390,7 +389,7 @@ void main() {
       {'runAt': '2100-03-04T09:15', 'timezone': 'Asia/Kolkata'},
     );
     await tester.enterText(field('Schedule name'), 'Once');
-    await tester.enterText(find.byType(AbPromptField), 'Do it');
+    await tester.enterText(promptField, 'Do it');
     await settle(tester);
     await tester.tap(find.text('Create schedule'));
     await tester.pumpAndSettle();
@@ -416,7 +415,7 @@ void main() {
     await tester.tap(seg('Repeats'));
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Daily');
-    await tester.enterText(find.byType(AbPromptField), 'Do it');
+    await tester.enterText(promptField, 'Do it');
     await settle(tester);
     await tester.tap(find.text('Create schedule'));
     await tester.pumpAndSettle();

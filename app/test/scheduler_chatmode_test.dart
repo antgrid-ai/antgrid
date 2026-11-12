@@ -1,4 +1,3 @@
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,7 +70,7 @@ Future<void> startChatCreate(WidgetTester tester, Host host) async {
 
 Future<void> fillAndSave(WidgetTester tester) async {
   await tester.enterText(field('Schedule name'), 'Chatty');
-  await tester.enterText(find.byType(AbPromptField), 'Do it');
+  await tester.enterText(promptField, 'Do it');
   await save(tester, label: 'Create schedule');
 }
 
@@ -212,7 +211,7 @@ void main() {
   ) async {
     final host = chatHost(chatMode: 'build', listed: false);
     await openEditor(tester, host);
-    await pick(tester, 'claude');
+    await pickAgent(tester, 'claude');
     await pickSegment(tester, 'Chat');
     await tester.enterText(field('Schedule name'), 'Renamed');
     await save(tester);
@@ -228,7 +227,7 @@ void main() {
         },
       ];
     await openEditor(tester, host);
-    await pick(tester, 'codex');
+    await pickAgent(tester, 'codex');
     expect(find.text('Permission mode'), findsNothing);
     await save(tester);
     expect(patchOf(host)['agentId'], 'codex');

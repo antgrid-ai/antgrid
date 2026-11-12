@@ -8,9 +8,9 @@ import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_inline_banner.dart';
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
+
 import 'package:antgrid/design/widgets/ab_segmented.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
+
 import 'package:antgrid/design/widgets/ab_tooltip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
@@ -27,6 +27,7 @@ import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_lanes.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_run_squares.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/foundation.dart';
@@ -282,11 +283,45 @@ Future<void> pumpScreen(
   await tester.pumpAndSettle();
 }
 
-/// AbSegmented upper-cases its labels.
-Finder seg(String label) => find.text(label.toUpperCase());
+/// Scoped to the editor's content switchers, which do not upper-case labels
+/// the way the screen's AbSegmented does.
+Finder seg(String label) => find.descendant(
+  of: find.byType(CarbonContentSwitcher<String>),
+  matching: find.text(label),
+);
+
+/// Chooses [text] in the CarbonSelect named [label].
+Future<void> pickSelect(WidgetTester tester, String label, String text) async {
+  final select = find.byWidgetPredicate(
+    (w) => w is CarbonSelect<String> && w.label == label,
+  );
+  await tester.ensureVisible(select);
+  await tester.tap(select);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(text).last);
+  await tester.pumpAndSettle();
+}
+
+Future<void> pickAgent(WidgetTester tester, String agent) =>
+    pickSelect(tester, 'Agent', agent);
+
+/// Phones render "Every" as a select because four segments outgrow the pane.
+Future<void> pickEvery(WidgetTester tester, String label) async {
+  if (seg(label).evaluate().isEmpty) {
+    return pickSelect(tester, 'Every', label);
+  }
+  await tester.ensureVisible(seg(label));
+  await tester.pumpAndSettle();
+  await tester.tap(seg(label));
+  await tester.pumpAndSettle();
+}
+
 Finder option(String title) => find.byKey(ValueKey('scheduler-option-$title'));
 bool optionSelected(WidgetTester tester, String title) =>
-    tester.widget<Semantics>(option(title)).properties.checked ?? false;
+    tester.widget<CarbonContainedListRow>(option(title)).selected ?? false;
+Finder get promptField => find.byWidgetPredicate(
+  (w) => w is CarbonTextInput && w.variant == CarbonTextInputVariant.multiline,
+);
 
 Future<void> pickMachine(WidgetTester tester, String target) async {
   final current = target == 'Laptop' ? 'Local machine' : 'Laptop';
@@ -296,12 +331,13 @@ Future<void> pickMachine(WidgetTester tester, String target) async {
   await tester.pumpAndSettle();
 }
 
-Finder field(String hint) =>
-    find.byWidgetPredicate((w) => w is AbTextField && w.hintText == hint);
-AbButton saveButton(WidgetTester tester) => tester.widget<AbButton>(
+Finder field(String hint) => find.byWidgetPredicate(
+  (w) => w is CarbonTextInput && w.placeholder == hint,
+);
+CarbonButton saveButton(WidgetTester tester) => tester.widget<CarbonButton>(
   find.byWidgetPredicate(
     (w) =>
-        w is AbButton &&
+        w is CarbonButton &&
         (w.label == 'Create schedule' || w.label == 'Save changes'),
   ),
 );
@@ -460,7 +496,7 @@ void main() {
       );
       expect(find.text('America/New_York'), findsOneWidget);
       await tester.enterText(field('Schedule name'), 'Daily local review');
-      await tester.enterText(find.byType(AbPromptField), 'Review open changes');
+      await tester.enterText(promptField, 'Review open changes');
 
       container.read(deviceTimezoneProvider.notifier).set('Europe/London');
       await tester.pumpAndSettle();
@@ -543,10 +579,10 @@ void main() {
           {'cron': '0 9 * * *', 'timezone': hostZone},
         );
         expect(find.text('machine time · $hostZone'), findsOneWidget);
-        expect(saveButton(tester).onTap, isNotNull);
+        expect(saveButton(tester).onPressed, isNotNull);
         await tester.enterText(field('Schedule name'), 'Machine time review');
         await tester.enterText(
-          find.byType(AbPromptField),
+          promptField,
           'Review open changes',
         );
         await tester.tap(find.text('Create schedule'));
@@ -590,13 +626,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Europe/London'), findsOneWidget);
       expect(
-        tester
-            .widget<AbPromptField>(find.byType(AbPromptField))
-            .controller
-            .text,
+        tester.widget<CarbonTextInput>(promptField).controller!.text,
         'Keep this prompt',
       );
-      expect(saveButton(tester).onTap, isNotNull);
+      expect(saveButton(tester).onPressed, isNotNull);
       expect(
         host.calls
             .lastWhere((c) => c.method == 'scheduler.preview')
@@ -728,7 +761,7 @@ void main() {
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'My editable title',
       );
       expect(field('0 9 * * 1-5'), findsOneWidget);
@@ -736,21 +769,21 @@ void main() {
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'Daily review',
       );
       await pickMachine(tester, 'Local machine');
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'My editable title',
       );
       await pumpScreen(tester, container, child: const SizedBox());
       await pumpScreen(tester, container);
       await editSchedule(tester);
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'My editable title',
       );
     },
@@ -806,7 +839,7 @@ void main() {
       await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         '',
       );
       await pickMachine(tester, 'Local machine');
@@ -817,10 +850,10 @@ void main() {
       await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'Creation draft',
       );
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       expect(
         find.text('Pick an agent installed on Local machine.'),
         findsOneWidget,
@@ -844,13 +877,21 @@ void main() {
       await pumpScreen(tester, containerFor(host));
       await editSchedule(tester);
       expect(
-        tester.getSemantics(field('Schedule name')).getSemanticsData().label,
+        tester
+            .getSemantics(
+              find.descendant(
+                of: field('Schedule name'),
+                matching: find.byType(TextField),
+              ),
+            )
+            .getSemanticsData()
+            .label,
         contains('Name'),
       );
       await tester.tap(seg('Custom'));
       await tester.pump();
       expect(
-        tester.widget<AbTextField>(field('0 9 * * 1-5')).focusNode!.hasFocus,
+        tester.widget<CarbonTextInput>(field('0 9 * * 1-5')).focusNode!.hasFocus,
         isTrue,
       );
       await tester.tap(find.text('Cancel'));
@@ -890,7 +931,7 @@ void main() {
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       expect(find.text('Workspace settings locked'), findsOneWidget);
       await tester.ensureVisible(find.text('Keep mine'));
       await tester.pumpAndSettle();
@@ -898,17 +939,17 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'My edit',
       );
-      expect(saveButton(tester).onTap, isNotNull);
+      expect(saveButton(tester).onPressed, isNotNull);
       expect(find.text('main'), findsOneWidget);
       host.schedules = [];
       host.runs = [runRecord('active', 'needs-input', session: 'conversation')];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
       expect(find.textContaining('This schedule was deleted'), findsOneWidget);
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       await tester.tap(find.text('Schedules'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('RUNS'));
@@ -918,7 +959,7 @@ void main() {
       await tester.tap(find.text('Open retained draft'));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'My edit',
       );
     },
@@ -942,7 +983,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<AbTextField>(field('Schedule name')).controller!.text,
+        tester.widget<CarbonTextInput>(field('Schedule name')).controller!.text,
         'Saved remotely',
       );
       expect(
@@ -991,14 +1032,14 @@ void main() {
         await tester.enterText(field('current branch'), '');
         await tester.pumpAndSettle();
         if (!supported) {
-          expect(saveButton(tester).onTap, isNull);
+          expect(saveButton(tester).onPressed, isNull);
           expect(
             find.textContaining('Update Antgrid on Local machine to clear'),
             findsOneWidget,
           );
           await tester.enterText(field('current branch'), 'main');
           await tester.pumpAndSettle();
-          expect(saveButton(tester).onTap, isNotNull);
+          expect(saveButton(tester).onPressed, isNotNull);
         } else {
           await tester.tap(find.text('Save changes'));
           await tester.pumpAndSettle();
@@ -1194,20 +1235,20 @@ void main() {
       await tester.ensureVisible(seg('Custom'));
       await tester.tap(seg('Custom'));
       await tester.pump();
-      final cron = tester.widget<AbTextField>(field('0 9 * * 1-5'));
+      final cron = tester.widget<CarbonTextInput>(field('0 9 * * 1-5'));
       expect(cron.controller!.text, '15 18 * * 1-5');
       expect(cron.focusNode!.hasFocus, isTrue);
       await tester.tap(seg('Day'));
       await tester.pump();
       await tester.enterText(field('09:00'), '24:00');
       await tester.pumpAndSettle();
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       expect(find.textContaining('Enter a valid time'), findsOneWidget);
       await tester.enterText(field('09:00'), '07:30');
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(host.calls.last.params['cron'], '30 7 * * *');
-      expect(saveButton(tester).onTap, isNotNull);
+      expect(saveButton(tester).onPressed, isNotNull);
     },
   );
 
@@ -1237,7 +1278,7 @@ void main() {
           ),
           findsOneWidget,
         );
-        expect(saveButton(tester).onTap, isNull);
+        expect(saveButton(tester).onPressed, isNull);
         expect(find.textContaining('HostControlException'), findsNothing);
         expect(find.textContaining('SCHEDULER_INVALID_CRON'), findsNothing);
         if (failure == 'local validation') {
@@ -1250,7 +1291,7 @@ void main() {
         await tester.ensureVisible(find.text('Retry validation'));
         await tester.tap(find.text('Retry validation'));
         await tester.pumpAndSettle();
-        expect(saveButton(tester).onTap, isNotNull);
+        expect(saveButton(tester).onPressed, isNotNull);
       },
     );
   }
@@ -1271,22 +1312,22 @@ void main() {
             });
       await tester.enterText(field('09:00'), '07:00');
       await tester.pump(const Duration(milliseconds: 400));
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       await tester.enterText(field('09:00'), '08:00');
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       old.completeError(RpcException('SCHEDULER_INVALID_CRON', 'Stale'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Invalid cron'), findsNothing);
-      expect(saveButton(tester).onTap, isNotNull);
+      expect(saveButton(tester).onPressed, isNotNull);
       container.read(connectedProvider.notifier).set(false);
       await tester.pump();
-      expect(saveButton(tester).onTap, isNull);
+      expect(saveButton(tester).onPressed, isNull);
       container.read(connectedProvider.notifier).set(true);
       await tester.pumpAndSettle();
       expect(host.calls.last.params['timezone'], 'Asia/Kolkata');
       expect(host.calls.last.params['cron'], '0 8 * * 1-5');
-      expect(saveButton(tester).onTap, isNotNull);
+      expect(saveButton(tester).onPressed, isNotNull);
     },
   );
 
@@ -1363,17 +1404,17 @@ void main() {
       await tester.pumpAndSettle();
       await editSchedule(tester);
       await tester.enterText(
-        find.byType(AbPromptField),
+        promptField,
         List.filled(100, 'Long prompt').join('\n'),
       );
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pumpAndSettle();
       expect(
-        tester.getBottomLeft(find.widgetWithText(AbButton, 'Save changes')).dy,
+        tester.getBottomLeft(find.widgetWithText(CarbonButton, 'Save changes')).dy,
         lessThanOrEqualTo(500),
       );
       expect(
-        tester.getSize(find.widgetWithText(AbButton, 'Cancel')).height,
+        tester.getSize(find.widgetWithText(CarbonButton, 'Cancel')).height,
         greaterThanOrEqualTo(48),
       );
       expect(tester.takeException(), isNull);
@@ -1681,9 +1722,9 @@ void main() {
       await pumpScreen(tester, containerFor(Host()));
       await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
-      final create = find.widgetWithText(AbButton, 'Create schedule');
+      final create = find.widgetWithText(CarbonButton, 'Create schedule');
       expect(create, findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'Save changes'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Save changes'), findsNothing);
       expect(tester.getBottomLeft(create).dy, lessThanOrEqualTo(900));
       expect(tester.getTopLeft(create).dy, greaterThan(0));
       await tester.tap(find.text('Cancel'));
@@ -1693,9 +1734,9 @@ void main() {
         await tester.pumpAndSettle();
       }
       await editSchedule(tester);
-      final save = find.widgetWithText(AbButton, 'Save changes');
+      final save = find.widgetWithText(CarbonButton, 'Save changes');
       expect(save, findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'Create schedule'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Create schedule'), findsNothing);
       expect(tester.getBottomLeft(save).dy, lessThanOrEqualTo(900));
     },
   );
