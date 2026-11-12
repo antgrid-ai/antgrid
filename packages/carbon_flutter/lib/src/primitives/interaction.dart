@@ -102,6 +102,7 @@ class CarbonInteraction extends StatefulWidget {
     this.onHoverChange,
     this.hitTestBehavior = HitTestBehavior.opaque,
     this.button = true,
+    this.link = false,
     this.role,
     this.label,
     this.hint,
@@ -159,6 +160,9 @@ class CarbonInteraction extends StatefulWidget {
   /// Announces the control as a button. Clear it for rows and items whose
   /// role comes from [role] or from flags such as [checked].
   final bool button;
+
+  /// Announces the control as a link, for controls that navigate.
+  final bool link;
 
   final SemanticsRole? role;
   final String? label;
@@ -405,6 +409,7 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
     return Semantics(
       container: true,
       button: widget.button ? true : null,
+      link: widget.link ? true : null,
       role: widget.role,
       enabled: enabled,
       label: widget.label,

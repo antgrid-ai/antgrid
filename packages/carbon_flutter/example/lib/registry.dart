@@ -14,6 +14,7 @@ import 'pages/content_switcher_page.dart';
 import 'pages/dropdown_page.dart';
 import 'pages/form_page.dart';
 import 'pages/inline_loading_page.dart';
+import 'pages/link_page.dart';
 import 'pages/loading_page.dart';
 import 'pages/menu_page.dart';
 import 'pages/menu_button_page.dart';
@@ -193,6 +194,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Breadcrumb',
     group: 'Components',
     builder: (_) => const BreadcrumbPage(),
+  ),
+  GalleryEntry(
+    id: 'link',
+    title: 'Link',
+    group: 'Components',
+    builder: (_) => const LinkPage(),
   ),
   GalleryEntry(
     id: 'tag',

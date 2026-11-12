@@ -2,7 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
-import '../primitives/interaction.dart';
+import 'link.dart';
 
 /// One step in a [CarbonBreadcrumb].
 class CarbonBreadcrumbItem {
@@ -82,45 +82,6 @@ class _BreadcrumbLink extends StatelessWidget {
         style: style.copyWith(color: colors.textPrimary),
       );
     }
-    return CarbonInteraction(
-      onPressed: onPressed,
-      label: item.label,
-      excludeChildSemantics: true,
-      builder: (context, state, _) {
-        final underline = state.hovered || state.pressed || state.focusVisible;
-        final color = state.pressed
-            ? colors.textPrimary
-            : state.hovered
-            ? colors.linkPrimaryHover
-            : colors.linkPrimary;
-        final text = DecoratedBox(
-          position: DecorationPosition.foreground,
-          decoration: BoxDecoration(
-            border: state.focusVisible
-                ? Border.all(color: colors.focus)
-                : null,
-          ),
-          child: Text(
-            item.label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: style.copyWith(
-              color: color,
-              decoration: underline ? TextDecoration.underline : null,
-              decorationColor: color,
-            ),
-          ),
-        );
-        if (!theme.isTouch) return text;
-        return ConstrainedBox(
-          constraints: BoxConstraints(minHeight: theme.touchTarget),
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            widthFactor: 1,
-            child: text,
-          ),
-        );
-      },
-    );
+    return CarbonLink(label: item.label, onPressed: onPressed);
   }
 }

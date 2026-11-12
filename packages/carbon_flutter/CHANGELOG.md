@@ -20,6 +20,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   routes.
 - `CarbonContrast` for WCAG contrast checks of built-in and custom palettes.
 - `CarbonLicenses.register()` for the bundled font and icon notices.
+- Icons `branch`, `calendar`, `launch`, `menu`, `play` and `renew` join the
+  bundled set.
 
 ### Primitives
 
@@ -74,6 +76,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Data table: `CarbonDataTable` with `CarbonDataTableColumn` and
   `CarbonDataTableRow` for static rows (sizes, fixed or flexible columns,
   end alignment, row hover, empty state).
+- Link: `CarbonLink` (small, medium, large; inline; optional trailing icon;
+  disabled), also used for breadcrumb links, which now announce as links
+  rather than buttons.
 
 ### Interaction-state fixes
 

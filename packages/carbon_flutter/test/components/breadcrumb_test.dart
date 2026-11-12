@@ -97,14 +97,14 @@ void main() {
     expect(pressed, 2);
   });
 
-  testWidgets('a link is a named button in semantics', (tester) async {
+  testWidgets('a link is a named link in semantics', (tester) async {
     final handle = tester.ensureSemantics();
     await pumpCarbon(tester, _crumbs(), theme: light);
     expect(
       tester.getSemantics(find.byType(CarbonInteraction)),
       matchesSemantics(
         label: 'Home',
-        isButton: true,
+        isLink: true,
         isFocusable: true,
         hasEnabledState: true,
         isEnabled: true,

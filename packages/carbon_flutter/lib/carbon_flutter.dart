@@ -13,6 +13,7 @@ export 'src/components/data_table.dart';
 export 'src/components/dropdown.dart';
 export 'src/components/form.dart';
 export 'src/components/inline_loading.dart';
+export 'src/components/link.dart';
 export 'src/components/loading.dart';
 export 'src/components/menu.dart';
 export 'src/components/menu_button.dart';
