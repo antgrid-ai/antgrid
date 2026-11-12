@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -49,6 +50,7 @@ Widget _wrap({
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
+      builder: (context, child) => AbCarbonScope(child: child!),
       home: Scaffold(
         body: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -146,6 +148,7 @@ void main() {
           theme: ThemeData.dark().copyWith(
             extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
           ),
+          builder: (context, child) => AbCarbonScope(child: child!),
           home: const Scaffold(
             body: Align(
               alignment: Alignment.topLeft,
@@ -172,15 +175,16 @@ void main() {
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
+            builder: (context, child) => AbCarbonScope(child: child!),
             home: const Scaffold(body: RecentGroupByChips()),
           ),
         ),
       );
       await tester.pump();
 
-      expect(find.text('MACHINE'), findsNothing);
-      expect(find.text('PROJECT'), findsNothing);
-      expect(find.text('STATUS'), findsNothing);
+      expect(find.text('Machine'), findsNothing);
+      expect(find.text('Project'), findsNothing);
+      expect(find.text('Status'), findsNothing);
     });
 
     // The chips write recentGroupByProvider directly — this is the whole
@@ -201,6 +205,7 @@ void main() {
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
+            builder: (context, child) => AbCarbonScope(child: child!),
             home: const Scaffold(body: RecentGroupByChips()),
           ),
         ),
@@ -209,7 +214,7 @@ void main() {
 
       expect(container.read(recentGroupByProvider), RecentGroupBy.project);
 
-      await tester.tap(find.text('MACHINE'));
+      await tester.tap(find.text('Machine'));
       await tester.pump();
 
       expect(container.read(recentGroupByProvider), RecentGroupBy.machine);

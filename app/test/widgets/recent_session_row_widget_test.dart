@@ -11,6 +11,7 @@ import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/widgets/agent_work_status_dot.dart';
+import 'package:antgrid/widgets/recent_sessions/recent_session_row_actions.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_session_row_widget.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_summary.dart';
 

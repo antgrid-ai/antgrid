@@ -1,16 +1,12 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_status_tone.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_status_dot.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/value_controller.dart';
 import '../../services/control_plane_client.dart';
-import '../agent_work_status_dot.dart';
+import '../agent_work_status_indicator.dart';
 
 /// Status ordering used everywhere the Recent list speaks about states: the two
 /// call-to-action states first (a blocked or errored agent is what the user
@@ -57,7 +53,7 @@ class RecentSessionsSummaryLine extends StatelessWidget {
       builder: (context, constraints) => Row(
         children: [
           const Expanded(child: RecentSessionsTitle()),
-          const SizedBox(width: AbTokens.space10),
+          const SizedBox(width: CarbonSpacing.spacing04),
           // The badges are a Wrap, and a Wrap sitting directly in a Row is
           // handed UNBOUNDED main-axis constraints — so it never wraps, and at
           // four states on a phone it overruns the edge and starves the title.
@@ -85,14 +81,12 @@ class RecentSessionsTitle extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final total = ref.watch(recentSessionsProvider).length;
+    final t = CarbonTheme.of(context);
     return Text(
       'Sessions · $total total',
+      maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontMd,
-        color: context.antgrid.textPrimary,
-        fontWeight: FontWeight.w600,
-      ),
+      style: t.typography.heading.copyWith(color: t.colors.textPrimary),
     );
   }
 }
@@ -106,82 +100,25 @@ class RecentSessionsSummaryBadges extends ConsumerWidget {
     final counts = ref.watch(recentSessionStatusCountsProvider);
     return Wrap(
       alignment: WrapAlignment.end,
-      spacing: AbTokens.space8,
-      runSpacing: AbTokens.space6,
+      spacing: CarbonSpacing.spacing04,
+      runSpacing: CarbonSpacing.spacing02,
       children: [
         for (final s in kWorkStatusOrder)
           if ((counts[s] ?? 0) > 0)
-            _SummaryBadge(
+            // A Wrap bounds each child to its own maxWidth, so a badge
+            // narrower than its label has to shrink itself; the indicator
+            // ellipsizes its label rather than overflowing.
+            CarbonIconIndicator(
+              kind: agentWorkStatusIndicatorKind(s),
               label: '${counts[s]} ${workStatusLabel(s).toLowerCase()}',
-              // Pulse the live states (working + attention) so activity
-              // registers without reading the numbers.
-              live:
-                  s == AgentWorkStatus.working ||
-                  s == AgentWorkStatus.attention,
-              tone: s,
             ),
-      ],
-    );
-  }
-}
-
-class _SummaryBadge extends StatelessWidget {
-  const _SummaryBadge({
-    required this.label,
-    required this.tone,
-    this.live = false,
-  });
-
-  final String label;
-
-  /// The state this badge summarizes — the sole colour source, so the badge
-  /// text and its dot can never disagree about what the status looks like.
-  final AgentWorkStatus tone;
-
-  /// Prefix a pulsing activity dot — used for the live states (working /
-  /// attention) so activity registers at a glance without reading the numbers.
-  final bool live;
-
-  @override
-  Widget build(BuildContext context) {
-    final statusTone = agentWorkStatusDotSpec(tone).tone;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (live) ...[
-          AbStatusDot(
-            tone: statusTone,
-            size: AbDotSize.sm,
-            style: AbDotStyle.filled,
-            pulse: true,
-          ),
-          const SizedBox(width: AbTokens.space6),
-        ],
-        // A Wrap wraps BETWEEN badges but still bounds each one to its own
-        // maxWidth, so a badge narrower than its label has to shrink itself —
-        // and it can get that narrow wherever an inflexible neighbour splits
-        // the row first (`_SessionsHeader`'s group-by chips between two
-        // Expandeds). Degrades the way [RecentSessionsTitle] already does.
-        Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            softWrap: false,
-            overflow: TextOverflow.ellipsis,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: statusTone.color(context),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
       ],
     );
   }
 }
 
 /// Which axis groups the Recent list. Shared state, not a ctor param: the
-/// chips ([RecentGroupByChips]) and the list that reads them
+/// switcher ([RecentGroupByChips]) and the list that reads them
 /// ([RecentSessionsTab]) mount in different subtrees of the canvas (the
 /// former in the fixed top bar on touch/narrow, the latter in the scroll
 /// view below it), so there is no shared ancestor State to prop-drill
@@ -193,12 +130,18 @@ final recentGroupByProvider =
       () => ValueController(RecentGroupBy.project),
     );
 
-/// The Machine / Project / Status toggle chips. Hides itself while there are
+/// The Machine / Project / Status switcher. Hides itself while there are
 /// no recent sessions to group — [RecentSessionsTab] never builds its group
-/// headers in that state either, so a live chip row would toggle a grouping
+/// headers in that state either, so a live switcher would toggle a grouping
 /// nothing on screen obeys.
+///
+/// Needs an `AbCarbonScope` above it: the switcher is 32 tall on a compact
+/// density and 44 on touch.
 class RecentGroupByChips extends ConsumerWidget {
-  const RecentGroupByChips({super.key});
+  const RecentGroupByChips({super.key, this.expand = false});
+
+  /// Fill the width it is given rather than sizing to the widest label.
+  final bool expand;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -206,51 +149,17 @@ class RecentGroupByChips extends ConsumerWidget {
       return const SizedBox.shrink();
     }
     final groupBy = ref.watch(recentGroupByProvider);
-    void select(RecentGroupBy g) =>
-        ref.read(recentGroupByProvider.notifier).set(g);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _GroupChip(
-          label: 'Machine',
-          selected: groupBy == RecentGroupBy.machine,
-          onTap: () => select(RecentGroupBy.machine),
-        ),
-        const SizedBox(width: AbTokens.space6),
-        _GroupChip(
-          label: 'Project',
-          selected: groupBy == RecentGroupBy.project,
-          onTap: () => select(RecentGroupBy.project),
-        ),
-        const SizedBox(width: AbTokens.space6),
-        _GroupChip(
-          label: 'Status',
-          selected: groupBy == RecentGroupBy.status,
-          onTap: () => select(RecentGroupBy.status),
-        ),
+    return CarbonContentSwitcher<RecentGroupBy>(
+      semanticLabel: 'Group by',
+      size: CarbonContentSwitcherSize.small,
+      expand: expand,
+      value: groupBy,
+      onChanged: (g) => ref.read(recentGroupByProvider.notifier).set(g),
+      options: const [
+        CarbonOption(value: RecentGroupBy.machine, label: 'Machine'),
+        CarbonOption(value: RecentGroupBy.project, label: 'Project'),
+        CarbonOption(value: RecentGroupBy.status, label: 'Status'),
       ],
-    );
-  }
-}
-
-class _GroupChip extends StatelessWidget {
-  const _GroupChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return AbChip.toggle(
-      label: label,
-      selected: selected,
-      onTap: onTap,
-      color: selected ? context.antgrid.accent : null,
     );
   }
 }

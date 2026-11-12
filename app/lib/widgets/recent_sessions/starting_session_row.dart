@@ -1,24 +1,16 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../constants/breakpoints.dart';
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_loading.dart';
 import '../../providers/new_session_start.dart';
+import 'recent_session_row_actions.dart' show kRecentRailMinWidth;
 
 /// Finds the row while a start is in flight; absent when idle.
 const Key startingSessionRowKey = Key('starting-session-row');
 
 /// The phase copy, where a real Recent row prints its timestamp.
 const Key startingSessionPhaseKey = Key('starting-session-phase');
-
-/// Side of the leading glyph box, and the project line's indent under the
-/// title on mobile — both mirror `recent_session_row_widget.dart` so this row
-/// and the real one it becomes share a name column.
-const double _leadingSize = 18;
-const double _mobileProjectIndent = _leadingSize + AbTokens.space12;
 
 /// The real row's project column width, so the project text wraps and
 /// ellipsizes at the same point either side of the moment the session lands.
@@ -48,7 +40,8 @@ const double _railPhaseWidth = 150;
 /// summary counts and search.
 ///
 /// Read-only and not tappable: there is nothing to open yet, and the composer
-/// owns the single Stop affordance.
+/// owns the single Stop affordance. It is a contained-list row with no
+/// `onPressed`, which makes it static: no focus stop, announced as one node.
 class StartingSessionRow extends ConsumerWidget {
   const StartingSessionRow({super.key});
 
@@ -58,22 +51,26 @@ class StartingSessionRow extends ConsumerWidget {
     if (progress == null) return const SizedBox.shrink();
 
     final isMobile = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
-    return Padding(
-      key: startingSessionRowKey,
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space16,
-        vertical: AbTokens.space8,
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // Same fallback width as the real row: below it the desktop rail's
-          // fixed project + phase columns no longer fit beside a name.
-          final compact = isMobile || constraints.maxWidth < 560;
-          return compact
-              ? _MobileLayout(progress: progress)
-              : _DesktopLayout(progress: progress);
-        },
-      ),
+    final projectText = _projectDisplayText(progress);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Measured like the real rows, on the outer width, so the placeholder
+        // never changes shape when the session it stands for lands.
+        final compact =
+            isMobile || constraints.maxWidth < kRecentRailMinWidth;
+        return KeyedSubtree(
+          key: startingSessionRowKey,
+          child: CarbonContainedListRow(
+            title:
+                '${_titleText(progress.title)}, starting, $projectText, '
+                '${phaseLabel(progress)}',
+            leading: const _StartingMark(),
+            content: compact
+                ? _MobileLayout(progress: progress)
+                : _DesktopLayout(progress: progress),
+          ),
+        );
+      },
     );
   }
 }
@@ -87,14 +84,12 @@ class _DesktopLayout extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const _StartingMark(),
-        const SizedBox(width: AbTokens.space12),
         Expanded(
           child: Row(
             children: [
               Flexible(child: _SessionTitle(title: progress.title)),
               const _StartingBadge(),
-              const SizedBox(width: AbTokens.space12),
+              const SizedBox(width: CarbonSpacing.spacing04),
             ],
           ),
         ),
@@ -102,7 +97,7 @@ class _DesktopLayout extends StatelessWidget {
           width: _railProjectWidth,
           child: _ProjectLabel(name: _projectDisplayText(progress)),
         ),
-        const SizedBox(width: AbTokens.space12),
+        const SizedBox(width: CarbonSpacing.spacing04),
         SizedBox(
           width: _railPhaseWidth,
           child: _PhaseLabel(label: phaseLabel(progress)),
@@ -124,11 +119,9 @@ class _MobileLayout extends StatelessWidget {
       children: [
         Row(
           children: [
-            const _StartingMark(),
-            const SizedBox(width: AbTokens.space12),
             Expanded(child: _SessionTitle(title: progress.title)),
             const _StartingBadge(),
-            const SizedBox(width: AbTokens.space8),
+            const SizedBox(width: CarbonSpacing.spacing03),
             // Capped rather than fixed: a phone has no room to reserve the
             // rail's full slot, and the title is the line that may give.
             ConstrainedBox(
@@ -137,11 +130,8 @@ class _MobileLayout extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: AbTokens.space2),
-        Padding(
-          padding: const EdgeInsets.only(left: _mobileProjectIndent),
-          child: _ProjectLabel(name: _projectDisplayText(progress)),
-        ),
+        const SizedBox(height: CarbonSpacing.spacing01),
+        _ProjectLabel(name: _projectDisplayText(progress)),
       ],
     );
   }
@@ -150,39 +140,48 @@ class _MobileLayout extends StatelessWidget {
 /// The leading slot, centred in the same box as every other row's glyph so the
 /// name column keeps starting at the same x.
 ///
-/// Muted rather than [AbLoadingDot]'s accent default: the rows below carry real
-/// accent status marks, and the composer's dot for this same start is muted
-/// too — one operation must not pulse in two colours on one screen.
+/// Muted rather than the spinner's default: the rows below carry real status
+/// glyphs in colour, and the composer's indicator for this same start is muted
+/// too — one operation must not read in two colours on one screen.
 class _StartingMark extends StatelessWidget {
   const _StartingMark();
 
   @override
   Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
     return SizedBox.square(
-      dimension: _leadingSize,
+      dimension: t.iconSize,
       child: Center(
-        child: AbLoadingDot(
-          size: AbTokens.dotSizeMd,
-          color: context.antgrid.textMuted,
-        ),
+        child: CarbonSpinner(size: t.iconSize, color: t.colors.iconSecondary),
       ),
     );
   }
 }
 
-/// Shaped like `SessionDeletingBadge`: neutral, not an accent or an error
-/// colour, because this is a normal operation in progress. Owns its leading
-/// gap so the title measures against the badge, not against reserved space.
+/// Shaped like the deleting badge: neutral, not an accent or an error colour,
+/// because this is a normal operation in progress. Owns its leading gap so the
+/// title measures against the badge, not against reserved space.
 class _StartingBadge extends StatelessWidget {
   const _StartingBadge();
 
   @override
   Widget build(BuildContext context) {
     return const Padding(
-      padding: EdgeInsets.only(left: AbTokens.space6),
-      child: AbChip.system(label: 'STARTING'),
+      padding: EdgeInsetsDirectional.only(start: CarbonSpacing.spacing03),
+      child: CarbonTag(
+        label: 'Starting',
+        size: CarbonTagSize.small,
+        color: CarbonTagColor.gray,
+      ),
     );
   }
+}
+
+/// A start carries either a session name or the leading prompt text; the
+/// fallback only covers a title that is all whitespace.
+String _titleText(String title) {
+  final text = title.trim();
+  return text.isEmpty ? 'New session' : text;
 }
 
 class _SessionTitle extends StatelessWidget {
@@ -192,18 +191,12 @@ class _SessionTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = title.trim();
+    final t = CarbonTheme.of(context);
     return Text(
-      // A start carries either a session name or the leading prompt text; the
-      // fallback only covers a title that is all whitespace.
-      text.isEmpty ? 'New session' : text,
+      _titleText(title),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontMd,
-        color: context.antgrid.textPrimary,
-        fontWeight: FontWeight.w600,
-      ),
+      style: t.typography.heading.copyWith(color: t.colors.textPrimary),
     );
   }
 }
@@ -223,14 +216,12 @@ class _ProjectLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
     return Text(
       name,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AbTokens.monoStyle(
-        fontSize: AbTokens.fontSm,
-        color: context.antgrid.textMuted,
-      ),
+      style: t.typography.code.copyWith(color: t.colors.textSecondary),
     );
   }
 }
@@ -244,15 +235,13 @@ class _PhaseLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
     return Text(
       label,
       key: startingSessionPhaseKey,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontXs,
-        color: context.antgrid.textMuted,
-      ),
+      style: t.typography.helper.copyWith(color: t.colors.textSecondary),
     );
   }
 }

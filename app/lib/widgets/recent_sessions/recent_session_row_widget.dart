@@ -18,20 +18,16 @@ import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
-import '../../providers/recent_sessions.dart';
 import '../../providers/session_delete_pending.dart';
 import '../../providers/session_setup.dart';
 import '../../services/control_plane_client.dart';
-import '../../services/session_delete_policy.dart';
-import '../../services/sessions_service.dart' show SessionOperationException;
-import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../agent_work_status_dot.dart';
-import '../session_delete_flow.dart';
 import '../session_deleting_badge.dart';
 import '../session_isolation_badge.dart';
 import '../session_approval_badge.dart';
 import '../session_shared_workspace_badge.dart';
+import 'recent_session_row_actions.dart';
 import 'recent_sessions_summary.dart' show RecentGroupBy;
 
 /// One row in the Recent tab: agent mark (status-badged) · session name ·
@@ -115,23 +111,18 @@ class _RecentSessionRowWidgetState
     // the focused project's is served from the persisted cache, which carries
     // no setup state at all.
     final setup = ref.watch(sessionSetupProvider(row.session.id));
-    void onTap() {
-      // The navigator's own context, not this row's: a host that dismisses
-      // itself on open — the search popup, the search modal — unmounts this row
-      // while `openRecentSession` is still awaiting, and the cold-remote path
-      // it awaits needs a live context to put its dialogs and errors on. The
-      // navigator outlives any one route or overlay entry. Falls back to the
-      // row's own context where there is no Navigator (widget tests).
-      final host = Navigator.maybeOf(context, rootNavigator: true)?.context;
-      widget.onOpened?.call();
-      // Detached: nothing awaits a tap handler, so an activation that rejects
-      // (a bridge verb whose reply never lands) would surface as a fatal.
-      detached(
-        'RecentSessionRow',
-        'session open failed',
-        () => openRecentSession(host ?? context, ref.container, row),
-      );
-    }
+    void onTap() => openRecentSessionFromRow(
+      context,
+      ref.container,
+      row,
+      onOpened: widget.onOpened,
+    );
+    void onDelete() => deleteRecentSessionWithConfirm(
+      context,
+      ref.container,
+      row,
+      onDeleted: widget.onDeleted,
+    );
 
     final content = Container(
       color: _hovered ? t.bgHover : null,
@@ -156,7 +147,7 @@ class _RecentSessionRowWidgetState
                   relTime: relTime,
                   rowBg: rowBg,
                   deleting: deleting,
-                  onDelete: () => _deleteDetached(context, ref),
+                  onDelete: onDelete,
                 )
               : _DesktopLayout(
                   row: row,
@@ -170,7 +161,7 @@ class _RecentSessionRowWidgetState
                   // Suppressed while deleting so the time label stays put
                   // rather than cross-fading to a control that does nothing.
                   showDelete: (_hovered || _focused) && !deleting,
-                  onDelete: () => _deleteDetached(context, ref),
+                  onDelete: onDelete,
                 );
         },
       ),
@@ -203,82 +194,11 @@ class _RecentSessionRowWidgetState
       ),
     );
   }
-
-  /// Same boundary as `onTap`: the delete button's callback is `void`, so the
-  /// confirm chain's failure has to stop here.
-  void _deleteDetached(BuildContext context, WidgetRef ref) => detached(
-    'RecentSessionRow',
-    'session delete failed',
-    () => _confirmDelete(context, ref),
-  );
-
-  Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
-    // Captured before the dialog await: a confirmed delete must still run if
-    // this row was rebuilt away while the dialog was open.
-    final container = ref.container;
-    final markKey = sessionDeleteKey(row.origin.registrationId, row.session.id);
-    final result = await confirmAndDeleteSession(
-      context: context,
-      sessionName: row.session.name,
-      checkoutKind: row.session.checkoutKind,
-      sharedWorkspace: row.session.sharedWorkspace,
-      // A Recent row is a cache entry, so this surface can't promise anything
-      // about a process: the session may have no agent running to terminate.
-      sharedBody: 'This permanently deletes "${row.session.name}".',
-      delete: ({force, deleteBranch}) async {
-        final outcome = await deleteRecentSession(
-          container,
-          row,
-          force: force,
-          deleteBranch: deleteBranch,
-        );
-        // The ladder reports a SessionOperationException and nothing else, so
-        // the two non-refusal outcomes are raised as one too — a bare `false`
-        // would leave the offline case, the only one a user can act on, unsaid.
-        return switch (outcome) {
-          RecentSessionDeleteOutcome.deleted => SessionDeleteAck.deleted,
-          RecentSessionDeleteOutcome.outcomeUnknown =>
-            SessionDeleteAck.outcomeUnknown,
-          RecentSessionDeleteOutcome.offline => throw SessionOperationException(
-            null,
-            '${row.origin.deviceName} is offline — connect to delete.',
-          ),
-          RecentSessionDeleteOutcome.failed => throw SessionOperationException(
-            null,
-            'Could not delete "${row.session.name}".',
-          ),
-        };
-      },
-      onInFlight: (inFlight) {
-        final marks = container.read(sessionDeleteRequestsProvider.notifier);
-        if (inFlight) {
-          marks.arm(markKey);
-        } else {
-          marks.disarm(markKey);
-        }
-      },
-    );
-    if (result == SessionDeleteResult.deleted) widget.onDeleted?.call();
-  }
 }
 
 /// Left inset for the mobile project line — aligns under the session name,
 /// past the leading mark + gap (mirrors Fleet.astro `pl-5` under the dot row).
 const double _mobileProjectIndent = _leadingSize + AbTokens.space12;
-
-/// Fixed width of the desktop rail's trailing time slot — wide enough for the
-/// longest [relativeTime] string, "11 months ago" (13 chars) in mono
-/// [AbTokens.fontXs]. Without this, a row's project label shares the leftover
-/// space with the time string right next to it, so a shorter/longer relative
-/// time ("1 week ago" vs "25 mins ago") shifts the project label's trailing
-/// edge and the whole rail reads as raggedly spaced row to row.
-const double _railTimeWidth = 96;
-
-/// Fixed width of the desktop rail's project slot — matches the previous cap,
-/// now applied as the slot's actual size (not just a max) so every row's
-/// project text starts at the same x instead of trailing the name column by a
-/// variable amount.
-const double _railProjectWidth = 220;
 
 /// Desktop: mark · name · project · time on one line.
 class _DesktopLayout extends StatelessWidget {
@@ -313,7 +233,7 @@ class _DesktopLayout extends StatelessWidget {
     // zig-zagging through mid-row chips.
     // Reached on a tablet too, where the touch inflation would otherwise
     // out-height the scan line the two-column layout depends on.
-    final command = _railCommandText(row);
+    final command = recentRowCommandText(row);
     return AbCompactTapTargets(
       child: Row(
         children: [
@@ -351,7 +271,7 @@ class _DesktopLayout extends StatelessWidget {
           // however much space the Expanded left for it. The
           // < 560px compact fallback above owns the too-narrow case.
           SizedBox(
-            width: _railProjectWidth,
+            width: kRecentRailProjectWidth,
             child: _ProjectLabel(name: originText),
           ),
           if (command != null) ...[
@@ -372,7 +292,7 @@ class _DesktopLayout extends StatelessWidget {
           // Delete swaps IN PLACE of the time on hover (cross-fade) at that
           // same leading edge, rather than reserving its own trailing slot.
           SizedBox(
-            width: _railTimeWidth,
+            width: kRecentRailTimeWidth,
             child: Stack(
               alignment: Alignment.centerLeft,
               children: [
@@ -436,7 +356,7 @@ class _MobileLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final command = _railCommandText(row);
+    final command = recentRowCommandText(row);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -514,19 +434,6 @@ class _SessionName extends StatelessWidget {
   }
 }
 
-/// Where a row ran, minus whatever its group header already names: by machine
-/// the project alone, by project the machine alone (nothing for a local row,
-/// which never names its device), otherwise `machine · project` for remote rows.
-@visibleForTesting
-String recentOriginText(RecentOrigin origin, RecentGroupBy? groupedBy) {
-  return switch (groupedBy) {
-    RecentGroupBy.machine => origin.projectName,
-    RecentGroupBy.project => origin.isLocal ? '' : origin.deviceName,
-    _ when origin.isLocal => origin.projectName,
-    _ => '${origin.deviceName} · ${origin.projectName}',
-  };
-}
-
 class _ProjectLabel extends StatelessWidget {
   const _ProjectLabel({required this.name});
 
@@ -562,25 +469,6 @@ class _TimeLabel extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Whether this session has an agent identity worth drawing as a glyph. A
-/// custom launch command has no registry key, so there is no mark to look up
-/// and a monogram of `npm run dev` would be a lie.
-bool _hasMark(String? toolKey) => toolKey != null && toolKey.isNotEmpty;
-
-/// The rail's agent text, or null when there is nothing honest to print there.
-///
-/// Only a real custom command earns text. Don't fall back to
-/// [sessionAgentDisplayLabel] here: with neither a tool nor a command that
-/// helper names the DEFAULT agent, so a row we can't identify would print
-/// "Claude Code" as mono data while an identical row that really is Claude Code
-/// prints nothing and draws a mark instead — same agent, two presentations, one
-/// of them a guess.
-String? _railCommandText(RecentSessionRow row) {
-  if (_hasMark(row.session.tool)) return null;
-  final command = row.session.command?.trim();
-  return (command != null && command.isNotEmpty) ? command : null;
 }
 
 /// Side of the leading glyph box. The mark fills all but a hair of it; the
@@ -630,7 +518,7 @@ class _SessionMark extends StatelessWidget {
       );
     }
     final tool = toolKey;
-    if (!_hasMark(tool)) {
+    if (!recentRowHasMark(tool)) {
       return SizedBox.square(
         dimension: _leadingSize,
         child: Center(child: AgentWorkStatusDot(status: status)),

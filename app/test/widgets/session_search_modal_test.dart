@@ -1,6 +1,7 @@
 // Mobile's session search is a top-bar icon that opens a full-screen modal,
 // not the desktop's inline field with a hanging popup — the two surfaces differ
 // on purpose, so they are covered separately (see session_search_test.dart).
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_search_field.dart';
@@ -9,6 +10,8 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/session_search.dart';
 import 'package:antgrid/widgets/session_search_modal.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -64,9 +67,11 @@ void main() {
             extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
           ),
           home: const Scaffold(
-            body: Align(
-              alignment: Alignment.topRight,
-              child: SessionSearchButton(),
+            body: AbCarbonScope(
+              child: Align(
+                alignment: Alignment.topRight,
+                child: SessionSearchButton(),
+              ),
             ),
           ),
         ),
@@ -82,6 +87,23 @@ void main() {
     await tester.tap(find.byType(SessionSearchButton));
     await tester.pumpAndSettle();
   }
+
+  testWidgets('the button is a named Carbon icon button', (tester) async {
+    await pump(tester);
+    final button = tester.widget<CarbonButton>(find.byType(CarbonButton));
+    expect(button.semanticLabel, 'Search sessions');
+  });
+
+  testWidgets('the button is a 44pt target on a touch platform', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    await pump(tester);
+    final size = tester.getSize(find.byType(CarbonButton));
+    expect(size.width, greaterThanOrEqualTo(44));
+    expect(size.height, greaterThanOrEqualTo(44));
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('the button shows nothing until it is tapped', (tester) async {
     await pump(tester, rows: [_row('Refactor the relay')]);

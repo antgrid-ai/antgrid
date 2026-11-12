@@ -3,6 +3,7 @@
 // tests pin the doors into it and the one way back out; a door that stops
 // rendering is the whole rejection again.
 import 'package:antgrid/demo/demo_identity.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/session_target.dart';
@@ -44,7 +45,7 @@ Widget _wrapRecent(List<Override> overrides) => ProviderScope(
     theme: ThemeData.dark().copyWith(
       extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
     ),
-    home: const Scaffold(body: RecentSessionsTab()),
+    home: const Scaffold(body: AbCarbonScope(child: RecentSessionsTab())),
   ),
 );
 

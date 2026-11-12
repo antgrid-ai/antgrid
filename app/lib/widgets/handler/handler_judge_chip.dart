@@ -13,7 +13,8 @@ import '../../models/agent_event.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/capability_catalog.dart';
 import '../../util/detached.dart';
-import '../new_session/environment_menu.dart';
+import '../composer_chip.dart';
+import '../panel_rows.dart';
 import 'handler_session_settings.dart';
 
 /// The judge, beside the box that types the sentence it will read.

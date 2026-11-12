@@ -37,8 +37,7 @@ import '../util/ssl_error_host.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/preview_tab_bar.dart';
 import '../util/ab_log.dart';
-import '../widgets/new_session/environment_menu.dart'
-    show PanelHint, PanelRow, PanelSectionHeader;
+import '../widgets/panel_rows.dart' show PanelHint, PanelRow, PanelSectionHeader;
 import '../util/image_thumbnail.dart';
 import '../widgets/auto_send_capture_dialog.dart';
 import '../widgets/preview_draw_overlay.dart';

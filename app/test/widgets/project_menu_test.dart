@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/services/control_plane_client.dart';
@@ -53,7 +53,7 @@ const _emptyLocalSource = PickerSource(
 
 // The mobile "nothing paired yet" fallback: buildPickerSources emits a single
 // placeholder with a null machineUuid, which visiblePickerSourceProvider then
-// hands to the panel.
+// hands to the menu.
 const _placeholderSource = PickerSource(
   id: 'machine:none',
   label: 'Remote',
@@ -75,7 +75,11 @@ Widget _host({
     child: MaterialApp(
       theme: buildAbTheme(),
       home: Scaffold(
-        body: Center(child: ProjectChip(onOpenFolder: onOpenFolder ?? _noop)),
+        body: Center(
+          child: AbCarbonScope(
+            child: ProjectChip(onOpenFolder: onOpenFolder ?? _noop),
+          ),
+        ),
       ),
     ),
   );
@@ -92,7 +96,7 @@ void main() {
   });
 
   testWidgets(
-    'local panel: Open folder… row first, then projects; pick writes target',
+    'local menu: Open folder… row first, then projects; pick writes target',
     (tester) async {
       await tester.pumpWidget(_host());
       await tester.pumpAndSettle();
@@ -117,7 +121,7 @@ void main() {
     },
   );
 
-  testWidgets('Open folder… invokes the callback and closes the panel', (
+  testWidgets('Open folder… invokes the callback and closes the menu', (
     tester,
   ) async {
     var opened = false;
@@ -131,11 +135,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(opened, isTrue);
-    // Panel closed: its rows are gone.
+    // Menu closed: its rows are gone.
     expect(find.text('my-repo'), findsNothing);
   });
 
-  testWidgets('remote panel shows Connecting… while the advert is loading', (
+  testWidgets('remote menu shows Connecting… while the advert is loading', (
     tester,
   ) async {
     final controller = StreamController<ControlPlaneState>();
@@ -154,13 +158,16 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(find.byType(ProjectChip));
-    await tester.pump(); // settle the synchronous frame; stream still pending.
+    // Open lands a setState on the chip, then the menu mounts; the stream is
+    // still pending throughout, so these pumps never reach a data frame.
+    await tester.pump();
+    await tester.pump();
 
     expect(find.text('Connecting…'), findsOneWidget);
   });
 
   testWidgets(
-    'remote panel reads an empty advert as offline, not "no projects"',
+    'remote menu reads an empty advert as offline, not "no projects"',
     (tester) async {
       // A null/absent control-plane client yields an empty ControlPlaneState
       // (not an error), so the common OFFLINE case surfaces as an empty advert.
@@ -185,7 +192,7 @@ void main() {
   );
 
   testWidgets(
-    'remote panel explains remoteAccessEnabled:false instead of "offline"',
+    'remote menu explains remoteAccessEnabled:false instead of "offline"',
     (tester) async {
       // The advert arrived and said the switch is off — same wording as the
       // NOT_ALLOWED verb refusal, pinned via friendlyErrorCopy so the two
@@ -216,7 +223,7 @@ void main() {
   );
 
   testWidgets(
-    'remote panel reads remoteAccessEnabled:true + empty as "no projects yet"',
+    'remote menu reads remoteAccessEnabled:true + empty as "no projects yet"',
     (tester) async {
       await tester.pumpWidget(
         _host(
@@ -243,7 +250,7 @@ void main() {
     },
   );
 
-  testWidgets('remote panel reads a control-plane error as offline', (
+  testWidgets('remote menu reads a control-plane error as offline', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -267,7 +274,7 @@ void main() {
   testWidgets('placeholder machine source renders an empty state (no crash)', (
     tester,
   ) async {
-    // buildPickerSources' mobile fallback has a null machineUuid; the panel must
+    // buildPickerSources' mobile fallback has a null machineUuid; the menu must
     // not force-unwrap it (the CRITICAL crash) — a graceful hint instead.
     await tester.pumpWidget(_host(sources: const [_placeholderSource]));
     await tester.pumpAndSettle();
@@ -279,7 +286,7 @@ void main() {
     expect(find.text('No machines on this account'), findsOneWidget);
   });
 
-  testWidgets('local panel with no projects shows the empty-state hint', (
+  testWidgets('local menu with no projects shows the empty-state hint', (
     tester,
   ) async {
     await tester.pumpWidget(_host(sources: const [_emptyLocalSource]));
@@ -293,7 +300,7 @@ void main() {
   });
 
   testWidgets(
-    'remote panel: live advert rows appear and picking one writes target',
+    'remote menu: live advert rows appear and picking one writes target',
     (tester) async {
       await tester.pumpWidget(
         _host(
@@ -328,10 +335,9 @@ void main() {
 
       expect(find.text('Alpha'), findsOneWidget);
       expect(find.text('b'), findsOneWidget);
-      // Ported from the old rail's remote row: running/stopped status badge.
-      expect(find.byType(AbChip), findsNWidgets(2));
-      expect(find.text('RUNNING'), findsOneWidget);
-      expect(find.text('STOPPED'), findsOneWidget);
+      // The running/stopped status is each row's secondary text.
+      expect(find.text('Running'), findsOneWidget);
+      expect(find.text('Stopped'), findsOneWidget);
 
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ProjectChip)),
@@ -342,6 +348,70 @@ void main() {
       expect(container.read(selectedTargetProjectProvider)?.id, 'u1.a');
     },
   );
+
+  testWidgets('the advert is watched only while the menu is open', (
+    tester,
+  ) async {
+    var subscriptions = 0;
+    await tester.pumpWidget(
+      _host(
+        sources: const [_remoteSource],
+        extraOverrides: [
+          controlPlaneStateProvider('u1').overrideWith((ref) {
+            subscriptions++;
+            return Stream.value(const ControlPlaneState());
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // A visible composer must not dial the machine.
+    expect(subscriptions, 0);
+
+    await tester.tap(find.byType(ProjectChip));
+    await tester.pumpAndSettle();
+
+    expect(subscriptions, 1);
+    expect(find.text('Machine offline'), findsOneWidget);
+  });
+
+  testWidgets('remote rows carry Running / Stopped with recency', (
+    tester,
+  ) async {
+    final now = DateTime.now();
+    await tester.pumpWidget(
+      _host(
+        sources: const [_remoteSource],
+        extraOverrides: [
+          controlPlaneStateProvider('u1').overrideWith(
+            (ref) => Stream.value(
+              ControlPlaneState(
+                projects: [
+                  AdvertisedProject(
+                    projectId: 'old',
+                    label: 'Old',
+                    path: '/old',
+                    running: false,
+                    lastActiveAt: now
+                        .subtract(const Duration(hours: 3))
+                        .toUtc()
+                        .toIso8601String(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProjectChip));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Stopped · last active'), findsOneWidget);
+  });
 }
 
 void _noop() {}

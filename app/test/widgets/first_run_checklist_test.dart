@@ -1,3 +1,4 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -7,22 +8,30 @@ import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
 
-Widget _wrap(Widget child, {required List<Override> overrides}) {
+Widget _wrap(
+  Widget child, {
+  required List<Override> overrides,
+  bool carbon = false,
+}) {
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(body: child),
+      home: Scaffold(
+        body: carbon ? AbCarbonScope(child: child) : child,
+      ),
     ),
   );
 }
@@ -312,6 +321,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         const RecentSessionsTab(),
+        carbon: true,
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
           recentSessionsProvider.overrideWith((_) => const []),
@@ -331,7 +341,17 @@ void main() {
       find.text("Turn on Remote in that computer's title bar"),
       findsOneWidget,
     );
-    expect(find.text('[ ]'), findsNWidgets(3));
+    // The first unchecked step reads as in progress, the rest as not started.
+    final kinds = tester
+        .widgetList<CarbonIconIndicator>(find.byType(CarbonIconIndicator))
+        .map((i) => i.kind)
+        .toList();
+    expect(kinds, [
+      CarbonIconIndicatorKind.inProgress,
+      CarbonIconIndicatorKind.notStarted,
+      CarbonIconIndicatorKind.notStarted,
+    ]);
+    expect(abWidgetsInScope(tester), isEmpty);
     expect(
       find.text("Pull down to refresh once you've done a step."),
       findsOneWidget,
@@ -339,7 +359,12 @@ void main() {
     expect(find.textContaining('No recent sessions'), findsNothing);
 
     // Dismissing swaps to the plain empty state and persists.
-    await tester.tap(find.byTooltip("Dismiss — won't show again"));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
+      ),
+    );
     await tester.pump();
     expect(find.text('Connect a machine'), findsNothing);
     expect(find.textContaining('No recent sessions'), findsOneWidget);

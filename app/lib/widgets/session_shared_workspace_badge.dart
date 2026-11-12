@@ -7,6 +7,15 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/session_entry.dart';
 
+/// The badge's explanation for [others] other sessions in the directory; zero
+/// means an older bridge set the flag without a count.
+String sharedWorkspaceTip(int others) => others > 0
+    ? 'Shared workspace — ${others == 1 ? '1 other session works' : '$others other sessions work'} '
+          'in this directory. Every one of them edits the same files '
+          'and commits to the same branch, at the same time.'
+    : 'Shared workspace — other sessions work in this directory, '
+          'editing the same files and committing to the same branch.';
+
 /// The one marker that says this session's workspace is not its own — another
 /// session is working in the same directory, on the same branch, right now.
 /// Mounted wherever a session is named: the drawer row, the Recent/search row,
@@ -40,12 +49,7 @@ class SessionSharedWorkspaceBadge extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: AbTokens.space6),
       child: AbTooltip(
-        message: others > 0
-            ? 'Shared workspace — ${others == 1 ? '1 other session works' : '$others other sessions work'} '
-                  'in this directory. Every one of them edits the same files '
-                  'and commits to the same branch, at the same time.'
-            : 'Shared workspace — other sessions work in this directory, '
-                  'editing the same files and committing to the same branch.',
+        message: sharedWorkspaceTip(others),
         triggerMode: TooltipTriggerMode.tap,
         child: AbIcon(
           AbIcons.sharedWorkspace,

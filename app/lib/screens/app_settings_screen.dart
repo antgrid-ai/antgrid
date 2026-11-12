@@ -1,20 +1,15 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../billing/pricing_visibility.dart';
+import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart' show AbColors;
+import '../design/ab_theme.dart' show paletteFor;
 import '../design/theme_presets.dart';
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_theme.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_toast.dart';
-import '../design/widgets/ab_tap_target.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
@@ -23,10 +18,10 @@ import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../util/detached.dart';
+import '../widgets/carbon_confirm.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/sign_out_action.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
 import 'upgrade_screen.dart';
 import 'memory_screen.dart';
 
@@ -42,6 +37,10 @@ const _uiScaleSteps = <_UiScaleStep>[
   _UiScaleStep('Comfortable', 1.15),
   _UiScaleStep('Large', 1.30),
 ];
+
+/// The widest the settings column grows; a form line longer than this stops
+/// reading as one.
+const double _kSettingsMaxWidth = 672;
 
 /// The key [section]'s frame carries, and the handle a navigation scrolls to.
 ///
@@ -59,14 +58,14 @@ extension SettingsSectionUI on SettingsSection {
   /// enum rather than written per call site so a header and the value that
   /// addresses it cannot drift apart.
   String get title => switch (this) {
-    SettingsSection.billing => 'BILLING',
-    SettingsSection.appearance => 'APPEARANCE',
-    SettingsSection.uiSize => 'UI SIZE',
-    SettingsSection.accessibility => 'ACCESSIBILITY',
-    SettingsSection.files => 'FILES',
-    SettingsSection.privacy => 'PRIVACY',
-    SettingsSection.help => 'HELP',
-    SettingsSection.account => 'ACCOUNT',
+    SettingsSection.billing => 'Billing',
+    SettingsSection.appearance => 'Appearance',
+    SettingsSection.uiSize => 'UI size',
+    SettingsSection.accessibility => 'Accessibility',
+    SettingsSection.files => 'Files',
+    SettingsSection.privacy => 'Privacy',
+    SettingsSection.help => 'Help',
+    SettingsSection.account => 'Account',
   };
 }
 
@@ -80,6 +79,10 @@ class AppSettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
+  // A context under this screen's Carbon scope, which modals opened from here
+  // must use: the State's own context sits above it.
+  BuildContext? _scoped;
+
   @override
   void initState() {
     super.initState();
@@ -111,7 +114,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     unawaited(
       Scrollable.ensureVisible(
         ctx,
-        duration: AbTokens.motionSettle,
+        duration: CarbonMotion.resolve(ctx, CarbonMotion.moderate02),
         // Header to the top of the viewport: a section is a block, and landing
         // on its first row reads as "here it is" where centring it does not.
         alignment: 0,
@@ -120,20 +123,22 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
   }
 
   Future<void> _deleteAccount() async {
-    final confirmed = await DeleteAccountDialog.show(context);
-    if (!confirmed || !mounted) return;
+    final scoped = _scoped;
+    if (scoped == null) return;
+    final confirmed = await DeleteAccountDialog.show(scoped);
+    if (!confirmed || !mounted || !scoped.mounted) return;
     final (:result, :message) = await ref
         .read(accountApiProvider)
         .deleteAccount();
-    if (!mounted) return;
+    if (!mounted || !scoped.mounted) return;
     switch (result) {
       case DeleteAccountResult.ok:
         // Full local teardown + provider invalidation; the root re-renders in
         // its signed-out state (sign-in screen on mobile).
-        await hardSignOutFromUi(ref.container, AbToaster.maybeOf(context));
+        await hardSignOutFromUi(ref.container, AbToaster.maybeOf(scoped));
       case DeleteAccountResult.blockedBySubscription:
-        final go = await AbConfirmDialog.show(
-          context: context,
+        final go = await showCarbonConfirm(
+          scoped,
           title: 'Cancel your subscription first',
           body:
               'You have an active subscription. Cancel it before deleting your '
@@ -144,8 +149,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         if (!mounted) return;
         if (go) await openManageSubscription(ref.container);
       case DeleteAccountResult.blockedByTeam:
-        final go = await AbConfirmDialog.show(
-          context: context,
+        final go = await showCarbonConfirm(
+          scoped,
           title: 'Remove your team members first',
           body:
               message ??
@@ -159,8 +164,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       case DeleteAccountResult.blocked:
         // The web account page renders every block the server knows, including
         // ones newer than this build.
-        final go = await AbConfirmDialog.show(
-          context: context,
+        final go = await showCarbonConfirm(
+          scoped,
           title: "Account can't be deleted yet",
           body:
               message ??
@@ -172,7 +177,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         if (go) await openAccountInBrowser(ref.container);
       case DeleteAccountResult.error:
         showAbToast(
-          context,
+          scoped,
           'Could not delete account. Check your connection and try again.',
           clearPrevious: true,
         );
@@ -181,7 +186,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
     final settings = ref.watch(appSettingsServiceProvider);
     final service = ref.read(appSettingsServiceProvider.notifier);
 
@@ -202,586 +206,553 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       customAccent: settings.customAccent,
     );
 
-    return Scaffold(
-      backgroundColor: antgrid.bgDeepest,
-      body: Column(
-        children: [
-          AbPanelHeader(
-            title: 'APP SETTINGS',
-            actions: [
-              AbIconButton(
-                icon: AbIcons.close,
-                onTap: widget.onClose ?? () => Navigator.of(context).pop(),
-              ),
-            ],
-          ),
-          Expanded(
-            // Not a ListView: scroll-to-section resolves its target through the
-            // section's key context, and a lazy sliver has built no element for
-            // a section below the fold — null exactly for the sections a link
-            // is most useful for. A handful of cheap blocks is affordable
-            // eagerly.
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(AbTokens.space12),
-              child: Column(
-                // ListView stretched its children across the viewport; a Column
-                // centres them, which would shrink-wrap every section frame.
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+    void run(String what, Future<void> Function() action) =>
+        detached('AppSettingsScreen', what, action);
+
+    return AbCarbonScope(
+      child: Builder(
+        builder: (scoped) {
+          _scoped = scoped;
+          final t = CarbonTheme.of(scoped);
+          final sections = <Widget>[
+            if (kPricingSurfacesEnabled && defaultNativeUpgradePlatformCheck())
+              _Section(
+                section: SettingsSection.billing,
                 children: [
-                  if (kPricingSurfacesEnabled &&
-                      defaultNativeUpgradePlatformCheck()) ...[
-                    _Section(
-                      section: SettingsSection.billing,
-                      body: [
-                        const SizedBox(height: AbTokens.space8),
-                        InkWell(
-                          onTap: () => openUpgrade(context, ref.container),
-                          borderRadius: AbTokens.borderRadius,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: AbTokens.space8,
-                            ),
-                            child: Row(
-                              children: [
-                                Text(
-                                  'Pricing',
-                                  style: AbTokens.sansStyle(
-                                    color: antgrid.textPrimary,
-                                  ),
-                                ),
-                                const Spacer(),
-                                AbIconButton(
-                                  icon: AbIcons.chevronRight,
-                                  onTap: () =>
-                                      openUpgrade(context, ref.container),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AbTokens.space12),
-                  ],
-                  _Section(
-                    section: SettingsSection.appearance,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      Text(
-                        'Theme preset',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: antgrid.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      Wrap(
-                        spacing: AbTokens.space8,
-                        runSpacing: AbTokens.space8,
-                        children: [
-                          for (final preset in AbThemePreset.values)
-                            _PresetTile(
-                              preset: preset,
-                              selected: settings.preset == preset,
-                              onTap: () => preset == AbThemePreset.custom
-                                  ? service.setCustomColors(
-                                      bg:
-                                          settings.customBg ??
-                                          palette.bgDeepest,
-                                      primary:
-                                          settings.customPrimary ??
-                                          palette.signalMut,
-                                      accent:
-                                          settings.customAccent ??
-                                          palette.accent,
-                                    )
-                                  : service.setPreset(preset),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      _ToggleRow(
-                        title: 'Follow system light/dark',
-                        caption:
-                            'System light mode shows the Light preset; dark mode '
-                            'shows your chosen preset.',
-                        enabled: settings.followSystemBrightness,
-                        onTap: () => service.setFollowSystemBrightness(
-                          !settings.followSystemBrightness,
-                        ),
-                      ),
-                      if (settings.preset == AbThemePreset.custom) ...[
-                        const SizedBox(height: AbTokens.space12),
-                        Text(
-                          'Custom colors — surface, border, and text are derived from these.',
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: antgrid.textMuted,
-                          ),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        Wrap(
-                          spacing: AbTokens.space8,
-                          runSpacing: AbTokens.space8,
-                          children: [
-                            ColorSwatchButton(
-                              label: 'BG',
-                              color: settings.customBg ?? palette.bgDeepest,
-                              onChanged: (c) => service.setCustomColors(bg: c),
-                            ),
-                            ColorSwatchButton(
-                              label: 'PRIMARY',
-                              color:
-                                  settings.customPrimary ?? palette.signalMut,
-                              onChanged: (c) =>
-                                  service.setCustomColors(primary: c),
-                            ),
-                            ColorSwatchButton(
-                              label: 'ACCENT',
-                              color: settings.customAccent ?? palette.accent,
-                              onChanged: (c) =>
-                                  service.setCustomColors(accent: c),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
                   Align(
-                    alignment: Alignment.centerRight,
-                    child: AbButton(
-                      label: 'RESET TO DEFAULTS',
-                      onTap: () => service.reset(),
+                    alignment: AlignmentDirectional.centerStart,
+                    child: CarbonLink(
+                      label: 'Pricing',
+                      icon: const CarbonIcon(CarbonIcons.arrowRight),
+                      onPressed: () => openUpgrade(scoped, ref.container),
                     ),
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.uiSize,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      Text(
-                        'Scales text across the app. Spacing and row heights stay constant.',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: antgrid.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      Wrap(
-                        spacing: AbTokens.space8,
-                        runSpacing: AbTokens.space8,
-                        children: [
-                          for (final step in _uiScaleSteps)
-                            _UiScaleChip(
-                              step: step,
-                              selected: settings.uiScale == step.value,
-                              onTap: () => service.setUiScale(step.value),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.accessibility,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      _ToggleRow(
-                        title: 'Reduce motion',
-                        caption:
-                            'Stops pulsing status dots and loading animations. '
-                            'Indicators hold a static "busy" state instead.',
-                        enabled: settings.reduceMotion,
-                        onTap: () =>
-                            service.setReduceMotion(!settings.reduceMotion),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.files,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      _ToggleRow(
-                        title: 'Hide git-ignored files',
-                        caption:
-                            'Applies to the file tree and its filter box — '
-                            '@-mentions always skip ignored files, whatever '
-                            'this is set to.',
-                        enabled: settings.hideGitIgnoredFiles,
-                        onTap: () => service.setHideGitIgnoredFiles(
-                          !settings.hideGitIgnoredFiles,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.privacy,
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: AbButton(
-                          label: 'Manage machine memory',
-                          onTap: () => openMemoryScreen(context, null),
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      _ToggleRow(
-                        title: 'Allow terminal programs to copy text',
-                        caption:
-                            'Applies to this device. Explicit copy and paste remain available.',
-                        enabled: settings.terminalProgramCopies,
-                        onTap: () => service.setTerminalProgramCopies(
-                          !settings.terminalProgramCopies,
-                        ),
-                      ),
-                      _ToggleRow(
-                        title: 'Anonymous usage analytics',
-                        caption:
-                            'No code, files, or prompts — ever. Opt out anytime.',
-                        enabled: settings.telemetryEnabled,
-                        onTap: () => service.setTelemetryEnabled(
-                          !settings.telemetryEnabled,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                  _Section(
-                    section: SettingsSection.account,
-                    body: [
-                      if (ref.watch(currentUserProvider).value != null) ...[
-                        const SizedBox(height: AbTokens.space8),
-                        Text(
-                          'Set or change your password on the web, where a '
-                          'password change can re-check who you are and sign out '
-                          'your other sessions.',
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: antgrid.textMuted,
-                          ),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: AbButton(
-                            label: 'MANAGE PASSWORD',
-                            leading: AbIcon(
-                              AbIcons.link,
-                              size: 10,
-                              color: antgrid.textSecondary,
-                            ),
-                            onTap: () => detached(
-                              'AppSettingsScreen',
-                              'open account page',
-                              () => openAccountInBrowser(ref.container),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: AbTokens.space16),
-                      ],
-                      const SizedBox(height: AbTokens.space8),
-                      Text(
-                        'Permanently delete your account and all associated data. '
-                        'This cannot be undone.',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: antgrid.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: AbButton(
-                          label: 'DELETE ACCOUNT',
-                          color: antgrid.error,
-                          onTap: _deleteAccount,
-                        ),
-                      ),
-                    ],
                   ),
                 ],
               ),
+            _Section(
+              section: SettingsSection.appearance,
+              children: [
+                _FieldGroup(
+                  label: 'Theme preset',
+                  child: Wrap(
+                    spacing: CarbonSpacing.spacing03,
+                    runSpacing: CarbonSpacing.spacing03,
+                    children: [
+                      for (final preset in AbThemePreset.values)
+                        _ChoiceTile(
+                          label: preset.label,
+                          selected: settings.preset == preset,
+                          preview: preset == AbThemePreset.custom
+                              ? palette
+                              : (kPresets[preset] ?? kDefaultPalette),
+                          onPressed: () => run(
+                            'set preset',
+                            () => preset == AbThemePreset.custom
+                                ? service.setCustomColors(
+                                    bg: settings.customBg ?? palette.bgDeepest,
+                                    primary:
+                                        settings.customPrimary ??
+                                        palette.signalMut,
+                                    accent:
+                                        settings.customAccent ??
+                                        palette.accent,
+                                  )
+                                : service.setPreset(preset),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                _SettingToggle(
+                  title: 'Follow system light/dark',
+                  caption:
+                      'System light mode shows the Light preset; dark mode '
+                      'shows your chosen preset.',
+                  value: settings.followSystemBrightness,
+                  onChanged: (v) => run(
+                    'set follow system brightness',
+                    () => service.setFollowSystemBrightness(v),
+                  ),
+                ),
+                if (settings.preset == AbThemePreset.custom)
+                  _FieldGroup(
+                    label: 'Custom colors',
+                    helper:
+                        'Surface, border, and text are derived from these.',
+                    child: Wrap(
+                      spacing: CarbonSpacing.spacing03,
+                      runSpacing: CarbonSpacing.spacing03,
+                      children: [
+                        ColorSwatchButton(
+                          label: 'Background',
+                          color: settings.customBg ?? palette.bgDeepest,
+                          onChanged: (c) => run(
+                            'set custom background',
+                            () => service.setCustomColors(bg: c),
+                          ),
+                        ),
+                        ColorSwatchButton(
+                          label: 'Primary',
+                          color: settings.customPrimary ?? palette.signalMut,
+                          onChanged: (c) => run(
+                            'set custom primary',
+                            () => service.setCustomColors(primary: c),
+                          ),
+                        ),
+                        ColorSwatchButton(
+                          label: 'Accent',
+                          color: settings.customAccent ?? palette.accent,
+                          onChanged: (c) => run(
+                            'set custom accent',
+                            () => service.setCustomColors(accent: c),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
-          ),
-        ],
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: CarbonButton(
+                label: 'Reset to defaults',
+                kind: CarbonButtonKind.tertiary,
+                onPressed: () => run('reset', service.reset),
+              ),
+            ),
+            _Section(
+              section: SettingsSection.uiSize,
+              description:
+                  'Scales text across the app. Spacing and row heights stay constant.',
+              children: [
+                Wrap(
+                  spacing: CarbonSpacing.spacing03,
+                  runSpacing: CarbonSpacing.spacing03,
+                  children: [
+                    for (final step in _uiScaleSteps)
+                      _ChoiceTile(
+                        label: step.label,
+                        detail: '${step.value.toStringAsFixed(2)}×',
+                        selected: settings.uiScale == step.value,
+                        onPressed: () => run(
+                          'set ui scale',
+                          () => service.setUiScale(step.value),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+            _Section(
+              section: SettingsSection.accessibility,
+              children: [
+                _SettingToggle(
+                  title: 'Reduce motion',
+                  caption:
+                      'Stops pulsing status dots and loading animations. '
+                      'Indicators hold a static "busy" state instead.',
+                  value: settings.reduceMotion,
+                  onChanged: (v) => run(
+                    'set reduce motion',
+                    () => service.setReduceMotion(v),
+                  ),
+                ),
+              ],
+            ),
+            _Section(
+              section: SettingsSection.files,
+              children: [
+                _SettingToggle(
+                  title: 'Hide git-ignored files',
+                  caption:
+                      'Applies to the file tree and its filter box — '
+                      '@-mentions always skip ignored files, whatever '
+                      'this is set to.',
+                  value: settings.hideGitIgnoredFiles,
+                  onChanged: (v) => run(
+                    'set hide git-ignored files',
+                    () => service.setHideGitIgnoredFiles(v),
+                  ),
+                ),
+              ],
+            ),
+            _Section(
+              section: SettingsSection.privacy,
+              children: [
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: CarbonLink(
+                    label: 'Manage machine memory',
+                    icon: const CarbonIcon(CarbonIcons.arrowRight),
+                    onPressed: () => openMemoryScreen(scoped, null),
+                  ),
+                ),
+                _SettingToggle(
+                  title: 'Allow terminal programs to copy text',
+                  caption:
+                      'Applies to this device. Explicit copy and paste remain available.',
+                  value: settings.terminalProgramCopies,
+                  onChanged: (v) => run(
+                    'set terminal program copies',
+                    () => service.setTerminalProgramCopies(v),
+                  ),
+                ),
+                _SettingToggle(
+                  title: 'Anonymous usage analytics',
+                  caption: 'No code, files, or prompts — ever. Opt out anytime.',
+                  value: settings.telemetryEnabled,
+                  onChanged: (v) => run(
+                    'set telemetry',
+                    () => service.setTelemetryEnabled(v),
+                  ),
+                ),
+              ],
+            ),
+            _Section(
+              section: SettingsSection.account,
+              children: [
+                if (ref.watch(currentUserProvider).value != null)
+                  _FieldGroup(
+                    helper:
+                        'Set or change your password on the web, where a '
+                        'password change can re-check who you are and sign out '
+                        'your other sessions.',
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: CarbonLink(
+                        label: 'Manage password',
+                        icon: const CarbonIcon(CarbonIcons.launch),
+                        onPressed: () => run(
+                          'open account page',
+                          () => openAccountInBrowser(ref.container),
+                        ),
+                      ),
+                    ),
+                  ),
+                _FieldGroup(
+                  helper:
+                      'Permanently delete your account and all associated data. '
+                      'This cannot be undone.',
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: CarbonButton(
+                      label: 'Delete account',
+                      kind: CarbonButtonKind.dangerTertiary,
+                      onPressed: () => run('delete account', _deleteAccount),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ];
+          return ColoredBox(
+            color: t.colors.background,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _SettingsHeader(
+                  onClose:
+                      widget.onClose ?? () => Navigator.of(scoped).pop(),
+                ),
+                Expanded(
+                  // Not a ListView: scroll-to-section resolves its target
+                  // through the section's key context, and a lazy sliver has
+                  // built no element for a section below the fold — null
+                  // exactly for the sections a link is most useful for. A
+                  // handful of cheap blocks is affordable eagerly.
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+                    child: Align(
+                      alignment: AlignmentDirectional.topStart,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          maxWidth: _kSettingsMaxWidth,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            for (var i = 0; i < sections.length; i++) ...[
+                              if (i > 0)
+                                const SizedBox(height: CarbonSpacing.spacing07),
+                              sections[i],
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
 }
 
-/// One addressable block of the settings list: a titled, bordered frame whose
-/// key is derived from [section], so every section is reachable by a
+/// The surface's toolbar, the same shape as the Memory header. Phones get the
+/// close button alone: settings has no drawer button of its own.
+class _SettingsHeader extends StatelessWidget {
+  const _SettingsHeader({required this.onClose});
+
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: CarbonSizes.lg),
+        child: Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: CarbonSpacing.spacing05,
+            end: CarbonSpacing.spacing03,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    'App settings',
+                    style: t.typography.heading.copyWith(
+                      color: t.colors.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.close),
+                semanticLabel: 'Close settings',
+                onPressed: onClose,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One addressable block of the settings list: an unframed, titled section
+/// whose key is derived from [section], so every section is reachable by a
 /// `nav/settings?section=` link by construction rather than by remembering to
-/// pass one.
+/// pass one. The key sits on this outermost widget, which is what a scroll to
+/// the section measures.
 class _Section extends StatelessWidget {
-  _Section({required this.section, required this.body})
+  _Section({required this.section, this.description, required this.children})
     : super(key: settingsSectionKey(section));
 
   final SettingsSection section;
-  final List<Widget> body;
+  final String? description;
+  final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.all(AbTokens.space12),
-      decoration: BoxDecoration(
-        border: Border.all(color: antgrid.borderSubtle),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(section.title, style: AbTokens.sansStyle()),
-          ...body,
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => CarbonFormSection(
+    title: section.title,
+    description: description,
+    spacing: CarbonSpacing.spacing05,
+    children: children,
+  );
 }
 
-class _PresetTile extends StatelessWidget {
-  const _PresetTile({
-    required this.preset,
-    required this.selected,
-    required this.onTap,
-  });
+/// A control with an optional label above it and helper text below, in the
+/// positions Carbon gives a form field's.
+class _FieldGroup extends StatelessWidget {
+  const _FieldGroup({this.label, this.helper, required this.child});
 
-  final AbThemePreset preset;
-  final bool selected;
-  final VoidCallback onTap;
-
-  AbColors _peek(BuildContext context) {
-    if (preset == AbThemePreset.custom) {
-      return context.antgrid;
-    }
-    return kPresets[preset] ?? kDefaultPalette;
-  }
+  final String? label;
+  final String? helper;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
-    final p = _peek(context);
-    final name = preset.label;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: AbTokens.borderRadius8,
-      child: Container(
-        width: 130,
-        padding: const EdgeInsets.all(AbTokens.space8),
-        decoration: BoxDecoration(
-          color: p.bgDeepest,
-          border: Border.all(
-            color: selected ? antgrid.accent : antgrid.borderDefault,
-            width: selected ? 1.5 : 1,
+    final t = CarbonTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (label != null) ...[
+          Text(
+            label!,
+            style: t.typography.label.copyWith(color: t.colors.textSecondary),
           ),
-          borderRadius: AbTokens.borderRadius8,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                _Swatch(color: p.bgSurface),
-                const SizedBox(width: AbTokens.space4),
-                _Swatch(color: p.accent),
-                const SizedBox(width: AbTokens.space4),
-                _Swatch(color: p.signalMut),
-              ],
-            ),
-            const SizedBox(height: AbTokens.space8),
-            Text(
-              name,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXxs,
-                color: p.textPrimary,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
+          const SizedBox(height: CarbonSpacing.spacing03),
+        ],
+        child,
+        if (helper != null) ...[
+          const SizedBox(height: CarbonSpacing.spacing03),
+          Text(
+            helper!,
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+          ),
+        ],
+      ],
     );
   }
 }
 
-class _Swatch extends StatelessWidget {
-  const _Swatch({required this.color});
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 16,
-      height: 16,
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(2),
-      ),
-    );
-  }
-}
-
-/// Full-width settings row: title + muted caption on the left, a
-/// [_SettingsToggle] on the right; the whole row is the hit area. Vertical
-/// space8 padding lifts the two-line row past [AbTokens.tapTargetMin] —
-/// AbTapTarget's shrink-wrapping Center can't hold a Row with an Expanded,
-/// so padding is the tap-target mechanism here.
-class _ToggleRow extends StatelessWidget {
-  const _ToggleRow({
+/// A Carbon stacked toggle: label above, the On/Off word beside the switch,
+/// and the caption below. The label is part of the toggle's tap target.
+class _SettingToggle extends StatelessWidget {
+  const _SettingToggle({
     required this.title,
     required this.caption,
-    required this.enabled,
-    required this.onTap,
+    required this.value,
+    required this.onChanged,
   });
 
   final String title;
   final String caption;
-  final bool enabled;
-  final VoidCallback onTap;
+  final bool value;
+  final ValueChanged<bool> onChanged;
 
   @override
-  Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: AbTokens.sansStyle(color: antgrid.textPrimary),
-                  ),
-                  const SizedBox(height: AbTokens.space2),
-                  Text(
-                    caption,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXxs,
-                      color: antgrid.textMuted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: AbTokens.space12),
-            _SettingsToggle(enabled: enabled),
-          ],
-        ),
+  Widget build(BuildContext context) => _FieldGroup(
+    helper: caption,
+    child: Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: CarbonToggle(
+        labelText: title,
+        value: value,
+        onChanged: onChanged,
       ),
-    );
-  }
+    ),
+  );
 }
 
-/// A compact on/off track+knob toggle built entirely from design-system
-/// primitives. No Material Switch, no InkWell, no elevation or ripple.
-/// Tapping is handled by the parent [_ToggleRow]'s GestureDetector.
-class _SettingsToggle extends StatelessWidget {
-  const _SettingsToggle({required this.enabled});
-
-  final bool enabled;
-
-  // Track dimensions — 28×16 matches a compact pill switch.
-  static const _trackW = 28.0;
-  static const _trackH = 16.0;
-  static const _knobSize = 10.0;
-  static const _knobPad = 3.0;
-
-  @override
-  Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
-    return AnimatedContainer(
-      duration: AbTokens.motionSnap,
-      width: _trackW,
-      height: _trackH,
-      decoration: BoxDecoration(
-        // "on" = accent; "off" = elevated background with subtle border.
-        color: enabled ? antgrid.accent : antgrid.bgElevated,
-        border: enabled ? null : Border.all(color: antgrid.borderDefault),
-        borderRadius: AbTokens.borderRadiusFull,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(_knobPad),
-        child: Align(
-          alignment: enabled ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            width: _knobSize,
-            height: _knobSize,
-            decoration: BoxDecoration(
-              color: enabled ? antgrid.accentForeground : antgrid.textMuted,
-              shape: BoxShape.circle,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _UiScaleChip extends StatelessWidget {
-  const _UiScaleChip({
-    required this.step,
+/// One option of a single-choice setting, drawn as a Carbon selectable tile.
+///
+/// Each tile is its own tab stop and announces whether it is selected, so a
+/// choice is never carried by the border colour alone: the selected tile also
+/// carries a check mark. [preview] paints the preset's own colours as a strip
+/// above the label.
+class _ChoiceTile extends StatelessWidget {
+  const _ChoiceTile({
+    required this.label,
     required this.selected,
-    required this.onTap,
+    required this.onPressed,
+    this.detail,
+    this.preview,
   });
 
-  final _UiScaleStep step;
+  final String label;
+  final String? detail;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback onPressed;
+  final AbColors? preview;
+
+  static const double _width = 148;
 
   @override
   Widget build(BuildContext context) {
-    final antgrid = context.antgrid;
-    // InkWell keeps the tap; AbTapTarget only guarantees the mobile-minimum
-    // hit box in case a future restyle shrinks the chip below 44dp.
-    return AbTapTarget(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: AbTokens.borderRadius5,
-        child: Container(
-          width: 110,
-          padding: const EdgeInsets.symmetric(
-            horizontal: AbTokens.space10,
-            vertical: AbTokens.space8,
-          ),
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: selected ? antgrid.accent : antgrid.borderDefault,
-              width: selected ? 1.5 : 1,
+    final t = CarbonTheme.of(context);
+    final c = t.colors;
+    return CarbonInteraction(
+      onPressed: onPressed,
+      label: label,
+      selected: selected,
+      inMutuallyExclusiveGroup: true,
+      excludeChildSemantics: true,
+      builder: (context, state, _) {
+        // A selected tile draws a thicker rule; the padding gives the extra
+        // pixel back so the tile does not change size when selected.
+        final border = selected ? 2.0 : 1.0;
+        return CarbonFocusRing(
+          visible: state.focusVisible,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: state.hovered ? c.layerHover01 : c.layer01,
+              border: Border.all(
+                color: selected ? c.borderInverse : c.borderTile01,
+                width: border,
+              ),
             ),
-            borderRadius: AbTokens.borderRadius5,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                step.label,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: antgrid.textPrimary,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minWidth: _width,
+                maxWidth: _width,
+                minHeight: t.minTarget,
+              ),
+              child: Padding(
+                padding: EdgeInsets.all(CarbonSpacing.spacing04 - border + 1),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (preview case final p?) ...[
+                      _PreviewStrip(p),
+                      const SizedBox(height: CarbonSpacing.spacing03),
+                    ],
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            label,
+                            style: t.typography.control.copyWith(
+                              color: c.textPrimary,
+                              fontWeight: selected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                        if (selected)
+                          CarbonIcon(
+                            CarbonIcons.checkmarkFilled,
+                            size: 16,
+                            color: c.iconPrimary,
+                          ),
+                      ],
+                    ),
+                    if (detail != null) ...[
+                      const SizedBox(height: CarbonSpacing.spacing01),
+                      Text(
+                        detail!,
+                        style: t.typography.code.copyWith(
+                          color: c.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
-              const SizedBox(height: AbTokens.space2),
-              Text(
-                '${step.value.toStringAsFixed(2)}×',
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: antgrid.textMuted,
-                ),
-              ),
-            ],
+            ),
           ),
+        );
+      },
+    );
+  }
+}
+
+/// The three colours that characterise a preset, side by side.
+class _PreviewStrip extends StatelessWidget {
+  const _PreviewStrip(this.colors);
+
+  final AbColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final rule = CarbonTheme.of(context).borderSubtle(1);
+    Widget swatch(Color color) => Expanded(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: color,
+          border: Border.all(color: rule),
         ),
+        child: const SizedBox(height: CarbonSpacing.spacing05),
       ),
+    );
+    return Row(
+      children: [
+        swatch(colors.bgSurface),
+        swatch(colors.accent),
+        swatch(colors.signalMut),
+      ],
     );
   }
 }

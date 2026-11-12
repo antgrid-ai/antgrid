@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,9 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
-import 'package:antgrid/design/widgets/ab_cross_fade.dart';
-import 'package:antgrid/design/widgets/ab_switch.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/launcher/host_control_client.dart'
     show HostControlException;
@@ -31,6 +30,7 @@ import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/new_session/project_menu.dart';
 
+import '../helpers/carbon_guard.dart';
 import '../helpers/toast_host.dart';
 
 // Fabricated sources follow the pattern used in test/widgets/project_menu_test.dart
@@ -154,7 +154,7 @@ List<Override> _baseOverrides({
 }
 
 /// The mode dropdown shows only the current mode, so its trigger label IS
-/// the selection. The label Text is the chip's first, ahead of the ALPHA badge.
+/// the selection. The label Text is the trigger's first.
 String _selectedMode(WidgetTester tester) => tester
     .widget<Text>(
       find
@@ -174,11 +174,24 @@ Future<void> _openModeMenu(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// The Chat row's label: the alpha marker rides in it everywhere but iOS.
+String _chatRowLabel() =>
+    defaultTargetPlatform == TargetPlatform.iOS ? 'Chat' : 'Chat (alpha)';
+
+/// Menu rows carry no keys, so a row is found by its label; `.last` because
+/// the trigger, which may show the same word, comes first in the tree.
 Future<void> _pickMode(WidgetTester tester, String mode) async {
   await _openModeMenu(tester);
-  await tester.tap(find.byKey(Key('new-session-mode-$mode')));
+  await tester.tap(
+    find.text(mode == 'chat' ? _chatRowLabel() : 'Terminal').last,
+  );
   await tester.pumpAndSettle();
 }
+
+/// The send key's activation callback; null when it is disabled.
+VoidCallback? _sendOnPressed(WidgetTester tester) => tester
+    .widget<CarbonButton>(find.byKey(const Key('new-session-send-button')))
+    .onPressed;
 
 /// What [_project]'s machine reports installed: a subset of [_fullCatalog].
 const _installed = <String, String?>{
@@ -223,15 +236,31 @@ Widget _host({
     child: MaterialApp(
       theme: buildAbTheme(),
       builder: abToastHostBuilder,
-      home: Scaffold(
-        body: Align(
-          alignment: Alignment.bottomCenter,
-          child: wrap != null ? wrap(composer) : composer,
+      // The canvas scopes the composer in production; without it the theme
+      // falls back to compact on every platform.
+      // The app shell holds the route's pop for its own back handling, so a
+      // guard that read the route's pop state would be fooled in production;
+      // hold it here too.
+      home: PopScope(
+        canPop: false,
+        child: Scaffold(
+          body: AbCarbonScope(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: wrap != null ? wrap(composer) : composer,
+            ),
+          ),
         ),
       ),
     ),
   );
 }
+
+/// The editable text showing [text]. The combo box also builds its hint, which
+/// repeats the current branch, so a plain text finder sees both.
+Finder _fieldShowing(String text) => find.byWidgetPredicate(
+  (w) => w is EditableText && w.controller.text == text,
+);
 
 void main() {
   testWidgets('empty prompt is explicitly optional and can start by button', (
@@ -253,10 +282,7 @@ void main() {
       find.text('Describe a task or ask a question (optional)'),
       findsOneWidget,
     );
-    final sendButton = tester.widget<ComposerSendButton>(
-      find.byKey(const Key('new-session-send-button')),
-    );
-    expect(sendButton.onTap, isNotNull);
+    expect(_sendOnPressed(tester), isNotNull);
 
     await tester.tap(find.byKey(const Key('new-session-send-button')));
     await tester.pumpAndSettle();
@@ -366,15 +392,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final promptField = tester.widget<AbPromptField>(
+    final promptField = tester.widget<CarbonTextInput>(
       find.byKey(const Key('new-session-prompt-field')),
     );
     expect(promptField.enabled, isFalse);
 
-    final sendButtonBefore = tester.widget<ComposerSendButton>(
-      find.byKey(const Key('new-session-send-button')),
-    );
-    expect(sendButtonBefore.onTap, isNull);
+    expect(_sendOnPressed(tester), isNull);
 
     final container = ProviderScope.containerOf(
       tester.element(find.byType(NewSessionComposer)),
@@ -384,10 +407,7 @@ void main() {
         .set('my-agent --serve');
     await tester.pumpAndSettle();
 
-    final sendButtonAfter = tester.widget<ComposerSendButton>(
-      find.byKey(const Key('new-session-send-button')),
-    );
-    expect(sendButtonAfter.onTap, isNotNull);
+    expect(_sendOnPressed(tester), isNotNull);
   });
 
   testWidgets('no target: send disabled, chip shows Select project…', (
@@ -398,10 +418,7 @@ void main() {
 
     expect(find.text('Select project…'), findsOneWidget);
 
-    final sendButton = tester.widget<ComposerSendButton>(
-      find.byKey(const Key('new-session-send-button')),
-    );
-    expect(sendButton.onTap, isNull);
+    expect(_sendOnPressed(tester), isNull);
   });
 
   testWidgets('context row survives a long machine label at phone width', (
@@ -487,7 +504,7 @@ void main() {
     // chip still renders one — the state the overflow destroyed.
     expect(find.text(machine), findsOneWidget);
     expect(find.text('iter-compiler'), findsOneWidget);
-    expect(find.text('Revoke1'), findsOneWidget);
+    expect(_fieldShowing('Revoke1'), findsOneWidget);
 
     // One line, and every chip still the same height: a chip that sheds its
     // label must not shed the label's line box with it.
@@ -526,10 +543,12 @@ void main() {
     // the reason as a toast — pump past its duration so its dismiss timer
     // isn't pending at test end.)
     await _openModeMenu(tester);
-    await tester.tap(find.byKey(const Key('new-session-mode-chat')));
+    await tester.tap(find.text(_chatRowLabel()));
     await tester.pumpAndSettle();
 
     expect(container.read(newSessionModeProvider), 'terminal');
+    // Still open: a disabled row ignores the tap.
+    expect(find.text(_chatRowLabel()), findsOneWidget);
     await tester.tapAt(const Offset(5, 5));
     await tester.pumpAndSettle();
     expect(_selectedMode(tester), 'terminal');
@@ -566,7 +585,7 @@ void main() {
     },
   );
 
-  testWidgets('gear popover edits session name via newSessionNameProvider', (
+  testWidgets('Session settings edits session name via newSessionNameProvider', (
     tester,
   ) async {
     await tester.pumpWidget(_host(overrides: _baseOverrides(target: _project)));
@@ -637,7 +656,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Not supported for this agent and mode'), findsOneWidget);
-    final toggle = tester.widget<AbSwitch>(
+    final toggle = tester.widget<CarbonToggle>(
       find.byKey(const Key('new-session-gear-yolo')),
     );
     expect(toggle.onChanged, isNull);
@@ -791,7 +810,8 @@ void main() {
             theme: buildAbTheme(),
             builder: abToastHostBuilder,
             home: Scaffold(
-              body: Align(
+              body: AbCarbonScope(
+                child: Align(
                 alignment: Alignment.bottomCenter,
                 child: Consumer(
                   builder: (context, ref, _) => ref.watch(_composerVisible)
@@ -805,6 +825,7 @@ void main() {
                         )
                       : const SizedBox.shrink(),
                 ),
+              ),
               ),
             ),
           ),
@@ -918,7 +939,10 @@ void main() {
         expect(_selectedMode(tester), 'terminal');
 
         await _openModeMenu(tester);
-        await tester.tap(find.byKey(const Key('new-session-mode-chat')));
+        // The reason heads the menu, so a missing option and an unsupported
+        // one never look alike.
+        expect(find.text("Cursor doesn't support chat sessions"), findsOneWidget);
+        await tester.tap(find.text(_chatRowLabel()));
         await tester.pumpAndSettle();
 
         expect(container.read(newSessionModeProvider), 'terminal');
@@ -960,7 +984,7 @@ void main() {
     );
   });
 
-  group('Chat ALPHA marker', () {
+  group('Chat alpha marker', () {
     // App Review rejected the iOS build for pre-release wording.
     for (final (platform, shown) in [
       (TargetPlatform.iOS, false),
@@ -986,16 +1010,11 @@ void main() {
 
           await _pickMode(tester, 'chat');
           expect(_selectedMode(tester), 'chat');
-          expect(find.text('ALPHA'), alpha);
+          expect(find.text('Alpha'), alpha);
 
           await _openModeMenu(tester);
-          expect(
-            find.descendant(
-              of: find.byKey(const Key('new-session-mode-chat')),
-              matching: find.text('ALPHA'),
-            ),
-            alpha,
-          );
+          expect(find.text('Chat (alpha)'), alpha);
+          expect(find.text('Chat'), findsWidgets);
           await tester.tapAt(const Offset(5, 5));
           await tester.pumpAndSettle();
         } finally {
@@ -1023,14 +1042,14 @@ void main() {
         tester.element(find.byType(NewSessionComposer)),
       );
       expect(container.read(newSessionIsolatedProvider), isFalse);
-      expect(find.text('main'), findsOneWidget);
+      expect(_fieldShowing('main'), findsOneWidget);
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
 
       expect(container.read(newSessionIsolatedProvider), isTrue);
       // The neighbouring chip is the feedback: the branch becomes a base.
-      expect(find.text('Base: main'), findsOneWidget);
+      expect(_fieldShowing('Base: main'), findsOneWidget);
 
       await tester.tap(chip());
       await tester.pumpAndSettle();
@@ -1103,7 +1122,7 @@ void main() {
 
   group('Branch switch confirmation dialog', () {
     testWidgets(
-      'shows AbConfirmDialog on ActiveSessionsBranchSwitchException and retries when confirmed',
+      'shows the switch-branch confirmation on ActiveSessionsBranchSwitchException and retries when confirmed',
       (tester) async {
         var submitCalls = <bool>[];
         await tester.pumpWidget(
@@ -1426,6 +1445,146 @@ void main() {
     });
   });
 
+  group('Carbon surface', () {
+    testWidgets('nothing under the scope is an Ab widget, with every surface '
+        'open', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(
+              target: _project,
+              detection: Future.value(_installed),
+              worktreeSupported: true,
+            ),
+            newSessionAgentProvider.overrideWith(
+              () => ValueController(const KnownAgent('codex')),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(abWidgetsInScope(tester), isEmpty);
+
+      await _openModeMenu(tester);
+      expect(find.text(_chatRowLabel()), findsOneWidget);
+      expect(abWidgetsInScope(tester), isEmpty);
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('new-session-agent-selector')));
+      await tester.pumpAndSettle();
+      expect(find.text('Custom'), findsOneWidget);
+      expect(abWidgetsInScope(tester), isEmpty);
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+
+      // The modals are routes, outside the composer's scope: walk each.
+      await tester.tap(find.byKey(const Key('new-session-gear-button')));
+      await tester.pumpAndSettle();
+      expect(find.byType(CarbonModal), findsOneWidget);
+      expect(abWidgetsInScope(tester, scope: find.byType(CarbonModal)), isEmpty);
+
+      await tester.tap(find.byKey(const Key('new-session-gear-yolo')));
+      await tester.pumpAndSettle();
+      expect(find.byType(CarbonModal), findsNWidgets(2));
+      for (var i = 0; i < 2; i++) {
+        expect(
+          abWidgetsInScope(tester, scope: find.byType(CarbonModal).at(i)),
+          isEmpty,
+        );
+      }
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      expect(find.byType(CarbonModal), findsNothing);
+    });
+
+    testWidgets('controls keep 44pt targets on iOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _host(
+            overrides: _baseOverrides(
+              target: _project,
+              worktreeSupported: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        for (final target in <Finder>[
+          find.byType(EnvironmentChip),
+          find.byType(ProjectChip),
+          find.byKey(const Key('new-session-worktree-chip')),
+          find.byKey(const Key('new-session-prompt-field')),
+          find.byKey(const Key('new-session-mode-chip')),
+          find.byKey(const Key('new-session-gear-button')),
+          find.byKey(const Key('new-session-agent-selector')),
+          find.byKey(const Key('new-session-send-button')),
+        ]) {
+          expect(
+            tester.getSize(target).height,
+            greaterThanOrEqualTo(44),
+            reason: '$target',
+          );
+        }
+        for (final key in ['new-session-gear-button', 'new-session-send-button']) {
+          expect(
+            tester.getSize(find.byKey(Key(key))).width,
+            greaterThanOrEqualTo(44),
+            reason: key,
+          );
+        }
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    // A popup closes on the press of a tap outside it and lets the tap
+    // through, so without a guard the tap meant to dismiss a picker also
+    // started the session with the picker's value unchanged.
+    for (final (name, open, openProof) in <(String, Finder, String)>[
+      ('agent menu', find.byKey(const Key('new-session-agent-selector')), 'Custom'),
+      ('mode menu', find.byKey(const Key('new-session-mode-chip')), 'Chat (alpha)'),
+      ('branch list', find.byType(BranchChip), 'dev'),
+    ]) {
+      testWidgets('a tap on Send that closes the $name does not also start', (
+        tester,
+      ) async {
+        var submitCount = 0;
+        await tester.pumpWidget(
+          _host(
+            overrides: _baseOverrides(
+              target: _project,
+              detection: Future.value(_installed),
+            ),
+            submit: (ref, {allowActiveSessions = false}) async {
+              submitCount++;
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        final send = find.byKey(const Key('new-session-send-button'));
+
+        await tester.tap(open);
+        await tester.pumpAndSettle();
+        expect(find.text(openProof), findsOneWidget);
+
+        await tester.tap(send);
+        await tester.pumpAndSettle();
+        expect(find.text(openProof), findsNothing);
+        expect(submitCount, 0);
+
+        // With nothing left to dismiss, the same tap starts.
+        await tester.tap(send);
+        await tester.pumpAndSettle();
+        expect(submitCount, 1);
+      });
+    }
+  });
+
   group('start lock', () {
     void begin(
       ProviderContainer container, {
@@ -1455,7 +1614,7 @@ void main() {
         );
 
     /// Never `pumpAndSettle` while a start is armed: the status line and the
-    /// busy send button both run a repeating `AbLoadingDot` controller.
+    /// busy send button both run a repeating `CarbonSpinner`.
     Future<void> settle(WidgetTester tester) =>
         tester.pump(const Duration(milliseconds: 400));
 
@@ -1500,17 +1659,18 @@ void main() {
       expect(find.text('Open folder…'), findsNothing);
 
       await tapDead(find.byType(BranchChip));
-      expect(find.text('Search branches…'), findsNothing);
+      // 'dev' appears only in the branch list; the field shows 'main'.
+      expect(find.text('dev'), findsNothing);
 
       await tapDead(find.byKey(const Key('new-session-worktree-chip')));
       expect(container.read(newSessionIsolatedProvider), isFalse);
 
       await tapDead(find.byKey(const Key('new-session-mode-chip')));
-      expect(find.byKey(const Key('new-session-mode-chat')), findsNothing);
+      expect(find.text('Chat (alpha)'), findsNothing);
       expect(container.read(newSessionModeProvider), 'terminal');
 
       await tapDead(find.byKey(const Key('new-session-gear-button')));
-      expect(find.text('Session settings'), findsNothing);
+      expect(find.byType(CarbonModal), findsNothing);
 
       await tapDead(find.byKey(const Key('new-session-agent-selector')));
       expect(find.text('Codex'), findsNothing);
@@ -1549,22 +1709,22 @@ void main() {
       begin(container);
       await settle(tester);
 
-      final field = tester.widget<AbPromptField>(
+      final field = tester.widget<CarbonTextInput>(
         find.byKey(const Key('new-session-prompt-field')),
       );
       // Frozen, not disabled: the prompt already on the wire is the thing the
       // user is waiting on, so it stays legible and undimmed.
       expect(field.readOnly, isTrue);
       expect(field.enabled, isTrue);
-      // Read off the rendered field, because AbPromptField DERIVES this from
+      // Read off the rendered editable, because the field DERIVES this from
       // readOnly rather than taking it — a caret blinking in a frozen prompt
       // invites the edit the lock exists to refuse.
       expect(
         tester
-            .widget<TextField>(
+            .widget<EditableText>(
               find.descendant(
                 of: find.byKey(const Key('new-session-prompt-field')),
-                matching: find.byType(TextField),
+                matching: find.byType(EditableText),
               ),
             )
             .showCursor,
@@ -1597,7 +1757,7 @@ void main() {
 
       final container = containerOf(tester);
       expect(stopButton(), findsNothing);
-      expect(tester.widget<ComposerSendButton>(sendButton()).busy, isFalse);
+      expect(tester.widget<CarbonButton>(sendButton()).busy, isFalse);
 
       begin(container);
       await settle(tester);
@@ -1615,9 +1775,11 @@ void main() {
       await settle(tester);
 
       expect(stopButton(), findsNothing);
-      final busy = tester.widget<ComposerSendButton>(sendButton());
-      expect(busy.busy, isTrue);
-      expect(busy.onTap, isNull);
+      // Busy keeps a live callback so the key keeps its fill; the button
+      // itself swallows the press.
+      final busyKey = tester.widget<CarbonButton>(sendButton());
+      expect(busyKey.busy, isTrue);
+      expect(busyKey.onPressed, isNotNull);
       expect(
         container
             .read(newSessionStartProgressProvider.notifier)
@@ -1630,7 +1792,7 @@ void main() {
 
       expect(stopButton(), findsNothing);
       expect(find.byKey(const Key('new-session-status-line')), findsNothing);
-      expect(tester.widget<ComposerSendButton>(sendButton()).busy, isFalse);
+      expect(tester.widget<CarbonButton>(sendButton()).busy, isFalse);
     });
 
     testWidgets('the status line names the stage the start has reached', (
@@ -1700,10 +1862,10 @@ void main() {
       await tester.tap(find.byKey(const Key('new-session-prompt-field')));
       await tester.pumpAndSettle();
       final node = tester
-          .widget<AbPromptField>(
+          .widget<CarbonTextInput>(
             find.byKey(const Key('new-session-prompt-field')),
           )
-          .focusNode;
+          .focusNode!;
       expect(node.hasFocus, isTrue);
       return node;
     }
@@ -1752,12 +1914,15 @@ void main() {
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
 
+      // The slot's own fade is the outermost Opacity under its key.
       double slotOpacity() => tester
           .widget<Opacity>(
-            find.descendant(
-              of: find.byType(AbCrossFade),
-              matching: find.byType(Opacity),
-            ),
+            find
+                .descendant(
+                  of: find.byKey(const Key('new-session-trailing-slot')),
+                  matching: find.byType(Opacity),
+                )
+                .first,
           )
           .opacity;
 
@@ -1801,7 +1966,8 @@ void main() {
             theme: buildAbTheme(),
             builder: abToastHostBuilder,
             home: Scaffold(
-              body: Align(
+              body: AbCarbonScope(
+                child: Align(
                 alignment: Alignment.bottomCenter,
                 child: Consumer(
                   builder: (context, ref, _) => ref.watch(_composerVisible)
@@ -1815,6 +1981,7 @@ void main() {
                         )
                       : const SizedBox.shrink(),
                 ),
+              ),
               ),
             ),
           ),
@@ -1844,7 +2011,7 @@ void main() {
       expect(statusText(tester), 'Waking mac-studio...');
       expect(
         tester
-            .widget<AbPromptField>(
+            .widget<CarbonTextInput>(
               find.byKey(const Key('new-session-prompt-field')),
             )
             .readOnly,
@@ -1861,9 +2028,7 @@ void main() {
       advance(container, NewSessionStartPhase.creating);
       await settle(tester);
 
-      final send = tester.widget<ComposerSendButton>(sendButton());
-      expect(send.onTap, isNull);
-      expect(send.busy, isTrue);
+      expect(tester.widget<CarbonButton>(sendButton()).busy, isTrue);
     });
   });
 }

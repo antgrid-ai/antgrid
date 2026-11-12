@@ -1,3 +1,4 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -6,6 +7,7 @@ import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/remote_access_nudge_banner.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -53,7 +55,7 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(body: child),
+      home: Scaffold(body: AbCarbonScope(child: child)),
     ),
   );
 }
@@ -76,6 +78,12 @@ Future<FirstRunStore> _storeWithChecklistDismissed() async {
   await store.write(const FirstRunState(checklistDismissed: true));
   return store;
 }
+
+/// The close button by its accessible name: Carbon draws no Material Tooltip,
+/// so `byTooltip` cannot find it.
+Finder _closeButton(String label) => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == label,
+);
 
 void main() {
   // The platform override is set/reset INSIDE each test body — the binding
@@ -108,6 +116,12 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Turn on'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is CarbonNotification && w.kind == CarbonNotificationKind.info,
+      ),
+      findsOneWidget,
+    );
     // The real prompt retires the one-time mention forever.
     expect(store.read().nudgeSoftDismissed, isTrue);
     debugDefaultTargetPlatformOverride = null;
@@ -131,7 +145,7 @@ void main() {
     expect(find.text(_softMessage), findsOneWidget);
     expect(find.text('Turn on'), findsNothing);
 
-    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.tap(_closeButton('Dismiss'));
     await tester.pump();
     expect(find.text(_softMessage), findsNothing);
     expect(store.read().nudgeSoftDismissed, isTrue);
@@ -204,7 +218,7 @@ void main() {
     expect(find.textContaining('signed in to your account'), findsOneWidget);
 
     await tester.tap(
-      find.byTooltip("Dismiss — won't ask again on this machine"),
+      _closeButton("Dismiss — won't ask again on this machine"),
     );
     await tester.pump();
     expect(find.textContaining('signed in to your account'), findsNothing);

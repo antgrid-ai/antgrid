@@ -34,6 +34,21 @@ SessionCheckoutHealth sessionCheckoutHealth(String? state) => switch (state) {
   _ => SessionCheckoutHealth.unknown,
 };
 
+/// The badge's explanation, shared by every rendering of it so the Ab and
+/// Carbon rows cannot describe one workspace two ways.
+String sessionIsolationTip(SessionCheckoutHealth health, bool preparing) {
+  if (preparing) return 'Preparing this session\'s workspace…';
+  return switch (health) {
+    SessionCheckoutHealth.ready =>
+      'Isolated session — its own workspace, separate from your main tree.',
+    SessionCheckoutHealth.unavailable =>
+      'This isolated session\'s workspace is unavailable.',
+    // The most conservative claim available: it stays true whatever the state
+    // turns out to mean.
+    SessionCheckoutHealth.unknown => 'Isolated session.',
+  };
+}
+
 /// The one marker that says a session is isolated, mounted wherever a session
 /// is named — the drawer row, the Recent/search row, the agent breadcrumb.
 ///
@@ -78,24 +93,15 @@ class SessionIsolationBadge extends StatelessWidget {
     final preparing =
         health != SessionCheckoutHealth.unavailable &&
         sessionSetupPhase(setup) == SessionSetupPhase.running;
-    final (Color? color, String tip) = preparing
-        // Accent, matching the transcript's own in-progress glyph: the pulse
-        // has to swing against the row's background to read as motion, and the
-        // resting muted gray barely moves under a fade.
-        ? (context.antgrid.accent, 'Preparing this session\'s workspace…')
-        : switch (health) {
-            SessionCheckoutHealth.ready => (
-              null,
-              'Isolated session — its own workspace, separate from your main tree.',
-            ),
-            SessionCheckoutHealth.unavailable => (
-              context.antgrid.warning,
-              'This isolated session\'s workspace is unavailable.',
-            ),
-            // The most conservative claim available: it stays true whatever the
-            // state turns out to mean.
-            SessionCheckoutHealth.unknown => (null, 'Isolated session.'),
-          };
+    final tip = sessionIsolationTip(health, preparing);
+    // Accent, matching the transcript's own in-progress glyph: the pulse has to
+    // swing against the row's background to read as motion, and the resting
+    // muted gray barely moves under a fade.
+    final Color? color = preparing
+        ? context.antgrid.accent
+        : health == SessionCheckoutHealth.unavailable
+        ? context.antgrid.warning
+        : null;
     Widget glyph = AbIcon(
       AbIcons.isolated,
       size: _glyphSize,

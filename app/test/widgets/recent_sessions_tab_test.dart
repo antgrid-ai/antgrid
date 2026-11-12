@@ -1,7 +1,9 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -18,6 +20,7 @@ import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/recent_sessions/starting_session_row.dart';
 import 'package:antgrid/widgets/session_search_field.dart';
 
+import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
 
 Widget _wrap(Widget child) {
@@ -26,7 +29,7 @@ Widget _wrap(Widget child) {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(body: child),
+      home: Scaffold(body: AbCarbonScope(child: child)),
     ),
   );
 }
@@ -46,7 +49,8 @@ void main() {
     expect(find.textContaining('No recent sessions'), findsOneWidget);
     // The empty branch must present a Scrollable so an ancestor
     // RefreshIndicator (new_session_content.dart) has a gesture target —
-    // AbEmptyState alone is a bare Center with no scroll view.
+    // The empty state alone is a bare Center with no scroll view, and a second
+    // Scrollable would split the drag from the refresh viewport.
     expect(
       find.descendant(
         of: find.byType(RecentSessionsTab),
@@ -136,6 +140,17 @@ void main() {
     await tester.pump();
     expect(find.textContaining('Sessions'), findsOneWidget);
     expect(find.text('Fix auth bug'), findsOneWidget);
+    // Carbon end to end, apart from the agent mark.
+    expect(abWidgetsInScope(tester), isEmpty);
+    // A Carbon group header in sentence case with a small count tag, and the
+    // group-by switcher with its options in sentence case.
+    final group = tester.widget<CarbonContainedListSliver>(
+      find.byType(CarbonContainedListSliver),
+    );
+    expect(group.label, 'antgrid');
+    expect(find.widgetWithText(CarbonTag, '1'), findsOneWidget);
+    expect(find.text('Machine'), findsOneWidget);
+    expect(find.text('Status'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -505,7 +520,7 @@ void main() {
           isolated: false,
           title: 'fix the bug',
         );
-    // Not pumpAndSettle: the placeholder row's loading dot repeats forever, so
+    // Not pumpAndSettle: the placeholder row's spinner repeats forever, so
     // the tree never settles while a start is armed.
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));

@@ -1,3 +1,4 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,10 +28,12 @@ class SessionSearchButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AbIconButton(
-      icon: AbIcons.search,
-      tooltip: 'Search sessions',
-      onTap: () => showSessionSearch(context),
+    // The modal it opens stays Ab: it is shared with the workspace's Ctrl/Cmd-K
+    // entry, and its rows must match the desktop title-bar popup's.
+    return CarbonButton.iconOnly(
+      icon: const CarbonIcon(CarbonIcons.search),
+      semanticLabel: 'Search sessions',
+      onPressed: () => showSessionSearch(context),
     );
   }
 }

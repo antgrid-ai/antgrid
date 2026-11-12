@@ -4,6 +4,11 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_tooltip.dart';
 
+/// Names no mechanism, matching the isolation badge: the same badge stands for
+/// every checkout kind.
+const kSessionDeletingTip =
+    'Deleting this session. Removing an isolated workspace can take a while.';
+
 /// The marker that says a session is being removed right now, mounted wherever
 /// a session is named — the drawer row and the Recent row.
 ///
@@ -24,11 +29,7 @@ class SessionDeletingBadge extends StatelessWidget {
     return const Padding(
       padding: EdgeInsets.only(left: AbTokens.space6),
       child: AbTooltip(
-        // Names no mechanism, matching the isolation badge: the same badge
-        // stands for every checkout kind.
-        message:
-            'Deleting this session. Removing an isolated workspace can take a '
-            'while.',
+        message: kSessionDeletingTip,
         child: AbChip.system(label: 'DELETING'),
       ),
     );

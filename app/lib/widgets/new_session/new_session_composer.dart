@@ -1,35 +1,17 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_composer_send_button.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_confirm_dialog.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_cross_fade.dart';
-import '../../design/widgets/ab_icon_button.dart';
-import '../../design/widgets/ab_kbd.dart';
-import '../../design/widgets/ab_loading.dart';
-import '../../design/widgets/ab_menu.dart';
-import '../../design/widgets/ab_prompt_field.dart';
 import '../../design/widgets/ab_toast.dart';
-import '../../design/widgets/ab_text_field.dart';
-import '../../design/widgets/ab_switch.dart';
-import '../../design/widgets/ab_tooltip.dart';
 import '../../launcher/host_control_client.dart' show HostControlException;
-
-// The send key moved to the design system (shared with the transcript
-// composer); re-exported so existing importers keep resolving it from here.
-export '../../design/widgets/ab_composer_send_button.dart'
-    show ComposerSendButton;
+import '../../models/agent_descriptor.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
@@ -40,8 +22,10 @@ import '../../util/ab_log.dart';
 import '../../util/detached.dart';
 import '../ab_status_helpers.dart'
     show agentsCheckingCopy, agentsUnlistedCopy, sessionRefusalCopy;
+import '../carbon_confirm.dart';
 import 'branch_menu.dart';
 import 'branch_remote_advisory.dart';
+import 'context_picker.dart';
 import 'environment_menu.dart';
 import 'picker_sources.dart';
 import 'project_menu.dart';
@@ -122,36 +106,40 @@ const double _enterHintMinWidth = 96;
 /// stage name, so this only has to leave room for the dot and a few characters.
 const double _statusLineMinWidth = 44;
 
-/// Bottom-row width below which the controls degrade: the agent selector's
-/// slot absorbs the row slack (ellipsizing its label) instead of the desktop
-/// Enter-hint slot. Degradation order is hint → label; the labels never drop.
+/// Row width below which the controls degrade. On the bottom row the agent
+/// selector's slot absorbs the row slack (ellipsizing its label) instead of
+/// the desktop Enter-hint slot, and the mode trigger drops to its glyph; the
+/// agent label never drops. On touch the context row scrolls below it.
 const double _composerRowRoomyMinWidth = 460;
 
 /// Flex the phase status line claims while a start runs, against the agent
 /// selector's 1. A phone's bottom row cannot seat both at their intrinsic
 /// widths, and a locked selector is the one of the two with nothing left to
-/// say — it sheds its label to the glyph the way a narrow context row's chips
-/// do, rather than pushing the phase off the line.
+/// say — it gives up its slot, rather than pushing the phase off the line.
 const int _statusSlotFlex = 3;
 
 /// Share of the context row a single picker label may claim before it starts
 /// ellipsizing. Two of them cap out together at well under the full row, which
-/// is what keeps the fixed-width isolation chip and a readable stub of the
-/// branch on the line no matter how pathological the machine and project names
-/// get.
+/// is what keeps the isolation checkbox and a readable stub of the branch on
+/// the line no matter how pathological the machine and project names get.
 const double _chipLabelCapFraction = 0.3;
 
-/// Room the branch chip is guaranteed on the context row: enough to render its
-/// glyph, its chevron and a readable stub of the ref. The row hands the branch
-/// its remainder, and a fraction-only cap can leave a remainder below the
-/// chip's own chrome — which is a render overflow, not a truncation.
-const double _branchChipFloor = kComposerChipFullMinWidth;
+/// Inset of the context and control rows. Ghost triggers carry their own
+/// spacing05 padding, so their glyphs land on [_textInset].
+const double _rowInset = CarbonSpacing.spacing03;
+
+/// Inset of the prompt and the branch advisory: the column the row triggers'
+/// glyphs sit on.
+const double _textInset = CarbonSpacing.spacing03 + CarbonSpacing.spacing05;
+
+/// Lines the prompt grows to before it scrolls internally.
+const int _promptMaxLines = 7;
 
 /// Bottom-anchored composer for the New Session canvas.
 ///
-/// Assembles the chip row ([EnvironmentChip] + [ProjectChip]), a multiline
-/// prompt field, and the bottom control row (mode chip, gear popover, agent
-/// selector, send button). Also owns the form listeners (target -> seed agent,
+/// Assembles the context row ([EnvironmentChip], [ProjectChip], [BranchChip],
+/// isolation), a multiline prompt, and the bottom control row (mode, Session
+/// settings, agent selector, send button). Also owns the form listeners (target -> seed agent,
 /// agent -> mode default, detection -> installed-agent snap) and the submit
 /// handler.
 class NewSessionComposer extends ConsumerStatefulWidget {
@@ -176,6 +164,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   late final FocusNode _promptFocus;
   bool _hovered = false;
   bool _promptFocused = false;
+  /// The pointer now pressing Send, if any.
+  int? _sendPointer;
 
   @override
   void initState() {
@@ -348,16 +338,14 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           // user to confirm a working-tree switch they just cancelled would act
           // on the opposite of what they last said.
           if (_endedByCancel) return;
-          final confirm = await AbConfirmDialog.show(
-            context: context,
+          final confirm = await showCarbonConfirm(
+            context,
             title: 'Switch branch?',
             body:
                 'One or more sessions in this folder are working or need you. Switching to "${e.branch}" changes the working tree for all of them.',
-            cancelLabel: 'Cancel',
             confirmLabel: 'Switch & start',
-            destructive: false,
           );
-          if (confirm != true || !mounted) return;
+          if (!confirm || !mounted) return;
 
           final target = ref.read(selectedTargetProjectProvider);
           final selection = ref.read(newSessionBranchSelectionProvider);
@@ -461,6 +449,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           : const Duration(seconds: 8),
     );
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -571,398 +560,542 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       isolationReady: isolationReady,
     );
 
-    final p = context.antgrid;
-    // One "armed instrument" surface: context chips, prompt, and controls
-    // share a single bordered box whose border tracks the interaction state
-    // (default → strong on hover → accent while the prompt has focus), the
-    // same focus contract as the transcript's RichComposer.
-    final borderColor = _promptFocused
-        ? p.accent
+    final t = CarbonTheme.of(context);
+    final c = t.colors;
+    // One "armed instrument" surface: context row, prompt and controls share a
+    // single frame around a chromeless editable, and the frame — not the
+    // editable — carries the state: subtle at rest, strong on hover, Carbon's
+    // 2px focus colour while the prompt has focus. Painted in the foreground
+    // so the thicker focus edge never shifts the content inside it.
+    final frameColor = _promptFocused
+        ? c.focus
         : _hovered
-        ? p.borderStrong
-        : p.borderDefault;
+        ? t.borderStrong(1)
+        : t.borderSubtle(1);
+    final frameWidth = _promptFocused
+        ? CarbonBorders.focus
+        : CarbonBorders.hairline;
+    const gap = SizedBox(width: CarbonSpacing.spacing03);
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
-      child: AnimatedContainer(
-        duration: AbTokens.motionDefault,
-        curve: Curves.easeOut,
-        decoration: BoxDecoration(
-          border: Border.all(color: borderColor),
-          borderRadius: AbTokens.borderRadius8,
-          color: p.bgSurface,
+      child: Container(
+        color: t.layer(1),
+        foregroundDecoration: BoxDecoration(
+          border: Border.all(color: frameColor, width: frameWidth),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Context row: where the session will run. Docked inside the
-            // surface so environment/project read as part of the command,
-            // not as detached chrome floating above it.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AbTokens.space10,
-                AbTokens.space10,
-                AbTokens.space10,
-                0,
-              ),
-              // One line, always. The row is the session's target stated as a
-              // sentence, and a sentence that folds reads as two unrelated
-              // fragments. Every label here is data with an unbounded
-              // intrinsic width (a machine name carries a device-uuid suffix,
-              // a branch carries `Base: ` plus a generated name), so the row
-              // has to decide what gives:
-              //   - the branch takes the slack and ellipsizes, because it is
-              //     the one that is long in practice and the one that stays
-              //     legible truncated;
-              //   - machine and project are capped at a fraction of the row so
-              //     a pathological label cannot crowd the branch out, but stay
-              //     intrinsic below that cap so the branch keeps the TRUE
-              //     remainder — flexing all three instead would strand each
-              //     one's unused share and truncate the branch early;
-              //   - the isolation chip keeps its word until keeping it would
-              //     starve the branch, then falls back to its state glyph: the
-              //     word is a constant the tooltip repeats, the branch name
-              //     isn't.
-              child: LayoutBuilder(
-                builder: (context, rowConstraints) {
-                  const gaps = AbTokens.space6 * 3;
-                  // Guards against Infinity - Infinity = NaN below: the only
-                  // production ancestor bounds this row (see
-                  // new_session_content.dart's ConstrainedBox), but an
-                  // unbounded one must degrade the chips to their narrowest
-                  // state rather than poison every constraint downstream.
-                  final row = rowConstraints.maxWidth.isFinite
-                      ? rowConstraints.maxWidth
-                      : 0.0;
-                  // The cap is a fraction of the row, but never more than what
-                  // is left once the branch holds its floor and the isolation
-                  // chip its glyph. The fraction alone is not enough: on a
-                  // phone two long labels claiming it left the branch a
-                  // remainder below its own chrome, which renders as an
-                  // overflow, not as a truncation.
-                  final cap = math.max(
-                    0.0,
-                    math.min(
-                      row * _chipLabelCapFraction,
-                      (row -
-                              gaps -
-                              kComposerChipGlyphWidth -
-                              _branchChipFloor) /
-                          2,
-                    ),
-                  );
-                  // Whatever the caps left above the branch's floor: enough for
-                  // the isolation chip's word, or it falls back to its glyph.
-                  final isolationChipMax = math.max(
-                    0.0,
-                    row - gaps - cap * 2 - _branchChipFloor,
-                  );
-                  final capBox = BoxConstraints(maxWidth: cap);
-                  return Row(
-                    children: [
-                      ConstrainedBox(
-                        constraints: capBox,
-                        child: EnvironmentChip(enabled: !starting),
+        // The frame is a layer-1 surface, so what sits on it is one layer up.
+        child: CarbonLayer(
+          level: 2,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Context row: where the session will run. Docked inside the
+              // surface so environment/project read as part of the command,
+              // not as detached chrome floating above it.
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(
+                  _rowInset,
+                  _rowInset,
+                  _rowInset,
+                  0,
+                ),
+                // One line, always. The row is the session's target stated as
+                // a sentence, and a sentence that folds reads as two unrelated
+                // fragments. Every label here is data with an unbounded
+                // intrinsic width (a machine name carries a device-uuid
+                // suffix, a branch carries `Base: ` plus a generated name), so
+                // the row has to decide what gives:
+                //   - the branch takes the slack and ellipsizes, because it is
+                //     the one that is long in practice and the one that stays
+                //     legible truncated;
+                //   - machine and project are capped at a fraction of the row
+                //     so a pathological label cannot crowd the branch out, but
+                //     stay intrinsic below that cap so the branch keeps the
+                //     TRUE remainder — flexing all three instead would strand
+                //     each one's unused share and truncate the branch early;
+                //   - the isolation checkbox keeps its word until keeping it
+                //     would starve the branch, then shows only its box: the
+                //     word is a constant the tooltip repeats, the branch name
+                //     isn't.
+                // A phone cannot seat four touch-sized triggers with readable
+                // labels at all, so there the line scrolls instead of
+                // truncating every label to a letter.
+                child: LayoutBuilder(
+                  builder: (context, rowConstraints) {
+                    // Guards against Infinity - Infinity = NaN below: the only
+                    // production ancestor bounds this row (see
+                    // new_session_content.dart's ConstrainedBox), but an
+                    // unbounded one must degrade the pickers to their
+                    // narrowest state rather than poison every constraint
+                    // downstream.
+                    final row = rowConstraints.maxWidth.isFinite
+                        ? rowConstraints.maxWidth
+                        : 0.0;
+                    final environment = EnvironmentChip(enabled: !starting);
+                    final project = ProjectChip(
+                      onOpenFolder: widget.onOpenFolder,
+                      enabled: !starting,
+                    );
+                    final branch = BranchChip(enabled: !starting);
+                    final isolation = _IsolationChip(enabled: !starting);
+                    if (t.isTouch && row < _composerRowRoomyMinWidth) {
+                      // Unbounded inside the scroller, each picker caps its
+                      // own label.
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            environment,
+                            gap,
+                            project,
+                            gap,
+                            branch,
+                            gap,
+                            isolation,
+                          ],
+                        ),
+                      );
+                    }
+                    const gaps = CarbonSpacing.spacing03 * 3;
+                    // Room the branch is guaranteed: a readable stub of the
+                    // ref. A fraction-only cap can leave a remainder below the
+                    // field's own chrome — which is a render overflow, not a
+                    // truncation.
+                    final branchFloor = contextPickerFullMinWidth(t);
+                    // The cap is a fraction of the row, but never more than
+                    // what is left once the branch holds its floor and the
+                    // isolation checkbox its box. The fraction alone is not
+                    // enough: two long labels claiming it left the branch a
+                    // remainder below its own chrome.
+                    final cap = math.max(
+                      0.0,
+                      math.min(
+                        row * _chipLabelCapFraction,
+                        (row - gaps - contextPickerGlyphWidth(t) - branchFloor) /
+                            2,
                       ),
-                      const SizedBox(width: AbTokens.space6),
-                      ConstrainedBox(
-                        constraints: capBox,
-                        child: ProjectChip(
-                          onOpenFolder: widget.onOpenFolder,
+                    );
+                    // Whatever the caps left above the branch's floor: enough
+                    // for the isolation word, or it falls back to its box.
+                    final isolationMax = math.max(
+                      0.0,
+                      row - gaps - cap * 2 - branchFloor,
+                    );
+                    final capBox = BoxConstraints(maxWidth: cap);
+                    return Row(
+                      children: [
+                        ConstrainedBox(constraints: capBox, child: environment),
+                        gap,
+                        ConstrainedBox(constraints: capBox, child: project),
+                        gap,
+                        Flexible(child: branch),
+                        gap,
+                        ConstrainedBox(
+                          constraints: BoxConstraints(maxWidth: isolationMax),
+                          child: isolation,
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              // Advisory about the branch named on the row above. Sits between
+              // the two because it explains that row, not the prompt; it is
+              // absent (zero height) in every state but a stale base. Inset to
+              // the pickers' glyph column, as the prompt below is.
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: _textInset),
+                child: BranchRemoteAdvisory(),
+              ),
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(
+                  _textInset,
+                  CarbonSpacing.spacing04,
+                  _textInset,
+                  0,
+                ),
+                child: CarbonTextInput(
+                  key: const Key('new-session-prompt-field'),
+                  bare: true,
+                  variant: CarbonTextInputVariant.multiline,
+                  controller: _prompt,
+                  focusNode: _promptFocus,
+                  semanticLabel: 'Task prompt',
+                  enabled: !isCustom,
+                  readOnly: starting,
+                  // Grows, then scrolls internally so a long prompt cannot
+                  // squeeze the recents list above.
+                  minLines: 3,
+                  maxLines: _promptMaxLines,
+                  placeholder: isCustom
+                      ? 'Starts a terminal session — set the command in '
+                            'Session settings'
+                      : 'Describe a task or ask a question (optional)',
+                  prefix: _PromptMarker(
+                    focused: _promptFocused,
+                    enabled: !isCustom,
+                  ),
+                  onChanged: (v) =>
+                      ref.read(newSessionPromptProvider.notifier).set(v),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(_rowInset),
+                child: LayoutBuilder(
+                  builder: (context, rowConstraints) {
+                    // Tight rows (phones, narrow desktop panes) degrade before
+                    // overflowing: the mode trigger drops to its glyph and the
+                    // agent selector's slot takes the row slack so its label
+                    // ellipsizes (see _composerRowRoomyMinWidth).
+                    final roomy =
+                        rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
+                    // The Enter hint is desktop-only (a soft keyboard has no
+                    // meaningful Enter-to-send) but the phase line is not: a
+                    // cold remote start is a 30s wait, and a phone is where it
+                    // is most often watched. So the slot is present whenever
+                    // either of the two has something to say.
+                    final showTrailingSlot =
+                        starting || (roomy && !isMobilePlatform);
+                    return Row(
+                      children: [
+                        _ModeSelector(
+                          supportsChat: supportsChat,
                           enabled: !starting,
+                          glyphOnly: !roomy,
                         ),
-                      ),
-                      const SizedBox(width: AbTokens.space6),
-                      Flexible(child: BranchChip(enabled: !starting)),
-                      const SizedBox(width: AbTokens.space6),
-                      ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: isolationChipMax),
-                        child: _IsolationChip(enabled: !starting),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
-            // Advisory about the branch named on the row above. Sits between
-            // the two because it explains that row, not the prompt; it is
-            // absent (zero height) in every state but a stale base.
-            const BranchRemoteAdvisory(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AbTokens.space12,
-                AbTokens.space12,
-                AbTokens.space12,
-                AbTokens.space6,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Shell-prompt marker: the terminal-native "type here"
-                  // affordance. Accent while live, dimmed with the field.
-                  Padding(
-                    padding: const EdgeInsets.only(top: AbTokens.space2),
-                    child: Text(
-                      '❯',
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontMd,
-                        fontWeight: FontWeight.w600,
-                        color: isCustom ? p.textDisabled : p.accent,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: AbTokens.space8),
-                  Expanded(
-                    // Cap growth like RichComposer (~8 lines) so a long
-                    // prompt scrolls internally instead of squeezing the
-                    // recents list above.
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 176),
-                      child: AbPromptField(
-                        key: const Key('new-session-prompt-field'),
-                        controller: _prompt,
-                        focusNode: _promptFocus,
-                        enabled: !isCustom,
-                        readOnly: starting,
-                        hintText: isCustom
-                            ? 'Starts a terminal session — set the command in ⚙'
-                            : 'Describe a task or ask a question (optional)',
-                        onChanged: (v) =>
-                            ref.read(newSessionPromptProvider.notifier).set(v),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AbTokens.space10,
-                0,
-                AbTokens.space10,
-                AbTokens.space10,
-              ),
-              child: LayoutBuilder(
-                builder: (context, rowConstraints) {
-                  // Tight rows (phones, narrow desktop panes) degrade before
-                  // overflowing: the agent selector's slot takes the row slack
-                  // so its label ellipsizes (see _composerRowRoomyMinWidth).
-                  final roomy =
-                      rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
-                  // The Enter hint is desktop-only (a soft keyboard has no
-                  // meaningful Enter-to-send) but the phase line is not: a
-                  // cold remote start is a 30s wait, and a phone is where it
-                  // is most often watched. So the slot is present whenever
-                  // either of the two has something to say.
-                  final showTrailingSlot =
-                      starting || (roomy && !isMobilePlatform);
-                  return Row(
-                    children: [
-                      _ModeSelector(
-                        supportsChat: supportsChat,
-                        enabled: !starting,
-                      ),
-                      const SizedBox(width: AbTokens.space8),
-                      Builder(
-                        builder: (gearContext) => AbIconButton(
+                        gap,
+                        CarbonButton.iconOnly(
                           key: const Key('new-session-gear-button'),
-                          icon: AbIcons.settings,
-                          onTap: starting ? null : () => _openGear(gearContext),
+                          icon: const CarbonIcon(CarbonIcons.settings),
+                          semanticLabel: 'Session settings',
+                          onPressed: starting ? null : _openSessionSettings,
                         ),
-                      ),
-                      if (showTrailingSlot) ...[
-                        // The slot fades on READINESS (focus, canSend) so the
-                        // row doesn't reflow; the hint-to-phase swap inside it
-                        // is a hard cut, because AbCrossFade animates one
-                        // child's opacity and not a change of child (which is
-                        // also why the fade below is re-keyed per child). It
-                        // lives in the row's slack (not after a Spacer) so a
-                        // narrow pane drops its content instead of overflowing
-                        // — the invisible slot still occupies layout space.
-                        Expanded(
-                          flex: starting ? _statusSlotFlex : 1,
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              if (constraints.maxWidth <
-                                  (starting
-                                      ? _statusLineMinWidth
-                                      : _enterHintMinWidth)) {
-                                return const SizedBox.shrink();
-                              }
-                              return Align(
-                                alignment: Alignment.centerRight,
-                                child: Padding(
-                                  padding: const EdgeInsets.only(
-                                    right: AbTokens.space12,
+                        if (showTrailingSlot) ...[
+                          // The slot fades on READINESS (focus, canSend) so
+                          // the row doesn't reflow; the hint-to-phase swap
+                          // inside it is a hard cut (see the key below). It
+                          // lives in the row's slack (not after a Spacer) so a
+                          // narrow pane drops its content instead of
+                          // overflowing — the invisible slot still occupies
+                          // layout space.
+                          Expanded(
+                            flex: starting ? _statusSlotFlex : 1,
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                if (constraints.maxWidth <
+                                    (starting
+                                        ? _statusLineMinWidth
+                                        : _enterHintMinWidth)) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Align(
+                                  alignment: AlignmentDirectional.centerEnd,
+                                  child: Padding(
+                                    padding: const EdgeInsetsDirectional.only(
+                                      end: CarbonSpacing.spacing04,
+                                    ),
+                                    child: KeyedSubtree(
+                                      key: const Key(
+                                        'new-session-trailing-slot',
+                                      ),
+                                      child: _SlotFade(
+                                        // Re-keyed on WHICH of the two the
+                                        // slot holds. The fade animates one
+                                        // child, so without this the swap and
+                                        // the visibility change land on the
+                                        // same frame and it is the newly
+                                        // substituted child that plays the
+                                        // other one's animation: a start
+                                        // ending with the prompt unfocused
+                                        // faded the Enter hint out, text the
+                                        // user never had. A new key mounts a
+                                        // fresh tween already settled at its
+                                        // target, so each child appears and
+                                        // leaves on its own terms. The trade
+                                        // is that the status line appears at
+                                        // once rather than fading in — the
+                                        // better half of it, on the frame
+                                        // Send was pressed.
+                                        key: ValueKey(progress == null),
+                                        visible:
+                                            starting ||
+                                            (_promptFocused && canSend),
+                                        child: progress == null
+                                            ? Text(
+                                                'Enter to start',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: t.typography.helper
+                                                    .copyWith(
+                                                      color: c.textHelper,
+                                                    ),
+                                              )
+                                            : _StatusLine(
+                                                label: phaseLabel(progress),
+                                              ),
+                                      ),
+                                    ),
                                   ),
-                                  child: AbCrossFade(
-                                    // Re-keyed on WHICH of the two the slot
-                                    // holds. AbCrossFade fades one child, so
-                                    // without this the swap and the visibility
-                                    // change land on the same frame and it is
-                                    // the newly-substituted child that plays
-                                    // the other one's animation: a start ending
-                                    // with the prompt unfocused faded the Enter
-                                    // hint out, text the user never had. A new
-                                    // key mounts a fresh tween already settled
-                                    // at its target, so each child appears and
-                                    // leaves on its own terms. The trade is
-                                    // that the status line now appears at once
-                                    // rather than fading in — the better half
-                                    // of it, on the frame Send was pressed.
-                                    key: ValueKey(progress == null),
-                                    duration: AbTokens.motionDefault,
-                                    visible:
-                                        starting || (_promptFocused && canSend),
-                                    child: progress == null
-                                        ? Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const AbKbd('⏎'),
-                                              const SizedBox(
-                                                width: AbTokens.space6,
-                                              ),
-                                              Text(
-                                                'to start',
-                                                style: AbTokens.sansStyle(
-                                                  fontSize: AbTokens.fontXs,
-                                                  color: p.textMuted,
-                                                ),
-                                              ),
-                                            ],
-                                          )
-                                        : Row(
-                                            key: const Key(
-                                              'new-session-status-line',
-                                            ),
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              AbLoadingDot(
-                                                size: AbTokens.dotSizeMd,
-                                                color: p.textMuted,
-                                              ),
-                                              const SizedBox(
-                                                width: AbTokens.space6,
-                                              ),
-                                              Flexible(
-                                                child: Text(
-                                                  phaseLabel(progress),
-                                                  maxLines: 1,
-                                                  softWrap: false,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: AbTokens.sansStyle(
-                                                    fontSize: AbTokens.fontXs,
-                                                    color: p.textSecondary,
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                  ),
-                                ),
-                              );
-                            },
+                                );
+                              },
+                            ),
                           ),
-                        ),
-                        if (starting)
-                          // A bounded slot rather than an intrinsic child: the
-                          // status line took the larger share, and the selector
-                          // has to be able to shed its label to its glyph
-                          // rather than push the row into an overflow. Expanded
-                          // + Align, not a loose Flexible — a Flexible the chip
-                          // underfills leaves its slack AFTER the last child,
-                          // unpinning the send key from the row's right edge.
+                          if (starting)
+                            // A bounded slot rather than an intrinsic child:
+                            // the status line took the larger share. The
+                            // locked selector has nothing left to say, so a
+                            // slot too narrow for a readable trigger drops it
+                            // rather than push the row into an overflow.
+                            // Expanded + Align, not a loose Flexible — a
+                            // Flexible the trigger underfills leaves its slack
+                            // AFTER the last child, unpinning the send key
+                            // from the row's right edge.
+                            Expanded(
+                              child: LayoutBuilder(
+                                builder: (context, slot) =>
+                                    slot.maxWidth < _agentTriggerFloor(t)
+                                    ? const SizedBox.shrink()
+                                    : const Align(
+                                        alignment:
+                                            AlignmentDirectional.centerEnd,
+                                        child: _AgentSelector(enabled: false),
+                                      ),
+                              ),
+                            )
+                          else
+                            // Shares the slack with the hint rather than
+                            // sizing to its label: a long agent name in a
+                            // pane just past the roomy width overflowed the
+                            // row. Aligned to the end so the send key stays
+                            // pinned to the row's right edge.
+                            const Expanded(
+                              child: Align(
+                                alignment: AlignmentDirectional.centerEnd,
+                                child: _AgentSelector(),
+                              ),
+                            ),
+                        ] else
+                          // No trailing slot: hand the slack to the selector
+                          // so a long agent label ellipsizes inside it instead
+                          // of overflowing.
                           const Expanded(
                             child: Align(
-                              alignment: Alignment.centerRight,
-                              child: _AgentSelector(enabled: false),
+                              alignment: AlignmentDirectional.centerEnd,
+                              child: _AgentSelector(),
+                            ),
+                          ),
+                        gap,
+                        // Stop is the same key in the same slot, so the send
+                        // affordance keeps its test key across both; the
+                        // outer key is what tells the two variants apart.
+                        if (progress != null && progress.isCancellable)
+                          KeyedSubtree(
+                            key: const Key('new-session-stop-button'),
+                            child: CarbonButton.iconOnly(
+                              key: const Key('new-session-send-button'),
+                              kind: CarbonButtonKind.danger,
+                              icon: const CarbonIcon(CarbonIcons.stopFilled),
+                              semanticLabel: 'Stop starting session',
+                              onPressed: () => ref
+                                  .read(
+                                    newSessionStartProgressProvider.notifier,
+                                  )
+                                  .requestCancel(),
                             ),
                           )
                         else
-                          const _AgentSelector(),
-                      ] else
-                        // No trailing slot: hand the slack to the selector so
-                        // a long agent label ellipsizes inside it
-                        // (ComposerChip needs a bounded width) instead of
-                        // overflowing.
-                        const Expanded(
-                          child: Align(
-                            alignment: Alignment.centerRight,
-                            child: _AgentSelector(),
-                          ),
-                        ),
-                      const SizedBox(width: AbTokens.space8),
-                      // Stop is the same key in the same slot, so the send
-                      // affordance keeps its test key across both; the outer
-                      // key is what tells the two variants apart. Both carry a
-                      // label: one glyph in one position means start or cancel
-                      // depending on state, and ComposerSendButton paints no
-                      // text to tell a screen reader or a hover which it is.
-                      if (progress != null && progress.isCancellable)
-                        KeyedSubtree(
-                          key: const Key('new-session-stop-button'),
-                          child: Semantics(
-                            button: true,
-                            label: 'Stop starting session',
-                            child: AbTooltip(
-                              message: 'Stop starting session',
-                              child: ComposerSendButton(
-                                key: const Key('new-session-send-button'),
-                                icon: AbIcons.stop,
-                                color: p.error,
-                                onTap: () => ref
-                                    .read(
-                                      newSessionStartProgressProvider.notifier,
-                                    )
-                                    .requestCancel(),
-                              ),
+                          Listener(
+                            onPointerDown: (event) =>
+                                _sendPointer = event.pointer,
+                            onPointerUp: (_) => _forgetSendPress(),
+                            onPointerCancel: (_) => _forgetSendPress(),
+                            child: CarbonButton.iconOnly(
+                              key: const Key('new-session-send-button'),
+                              kind: CarbonButtonKind.primary,
+                              icon: const CarbonIcon(CarbonIcons.send),
+                              semanticLabel: 'Start session',
+                              busy: starting,
+                              // Kept live while busy so the key keeps its
+                              // primary fill — working, not off; `busy`
+                              // swallows the press.
+                              onPressed: canSend
+                                  ? _onSendPressed
+                                  : (starting ? _noop : null),
                             ),
                           ),
-                        )
-                      else
-                        Semantics(
-                          button: true,
-                          enabled: canSend,
-                          label: 'Start session',
-                          child: ComposerSendButton(
-                            key: const Key('new-session-send-button'),
-                            busy: starting,
-                            onTap: canSend ? _submit : null,
-                          ),
-                        ),
-                    ],
-                  );
-                },
+                      ],
+                    );
+                  },
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _openGear(BuildContext gearContext) async {
-    final anchor = abMenuAnchorRect(gearContext);
-    if (anchor == null) return;
-    await showAbPanel<void>(
-      context: gearContext,
-      anchorRect: anchor,
-      // The composer sits at the bottom of the screen, so the popover
-      // should open upward toward the visible content.
-      preferred: AbMenuPlacement.above,
-      builder: (_) => const _GearPopoverContent(),
+  /// Cleared after the release has been delivered: the tap that reads it
+  /// fires later in the same dispatch.
+  void _forgetSendPress() => scheduleMicrotask(() => _sendPointer = null);
+
+  /// A popup closes on the press of a tap outside it and passes the tap on, so
+  /// the tap that only meant to dismiss a picker would otherwise also start
+  /// the session, with whatever the user was about to change unchanged. Asked
+  /// of the popup itself rather than inferred from the route: the app shell
+  /// holds the route's pop for its own back handling, so "the route cannot
+  /// pop" says nothing about whether a picker was open.
+  void _onSendPressed() {
+    final pointer = _sendPointer;
+    _sendPointer = null;
+    if (pointer != null && CarbonAnchoredPopup.dismissedByPointer(pointer)) {
+      return;
+    }
+    detached('new-session', 'start session', _submit);
+  }
+
+  void _openSessionSettings() {
+    detached('new-session', 'open session settings', () async {
+      await showCarbonModal<void>(
+        context,
+        builder: (_) => const _SessionSettingsModal(),
+      );
+    });
+  }
+}
+
+void _noop() {}
+
+/// The shell-prompt marker before the editable: the terminal-native "type
+/// here" affordance, lit while the prompt has focus.
+/// The app's bundled mono family, which carries the prompt marker's glyph.
+const String _promptMarkerFallback = 'JetBrains Mono NL';
+
+class _PromptMarker extends StatelessWidget {
+  const _PromptMarker({required this.focused, required this.enabled});
+
+  final bool focused;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
+    final c = t.colors;
+    final code = t.typography.code;
+    double lineHeight(TextStyle s) => (s.fontSize ?? 0) * (s.height ?? 1);
+    // Seats the marker on the first line of the prompt, whose text is body
+    // sized, however the density sizes the two.
+    final top = math.max(
+      0.0,
+      (lineHeight(t.typography.body) - lineHeight(code)) / 2,
+    );
+    return Padding(
+      padding: EdgeInsetsDirectional.only(
+        top: top,
+        end: CarbonSpacing.spacing03,
+      ),
+      child: Text(
+        '❯',
+        style: code.copyWith(
+          // IBM Plex Mono has no U+276F; without a named fallback the platform
+          // substitutes whatever font has it, or draws a missing-glyph box.
+          fontFamilyFallback: const [_promptMarkerFallback],
+          color: !enabled
+              ? c.iconDisabled
+              : focused
+              ? c.interactive
+              : c.iconSecondary,
+        ),
+      ),
     );
   }
 }
 
+/// The phase of a running start: a spinner and one ellipsized line, announced
+/// as it changes.
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
+    return Semantics(
+      liveRegion: true,
+      child: Row(
+        key: const Key('new-session-status-line'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CarbonSpinner(color: t.colors.iconSecondary),
+          const SizedBox(width: CarbonSpacing.spacing03),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: t.typography.helper.copyWith(
+                color: t.colors.textSecondary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Fades [child] in and out while keeping it laid out. Plain [Opacity] driven
+/// by a tween composites only while the fade runs, where `AnimatedOpacity`
+/// would keep a layer alive at rest.
+class _SlotFade extends StatelessWidget {
+  const _SlotFade({super.key, required this.visible, required this.child});
+
+  final bool visible;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      // No `begin`: TweenAnimationBuilder seeds it from `end` on the first
+      // build, so the widget mounts already settled instead of fading in.
+      tween: Tween<double>(end: visible ? 1 : 0),
+      duration: CarbonMotion.resolve(context, CarbonMotion.fast02),
+      curve: CarbonMotion.standard,
+      child: child,
+      builder: (context, value, child) => Opacity(opacity: value, child: child),
+    );
+  }
+}
+
+const String _isolationWord = 'Isolated';
+
+/// The width the isolation checkbox needs to keep its word.
+double _isolationWordWidth(BuildContext context, CarbonThemeData t) {
+  final painter = TextPainter(
+    text: TextSpan(text: _isolationWord, style: t.typography.control),
+    textDirection: Directionality.of(context),
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  final width = painter.width;
+  painter.dispose();
+  // The checkbox seats its box and the gap before its label in under
+  // spacing07.
+  return CarbonSpacing.spacing07 + width;
+}
+
 /// Isolation opt-in, as the last term of the context row's sentence:
-/// `Local · my-repo · main · isolated`.
+/// `Local · my-repo · main · Isolated`.
 ///
-/// Last on purpose — it modifies the chip before it. Switching it on re-labels
-/// the branch chip to `Base: main`, which is the entire explanation of what
-/// isolation does to the current selection, delivered by the row itself.
+/// Last on purpose — it modifies the picker before it. Switching it on
+/// re-labels the branch to `Base: main`, which is the entire explanation of
+/// what isolation does to the current selection, delivered by the row itself.
 ///
 /// Labelled for the OUTCOME the user is choosing, not for the git mechanism
 /// that currently delivers it: the same switch is what a second isolation
@@ -971,49 +1104,66 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
 class _IsolationChip extends ConsumerWidget {
   const _IsolationChip({this.enabled = true});
 
-  /// See [ComposerChip.enabled] — handed down by the composer rather than read
-  /// from the start model here, so one owner decides when the row is frozen.
+  /// Handed down by the composer rather than read from the start model here,
+  /// so one owner decides when the row is frozen.
   final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Same gate as [BranchChip]: with no project chosen the Git-shaped chips
-    // have nothing to describe, and a dead one beside "Select project…" is
-    // noise rather than discovery.
+    // Same gate as [BranchChip]: with no project chosen the Git-shaped
+    // controls have nothing to describe, and a dead one beside "Select
+    // project…" is noise rather than discovery.
     if (ref.watch(selectedTargetProjectProvider) == null) {
       return const SizedBox.shrink();
     }
 
     final catalog = ref.watch(newSessionBranchCatalogProvider);
     final ready = ref.watch(newSessionIsolationReadyProvider);
+    final isolated = ref.watch(newSessionIsolatedProvider);
 
-    return ComposerToggleChip(
-      // The key addresses the isolation toggle, not the word printed on it.
-      key: const Key('new-session-worktree-chip'),
-      label: 'isolated',
-      value: ref.watch(newSessionIsolatedProvider),
-      // The frozen arm comes FIRST: a chip dead only because a start is
-      // running must not blame the project's Git or the machine's bridge, and
-      // must not send the reader off to update anything.
-      tooltip: !enabled
-          ? 'Locked while the session starts'
-          : ready
-          ? 'Give this session its own branch and workspace, separate from '
-                'your main tree'
-          : catalog.isLoading
-          ? 'Checking this project…'
-          : catalog.value?.isRepository == false
-          ? 'Requires a Git repository'
-          // Two causes collapse into this one false: the build-time
-          // WORKTREE_SESSIONS_SUPPORTED kill switch, which updating cannot
-          // clear, and a bridge predating the capability field, which updating
-          // is the only fix for (GitBranchCatalog reads it by exclusion). So it
-          // may neither promise an update works nor read as permanent.
-          : 'This machine can\'t create isolated sessions — check that its '
-                'Antgrid is up to date',
-      onChanged: enabled && ready
-          ? (next) => ref.read(newSessionIsolatedProvider.notifier).set(next)
-          : null,
+    // The frozen arm comes FIRST: a control dead only because a start is
+    // running must not blame the project's Git or the machine's bridge, and
+    // must not send the reader off to update anything.
+    final reason = !enabled
+        ? 'Locked while the session starts'
+        : ready
+        ? 'Give this session its own branch and workspace, separate from '
+              'your main tree'
+        : catalog.isLoading
+        ? 'Checking this project…'
+        : catalog.value?.isRepository == false
+        ? 'Requires a Git repository'
+        // Two causes collapse into this one false: the build-time
+        // WORKTREE_SESSIONS_SUPPORTED kill switch, which updating cannot
+        // clear, and a bridge predating the capability field, which updating
+        // is the only fix for (GitBranchCatalog reads it by exclusion). So it
+        // may neither promise an update works nor read as permanent.
+        : 'This machine can\'t create isolated sessions — check that its '
+              'Antgrid is up to date';
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final t = CarbonTheme.of(context);
+        final showWord =
+            constraints.maxWidth >= _isolationWordWidth(context, t);
+        return KeyedSubtree(
+          // The key addresses the isolation toggle, not the word printed on it.
+          key: const Key('new-session-worktree-chip'),
+          child: CarbonTooltip(
+            message: reason,
+            child: CarbonCheckbox(
+              value: isolated,
+              labelText: showWord ? _isolationWord : null,
+              semanticLabel: showWord ? null : _isolationWord,
+              onChanged: enabled && ready
+                  ? (next) => ref
+                        .read(newSessionIsolatedProvider.notifier)
+                        .set(next ?? false)
+                  : null,
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1024,20 +1174,28 @@ class _IsolationChip extends ConsumerWidget {
 /// equals (the in-session switch keeps `ModeSegmented`).
 ///
 /// "This agent can't do chat" is still said in place: the Chat row renders
-/// greyed WITH its reason instead of vanishing, so a missing option and an
-/// unsupported one never look alike.
+/// greyed under a heading giving its reason instead of vanishing, so a missing
+/// option and an unsupported one never look alike.
 class _ModeSelector extends ConsumerWidget {
-  const _ModeSelector({required this.supportsChat, this.enabled = true});
+  const _ModeSelector({
+    required this.supportsChat,
+    this.enabled = true,
+    this.glyphOnly = false,
+  });
 
   /// Null when neither the target machine nor the persisted catalog has
   /// described the selected agent — a third state, not a `false`.
   final bool? supportsChat;
 
-  /// See [ComposerChip.enabled].
+  /// See [_IsolationChip.enabled].
   final bool enabled;
+
+  /// Shows only the mode's glyph, for a row too narrow to name it.
+  final bool glyphOnly;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = CarbonTheme.of(context);
     final mode = ref.watch(newSessionModeProvider);
     final agent = ref.watch(newSessionAgentProvider);
     final label = newSessionAgentLabel(
@@ -1065,185 +1223,64 @@ class _ModeSelector extends ConsumerWidget {
               'answer'
         : "$label doesn't support chat sessions";
     // App Review rejected the iOS build under 2.2 for pre-release wording, so
-    // the App Store build carries no ALPHA marker; other platforms keep it.
+    // the App Store build carries no alpha marker; other platforms keep it.
     final markChatAlpha = defaultTargetPlatform != TargetPlatform.iOS;
 
-    return _ModeChip(
-      key: const Key('new-session-mode-chip'),
-      icon: isChat ? AbIcons.comment : AbIcons.terminal,
-      label: isChat ? 'Chat' : 'Terminal',
-      alpha: isChat && markChatAlpha,
-      enabled: enabled,
-      onTap: (ctx) async {
-        final anchor = abMenuAnchorRect(ctx);
-        if (anchor == null) return;
-        final picked = await showAbMenu<String>(
-          context: ctx,
-          preferred: AbMenuPlacement.above,
-          anchorRect: anchor,
-          bounds: MenuBoundsScope.maybeOf(ctx),
-          width: 220,
-          entries: [
-            AbMenuItem(
-              key: const Key('new-session-mode-terminal'),
-              label: 'Terminal',
-              value: 'terminal',
-              icon: displayMode == 'terminal' ? AbIcons.check : null,
-            ),
-            AbMenuItem(
-              key: const Key('new-session-mode-chat'),
-              label: 'Chat',
-              value: 'chat',
-              icon: displayMode == 'chat' ? AbIcons.check : null,
-              badge: markChatAlpha ? 'Alpha' : null,
-              badgeColor: context.antgrid.warning,
-              enabled: chatEnabled,
-              disabledReason: chatEnabled ? null : chatDisabledReason,
-            ),
-          ],
-        );
-        if (picked == null || picked == displayMode) return;
-        ref.read(newSessionModeProvider.notifier).set(picked);
-      },
-    );
-  }
-}
-
-/// Trigger for [_ModeSelector]: [ComposerChip]'s chrome at an intrinsic width.
-///
-/// Not [ComposerChip] itself — that one ellipsizes inside a bounded flex slot,
-/// and this chip sits as a bare Row child whose two labels ('Chat',
-/// 'Terminal') are fixed strings that never need shedding.
-class _ModeChip extends StatelessWidget {
-  const _ModeChip({
-    super.key,
-    required this.icon,
-    required this.label,
-    required this.alpha,
-    required this.onTap,
-    this.enabled = true,
-  });
-
-  final String icon;
-  final String label;
-
-  /// Carry the ALPHA marker on the trigger too, not only on the menu row: once
-  /// the menu is closed the chip is the only thing still saying which mode the
-  /// session will start in.
-  final bool alpha;
-
-  final void Function(BuildContext anchorContext) onTap;
-
-  /// See [ComposerChip.enabled] — same treatment, so the composer's two chip
-  /// shapes cannot grow two dialects of "dead".
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-      child: Builder(
-        builder: (ctx) {
-          final p = ctx.antgrid;
-          final fg = enabled ? p.textPrimary : p.textDisabled;
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            // Stays live while disabled so the chip keeps swallowing taps
-            // rather than letting them reach the row beneath it.
-            onTap: () {
-              if (!enabled) return;
-              onTap(ctx);
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AbTokens.space8,
-                vertical: AbTokens.space4,
-              ),
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: enabled ? p.borderDefault : p.borderSubtle,
-                ),
-                borderRadius: AbTokens.borderRadius3,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AbIcon(icon, size: 12, color: fg),
-                  const SizedBox(width: AbTokens.space6),
-                  Text(
-                    label,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontSm,
-                      color: fg,
-                    ),
-                  ),
-                  if (alpha) ...[
-                    const SizedBox(width: AbTokens.space6),
-                    AbChip.system(label: 'Alpha', color: p.warning),
-                  ],
-                  const SizedBox(width: AbTokens.space6),
-                  AbIcon(
-                    AbIcons.chevronDown,
-                    size: 10,
-                    color: enabled ? p.textMuted : p.textDisabled,
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Always the same SizedBox, so dropping to the glyph never remounts
+        // the trigger (and closes its menu).
+        SizedBox(
+          width: glyphOnly ? contextPickerGlyphWidth(t) : null,
+          child: ContextPicker(
+            key: const Key('new-session-mode-chip'),
+            icon: isChat ? CarbonIcons.chat : CarbonIcons.terminal,
+            label: isChat ? 'Chat' : 'Terminal',
+            field: 'Session mode',
+            enabled: enabled,
+            entries: [
+              CarbonMenuRadioGroup<String>(
+                label: chatEnabled ? null : chatDisabledReason,
+                value: displayMode,
+                options: [
+                  const CarbonOption(value: 'terminal', label: 'Terminal'),
+                  CarbonOption(
+                    value: 'chat',
+                    label: markChatAlpha ? 'Chat (alpha)' : 'Chat',
+                    enabled: chatEnabled,
                   ),
                 ],
+                onChanged: (picked) =>
+                    ref.read(newSessionModeProvider.notifier).set(picked),
               ),
-            ),
-          );
-        },
-      ),
+            ],
+          ),
+        ),
+        // Carried on the trigger too, not only in the menu: once the menu is
+        // closed the trigger is the only thing still saying which mode the
+        // session will start in.
+        if (isChat && markChatAlpha) ...[
+          const SizedBox(width: CarbonSpacing.spacing02),
+          const CarbonTag(
+            label: 'Alpha',
+            size: CarbonTagSize.small,
+            color: CarbonTagColor.purple,
+          ),
+        ],
+      ],
     );
   }
 }
 
-/// Bottom-right agent-selector trigger — chip-styled port of
-/// `session_config.dart`'s `_AgentDropdown` (an `AbControlBox` trigger there;
-/// a [ComposerChip] here to match the environment/project chips it sits
-/// beside).
+/// Bottom-right agent selector. Its menu rows are the target's detected tools,
+/// and they arrive while the menu is open: detection can still be under way
+/// when it opens, and this widget rebuilds the menu's entries as it answers.
 class _AgentSelector extends ConsumerWidget {
   const _AgentSelector({this.enabled = true});
 
-  /// See [ComposerChip.enabled].
+  /// See [_IsolationChip.enabled].
   final bool enabled;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final agent = ref.watch(newSessionAgentProvider);
-    final detected = ref.watch(newSessionDetectedToolsProvider).value;
-    final catalog = ref.watch(agentCatalogProvider);
-
-    return ComposerChip(
-      key: const Key('new-session-agent-selector'),
-      icon: AbIcons.terminal,
-      label: newSessionAgentLabel(agent, detected, catalog),
-      enabled: enabled,
-      onTap: (ctx) async {
-        final anchor = abMenuAnchorRect(ctx);
-        if (anchor == null) return;
-        // A panel rather than a static menu: detection can still be under way
-        // when the menu opens, and its rows have to arrive while it is up.
-        final picked = await showAbPanel<NewSessionAgent>(
-          context: ctx,
-          preferred: AbMenuPlacement.above,
-          anchorRect: anchor,
-          bounds: MenuBoundsScope.maybeOf(ctx),
-          width: 240,
-          builder: (_) => const _AgentPanel(),
-        );
-        if (picked != null) {
-          ref.read(newSessionAgentProvider.notifier).set(picked);
-          ref.read(newSessionAgentTouchedProvider.notifier).set(true);
-        }
-      },
-    );
-  }
-}
-
-/// Live content of the agent menu: a line saying why the list is short while
-/// the target has not answered or could not be asked, then the options.
-class _AgentPanel extends ConsumerWidget {
-  const _AgentPanel();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1255,23 +1292,39 @@ class _AgentPanel extends ConsumerWidget {
       tools,
       ref.watch(selectedTargetProjectProvider),
     );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (status != null) PanelHint(status),
-        for (final a in _buildAgentOptions(detected, agent))
-          PanelRow(
-            icon: a is CustomAgent ? AbIcons.code : AbIcons.terminal,
-            label: newSessionAgentLabel(a, detected, catalog),
-            selected: a == agent,
-            mono: false,
-            onTap: () => Navigator.of(context).pop<NewSessionAgent>(a),
-          ),
+
+    return ContextPicker(
+      key: const Key('new-session-agent-selector'),
+      label: newSessionAgentLabel(agent, detected, catalog),
+      field: 'Agent',
+      enabled: enabled,
+      entries: [
+        CarbonMenuRadioGroup<NewSessionAgent>(
+          // Why the list offers nothing beyond the current pick, while the
+          // target has not answered or could not be asked.
+          label: status,
+          value: agent,
+          options: [
+            for (final a in _buildAgentOptions(detected, agent))
+              CarbonOption(
+                value: a,
+                label: newSessionAgentLabel(a, detected, catalog),
+              ),
+          ],
+          onChanged: (picked) {
+            ref.read(newSessionAgentProvider.notifier).set(picked);
+            ref.read(newSessionAgentTouchedProvider.notifier).set(true);
+          },
+        ),
       ],
     );
   }
 }
+
+/// The narrowest slot the agent trigger still reads in. It has no leading
+/// glyph, so it needs one glyph and its gap less than a picker that has one.
+double _agentTriggerFloor(CarbonThemeData t) =>
+    contextPickerFullMinWidth(t) - t.iconSize - CarbonSpacing.spacing03;
 
 /// Why the agent menu offers nothing beyond the current pick, or null when the
 /// target has answered (or there is no target to ask).
@@ -1308,20 +1361,20 @@ List<NewSessionAgent> _buildAgentOptions(
   return options;
 }
 
-/// Gear popover content: session name, CLI args, and (custom agent only) the
-/// custom command field. Owns its own controllers, syncing exactly like the
-/// old `_SessionConfigState` did — guarded on inequality so user typing
-/// (which writes the same value back via `onChanged`) doesn't reset the
-/// cursor.
-class _GearPopoverContent extends ConsumerStatefulWidget {
-  const _GearPopoverContent();
+/// Session settings: session name, approval policy, CLI args, and (custom
+/// agent only) the custom command. Fields commit as they change, so the modal
+/// has nothing to cancel. Owns its own controllers, guarded on inequality so
+/// user typing (which writes the same value back via `onChanged`) doesn't reset
+/// the cursor.
+class _SessionSettingsModal extends ConsumerStatefulWidget {
+  const _SessionSettingsModal();
 
   @override
-  ConsumerState<_GearPopoverContent> createState() =>
-      _GearPopoverContentState();
+  ConsumerState<_SessionSettingsModal> createState() =>
+      _SessionSettingsModalState();
 }
 
-class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
+class _SessionSettingsModalState extends ConsumerState<_SessionSettingsModal> {
   late final TextEditingController _name;
   late final TextEditingController _cliArgs;
   late final TextEditingController _customCmd;
@@ -1344,6 +1397,29 @@ class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
     super.dispose();
   }
 
+  void _confirmBypass(AgentDescriptor descriptor) {
+    detached('new-session', 'confirm YOLO mode', () async {
+      // Captured before the await: the confirmation is a route of its own,
+      // and whatever is mounted under it when it answers, the provider
+      // container is what the answer belongs to.
+      final container = ref.container;
+      final disablesSandbox =
+          descriptor.approvalPolicyRisk == 'bypasses-approvals-and-sandbox';
+      final confirmed = await showCarbonConfirm(
+        context,
+        title: 'Enable YOLO mode?',
+        body: disablesSandbox
+            ? 'This agent will bypass approval prompts and disable sandboxing for this session.'
+            : 'This agent will bypass approval prompts for this session.',
+        confirmLabel: 'Enable YOLO',
+        danger: true,
+      );
+      if (confirmed) {
+        container.read(newSessionApprovalPolicyProvider.notifier).set('bypass');
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(newSessionNameProvider, (_, next) {
@@ -1356,128 +1432,88 @@ class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
       if (_customCmd.text != next) _customCmd.text = next;
     });
 
+    final t = CarbonTheme.of(context);
     final agent = ref.watch(newSessionAgentProvider);
     final bypassDescriptor = ref.watch(newSessionBypassSupportProvider);
     final bypass = ref.watch(newSessionApprovalPolicyProvider) == 'bypass';
+    const fieldGap = SizedBox(height: CarbonSpacing.spacing05);
 
-    // `showAbPanel` inserts this content into the app's Overlay, above (not
-    // inside) the page's Scaffold — so the AbTextFields below need their own
-    // Material ancestor (transparency-only; the popup surface itself is the
-    // AbMenu chrome the route already draws behind this builder).
-    return Material(
-      type: MaterialType.transparency,
-      child: Column(
+    return CarbonModal(
+      title: 'Session settings',
+      size: CarbonModalSize.xs,
+      body: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const PanelSectionHeader('Session settings'),
-          const _GearFieldLabel('Session name'),
-          const SizedBox(height: AbTokens.space6),
-          AbTextField(
+          CarbonTextInput(
             key: const Key('new-session-gear-name'),
             controller: _name,
-            hintText: 'untitled session',
+            label: 'Session name',
+            showOptional: true,
+            placeholder: 'untitled session',
             onChanged: (v) => ref.read(newSessionNameProvider.notifier).set(v),
           ),
-          const SizedBox(height: AbTokens.space12),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const _GearFieldLabel('YOLO / Skip approvals'),
-                    Text(
-                      bypassDescriptor == null
-                          ? 'Not supported for this agent and mode'
-                          : 'Launch this session without approval prompts',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXs,
-                        color: context.antgrid.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              AbSwitch(
-                key: const Key('new-session-gear-yolo'),
-                value: bypass && bypassDescriptor != null,
-                semanticLabel: 'YOLO / Skip approvals',
-                onChanged: bypassDescriptor == null
-                    ? null
-                    : (next) {
-                        if (!next) {
-                          ref
-                              .read(newSessionApprovalPolicyProvider.notifier)
-                              .set('default');
-                          return;
-                        }
-                        detached('new-session', 'confirm YOLO mode', () async {
-                          final disablesSandbox =
-                              bypassDescriptor.approvalPolicyRisk ==
-                              'bypasses-approvals-and-sandbox';
-                          final confirmed = await AbConfirmDialog.show(
-                            context: context,
-                            title: 'Enable YOLO mode?',
-                            body: disablesSandbox
-                                ? 'This agent will bypass approval prompts and disable sandboxing for this session.'
-                                : 'This agent will bypass approval prompts for this session.',
-                            confirmLabel: 'Enable YOLO',
-                            destructive: true,
-                          );
-                          if (confirmed && mounted) {
-                            ref
-                                .read(newSessionApprovalPolicyProvider.notifier)
-                                .set('bypass');
-                          }
-                        });
-                      },
-              ),
-            ],
+          fieldGap,
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: CarbonToggle(
+              key: const Key('new-session-gear-yolo'),
+              labelText: 'YOLO / Skip approvals',
+              value: bypass && bypassDescriptor != null,
+              onChanged: bypassDescriptor == null
+                  ? null
+                  : (next) {
+                      if (!next) {
+                        ref
+                            .read(newSessionApprovalPolicyProvider.notifier)
+                            .set('default');
+                        return;
+                      }
+                      _confirmBypass(bypassDescriptor);
+                    },
+            ),
           ),
-          const SizedBox(height: AbTokens.space12),
-          const _GearFieldLabel('CLI arguments'),
-          const SizedBox(height: AbTokens.space6),
-          AbTextField(
+          const SizedBox(height: CarbonSpacing.spacing02),
+          Text(
+            bypassDescriptor == null
+                ? 'Not supported for this agent and mode'
+                : 'Launch this session without approval prompts',
+            style: t.typography.helper.copyWith(color: t.colors.textHelper),
+          ),
+          fieldGap,
+          CarbonTextInput(
             key: const Key('new-session-gear-cli-args'),
             controller: _cliArgs,
-            hintText: '--flag value',
+            label: 'CLI arguments',
+            showOptional: true,
+            placeholder: '--flag value',
+            autocorrect: false,
+            enableSuggestions: false,
             onChanged: (v) =>
                 ref.read(newSessionCliArgsProvider.notifier).set(v),
           ),
           if (agent == const CustomAgent()) ...[
-            const SizedBox(height: AbTokens.space12),
-            const _GearFieldLabel('Custom command'),
-            const SizedBox(height: AbTokens.space6),
-            AbTextField(
+            fieldGap,
+            CarbonTextInput(
               key: const Key('new-session-gear-custom-cmd'),
               controller: _customCmd,
-              hintText: 'e.g. my-agent --serve',
+              label: 'Custom command',
+              required: true,
+              placeholder: 'e.g. my-agent --serve',
+              autocorrect: false,
+              enableSuggestions: false,
               onChanged: (v) =>
                   ref.read(newSessionCustomCmdProvider.notifier).set(v),
             ),
           ],
         ],
       ),
-    );
-  }
-}
-
-/// A sans-style field label, matching `session_config.dart`'s `_FieldLabel`.
-class _GearFieldLabel extends StatelessWidget {
-  const _GearFieldLabel(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontSm,
-        color: context.antgrid.textSecondary,
-        fontWeight: FontWeight.w600,
-      ),
+      actions: [
+        CarbonModalAction(
+          label: 'Done',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+      ],
     );
   }
 }
