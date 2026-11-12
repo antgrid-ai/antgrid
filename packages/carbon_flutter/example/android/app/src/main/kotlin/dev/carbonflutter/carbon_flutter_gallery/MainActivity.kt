@@ -1,0 +1,5 @@
+package dev.carbonflutter.carbon_flutter_gallery
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()

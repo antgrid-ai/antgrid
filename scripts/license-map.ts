@@ -16,6 +16,8 @@ export const brandPatterns = [
 export const thirdPartyPatterns = [
   /^packages\/auto_updater_macos\//,
   /^app\/assets\/fonts\//,
+  /^packages\/carbon_flutter\/assets\//,
+  /^packages\/carbon_flutter\/lib\/src\/foundations\/icons\.g\.dart$/,
   /^app\/\.prebuilt\//,
   /^app\/android\/gradle\/wrapper\//,
   /^app\/android\/gradlew(?:\.bat)?$/,
@@ -25,7 +27,12 @@ export function licenseForPath(path: string): string {
   if (brandPatterns.some((pattern) => pattern.test(path))) {
     return "LicenseRef-Antgrid-Brand";
   }
-  if (path.startsWith("app/assets/fonts/")) return "OFL-1.1";
+  if (path.startsWith("app/assets/fonts/") || path.startsWith("packages/carbon_flutter/assets/fonts/")) {
+    return "OFL-1.1";
+  }
+  if (/^packages\/carbon_flutter\/(assets\/licenses\/|lib\/src\/foundations\/icons\.g\.dart$)/.test(path)) {
+    return "Apache-2.0";
+  }
   if (path.startsWith("app/.prebuilt/") || path.startsWith("packages/auto_updater_macos/")) return "MIT";
   if (/^app\/android\/(gradle\/wrapper\/|gradlew)/.test(path)) return "Apache-2.0";
   if (path.startsWith("relay/") || path.startsWith("web/")) {

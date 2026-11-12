@@ -60,6 +60,7 @@ for (const path of [
   "packages/antgrid_relay_client/LICENSE",
   "packages/antgrid_eval_client/LICENSE",
   "packages/antgrid_peer_transport/LICENSE",
+  "packages/carbon_flutter/LICENSE",
 ]) {
   if (await Bun.file(path).text() !== canonicalMpl) {
     errors.push(`${path}: not an exact copy of the canonical MPL-2.0 text`);
@@ -151,7 +152,7 @@ for (const path of tracked) {
 // files it describes.
 for (const match of reuse.matchAll(/SPDX-FileCopyrightText = "([^"]+)"/g)) {
   const holder = match[1]!;
-  const thirdParty = /JetBrains|Ghostty|Gradle|trademark/i.test(holder);
+  const thirdParty = /JetBrains|Ghostty|Gradle|IBM Corp|trademark/i.test(holder);
   if (!thirdParty && holder !== "2026 Radha AI Products") {
     errors.push(`REUSE.toml: first-party copyright holder is "${holder}"; expected "2026 Radha AI Products"`);
   }
