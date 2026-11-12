@@ -1,0 +1,393 @@
+import 'package:flutter/semantics.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
+import '../foundations/theme.dart';
+import '../foundations/tokens.dart';
+import '../primitives/focus_ring.dart';
+import '../primitives/interaction.dart';
+import '../primitives/option.dart';
+import 'tabs.dart' show CarbonActivationMode;
+
+/// Carbon's content switcher heights. Touch density uses 48 for every size.
+enum CarbonContentSwitcherSize {
+  /// 32 in compact density.
+  small,
+
+  /// 40 in compact density.
+  medium,
+
+  /// 48 in compact density.
+  large,
+}
+
+/// A segmented control for switching between related views, with exactly one
+/// option selected at all times.
+///
+/// Unlike tabs it does not own a panel and does not scroll: segments share the
+/// widest natural width and a label that does not fit wraps inside its segment,
+/// so enlarged text grows the control instead of clipping.
+///
+/// Selection is shown with Carbon's inverse fill and text, which no hover or
+/// focus treatment reuses: hover tints an unselected segment, focus draws the
+/// 2px ring.
+///
+/// Keyboard contract (same as [CarbonTabs]):
+/// * One tab stop; Tab enters on the segment that last held focus, or the
+///   selected one.
+/// * Left and Right move to the previous and next enabled option, wrapping
+///   (swapped in right-to-left layouts); Home and End jump to the ends.
+/// * With [CarbonActivationMode.automatic] moving focus selects; with
+///   [CarbonActivationMode.manual] Enter or Space selects.
+///
+/// Set [iconOnly] to show only each option's [CarbonOption.icon]; the option's
+/// `label` then becomes its accessible name, so every option must carry both.
+/// A [value] that matches no option leaves nothing selected, and re-selecting
+/// the current option never reports a change.
+class CarbonContentSwitcher<T> extends StatefulWidget {
+  const CarbonContentSwitcher({
+    super.key,
+    required this.options,
+    required this.value,
+    required this.onChanged,
+    this.size = CarbonContentSwitcherSize.medium,
+    this.iconOnly = false,
+    this.activation = CarbonActivationMode.automatic,
+    this.expand = false,
+    this.semanticLabel,
+  });
+
+  final List<CarbonOption<T>> options;
+  final T value;
+  final ValueChanged<T> onChanged;
+  final CarbonContentSwitcherSize size;
+
+  /// Shows icons without text. Requires an icon on every option.
+  final bool iconOnly;
+
+  final CarbonActivationMode activation;
+
+  /// Fills the available width instead of sizing to the widest option. Needs a
+  /// bounded width.
+  final bool expand;
+
+  /// Names the group for assistive technology.
+  final String? semanticLabel;
+
+  @override
+  State<CarbonContentSwitcher<T>> createState() =>
+      _CarbonContentSwitcherState<T>();
+}
+
+class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
+  final Map<Object?, FocusNode> _nodes = <Object?, FocusNode>{};
+  Object? _stop;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncNodes();
+  }
+
+  @override
+  void didUpdateWidget(CarbonContentSwitcher<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncNodes();
+  }
+
+  @override
+  void dispose() {
+    for (final node in _nodes.values) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  void _syncNodes() {
+    assert(
+      !widget.iconOnly || widget.options.every((o) => o.icon != null),
+      'Every option of an icon-only CarbonContentSwitcher needs an icon.',
+    );
+    final values = <Object?>{for (final o in widget.options) o.value};
+    assert(
+      values.length == widget.options.length,
+      'CarbonContentSwitcher values must be distinct.',
+    );
+    for (final v in values) {
+      _nodes.putIfAbsent(v, () => FocusNode(debugLabel: 'CarbonSegment'));
+    }
+    final stale = _nodes.keys.where((k) => !values.contains(k)).toList();
+    if (stale.isEmpty) return;
+    final removed = <FocusNode>[for (final k in stale) _nodes.remove(k)!];
+    // The removed segments' interaction widgets still hold these nodes until
+    // the next build unmounts them.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      for (final node in removed) {
+        node.dispose();
+      }
+    });
+    if (stale.contains(_stop)) _stop = null;
+  }
+
+  int _indexOf(Object? value) {
+    for (var i = 0; i < widget.options.length; i++) {
+      if (widget.options[i].value == value) return i;
+    }
+    return -1;
+  }
+
+  int _focusedIndex() {
+    for (var i = 0; i < widget.options.length; i++) {
+      if (_nodes[widget.options[i].value]?.hasFocus ?? false) return i;
+    }
+    return -1;
+  }
+
+  int _stopIndex(int selected) {
+    final options = widget.options;
+    var i = _stop == null ? -1 : _indexOf(_stop);
+    if (i >= 0 && options[i].enabled) return i;
+    i = selected;
+    if (i >= 0 && options[i].enabled) return i;
+    return options.indexWhere((o) => o.enabled);
+  }
+
+  int _step(int from, int direction) {
+    final n = widget.options.length;
+    for (var k = 1; k <= n; k++) {
+      final j = ((from + direction * k) % n + n) % n;
+      if (widget.options[j].enabled) return j;
+    }
+    return -1;
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final current = _focusedIndex();
+    if (current < 0) return KeyEventResult.ignored;
+    final rtl = Directionality.of(context) == TextDirection.rtl;
+    final key = event.logicalKey;
+    int target;
+    if (key == LogicalKeyboardKey.arrowRight) {
+      target = _step(current, rtl ? -1 : 1);
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      target = _step(current, rtl ? 1 : -1);
+    } else if (key == LogicalKeyboardKey.home) {
+      target = widget.options.indexWhere((o) => o.enabled);
+    } else if (key == LogicalKeyboardKey.end) {
+      target = widget.options.lastIndexWhere((o) => o.enabled);
+    } else {
+      return KeyEventResult.ignored;
+    }
+    if (target < 0) return KeyEventResult.handled;
+    final option = widget.options[target];
+    _nodes[option.value]?.requestFocus();
+    if (widget.activation == CarbonActivationMode.automatic) _select(option);
+    return KeyEventResult.handled;
+  }
+
+  void _select(CarbonOption<T> option) {
+    if (!option.enabled || option.value == widget.value) return;
+    widget.onChanged(option.value);
+  }
+
+  void _handleFocus(Object? value, bool focused) {
+    if (focused && _stop != value) setState(() => _stop = value);
+  }
+
+  void _handleGroupFocus(bool focused) {
+    if (focused || _stop == null) return;
+    setState(() => _stop = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final level = CarbonLayer.of(context);
+    final options = widget.options;
+    final selected = _indexOf(widget.value);
+    final stop = _stopIndex(selected);
+    for (var i = 0; i < options.length; i++) {
+      _nodes[options[i].value]?.skipTraversal = i != stop;
+    }
+    final height = theme.isTouch
+        ? 48.0
+        : switch (widget.size) {
+            CarbonContentSwitcherSize.small => 32.0,
+            CarbonContentSwitcherSize.medium => 40.0,
+            CarbonContentSwitcherSize.large => 48.0,
+          };
+
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        for (var i = 0; i < options.length; i++)
+          Expanded(
+            child: _Segment(
+              option: options[i],
+              selected: i == selected,
+              // A rule next to the selected segment would double its edge.
+              showEndRule:
+                  i < options.length - 1 && i != selected && i + 1 != selected,
+              iconOnly: widget.iconOnly,
+              focusNode: _nodes[options[i].value]!,
+              level: level,
+              height: height,
+              onSelect: () => _select(options[i]),
+              onFocusChange: (f) => _handleFocus(options[i].value, f),
+            ),
+          ),
+      ],
+    );
+
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _onKey,
+      onFocusChange: _handleGroupFocus,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: theme.colors.borderInverse,
+            width: CarbonBorders.hairline,
+          ),
+        ),
+        // Only the segments may sit directly under the tab-bar node.
+        child: Semantics(
+          role: SemanticsRole.tabBar,
+          container: true,
+          explicitChildNodes: true,
+          label: widget.semanticLabel,
+          child: widget.expand
+              ? IntrinsicHeight(child: row)
+              : IntrinsicWidth(child: IntrinsicHeight(child: row)),
+        ),
+      ),
+    );
+  }
+}
+
+class _Segment extends StatelessWidget {
+  const _Segment({
+    required this.option,
+    required this.selected,
+    required this.showEndRule,
+    required this.iconOnly,
+    required this.focusNode,
+    required this.level,
+    required this.height,
+    required this.onSelect,
+    required this.onFocusChange,
+  });
+
+  final CarbonOption<Object?> option;
+  final bool selected;
+  final bool showEndRule;
+  final bool iconOnly;
+  final FocusNode focusNode;
+  final int level;
+  final double height;
+  final VoidCallback onSelect;
+  final ValueChanged<bool> onFocusChange;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final enabled = option.enabled;
+    return CarbonInteraction(
+      onPressed: enabled ? onSelect : null,
+      focusNode: focusNode,
+      requestFocusOnTap: true,
+      onFocusChange: onFocusChange,
+      button: false,
+      role: SemanticsRole.tab,
+      label: option.label,
+      selected: selected,
+      excludeChildSemantics: true,
+      builder: (context, state, _) {
+        final Color fill;
+        final Color text;
+        if (selected) {
+          fill = enabled ? colors.layerSelectedInverse : colors.layerSelectedDisabled;
+          text = enabled ? colors.textInverse : colors.textDisabled;
+        } else {
+          fill = state.pressed
+              ? theme.layerActive(level)
+              : state.hovered
+              ? theme.layerHover(level)
+              : theme.layer(level);
+          text = !enabled
+              ? colors.textDisabled
+              : state.hovered
+              ? colors.textPrimary
+              : colors.textSecondary;
+        }
+        final icon = option.icon;
+        return ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: height,
+            minWidth: iconOnly ? height : 0,
+          ),
+          child: CarbonFocusRing(
+            visible: state.focusVisible,
+            onColor: selected,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: fill,
+                border: showEndRule
+                    ? BorderDirectional(
+                        end: BorderSide(
+                          color: theme.borderSubtle(level),
+                          width: CarbonBorders.hairline,
+                        ),
+                      )
+                    : null,
+              ),
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: iconOnly
+                      ? CarbonSpacing.spacing03
+                      : CarbonSpacing.spacing05,
+                  vertical: CarbonSpacing.spacing02,
+                ),
+                child: Center(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      if (icon != null)
+                        IconTheme(
+                          data: IconThemeData(color: text, size: theme.iconSize),
+                          child: icon,
+                        ),
+                      if (icon != null && !iconOnly)
+                        const SizedBox(width: CarbonSpacing.spacing03),
+                      if (!iconOnly)
+                        Flexible(
+                          child: Text(
+                            option.label,
+                            textAlign: TextAlign.center,
+                            style: theme.typography.control.copyWith(
+                              color: text,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}

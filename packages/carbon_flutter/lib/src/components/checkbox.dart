@@ -1,0 +1,381 @@
+import 'package:flutter/widgets.dart';
+
+import '../foundations/icons.dart';
+import '../foundations/theme.dart';
+import '../foundations/tokens.dart';
+import '../primitives/focus_ring.dart';
+import '../primitives/interaction.dart';
+
+/// A check box with a 16px indicator inside a full-height interaction target.
+///
+/// [value] is Flutter's `bool?` model: true is checked, false unchecked and
+/// null indeterminate. Null renders as indeterminate only when [tristate] is
+/// set; otherwise it is shown as unchecked, so a host cannot show a mixed state
+/// by accident. The host owns the value: [onChanged] reports the requested next
+/// value and the box shows exactly what the host passes back.
+///
+/// The indicator and the label are one target, so a tap anywhere on the row
+/// toggles once. [onChanged] null disables the control; [readOnly] keeps it
+/// focusable and announced but inert.
+class CarbonCheckbox extends StatelessWidget {
+  const CarbonCheckbox({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    this.tristate = false,
+    this.label,
+    this.labelText,
+    this.semanticLabel,
+    this.helperText,
+    this.errorText,
+    this.readOnly = false,
+    this.focusNode,
+    this.autofocus = false,
+  });
+
+  /// Checked (true), unchecked (false) or, with [tristate], indeterminate
+  /// (null).
+  final bool? value;
+
+  /// Requests the next value; null disables the checkbox.
+  final ValueChanged<bool?>? onChanged;
+
+  /// Enables the indeterminate state. Activation then cycles unchecked,
+  /// checked, indeterminate.
+  final bool tristate;
+
+  /// A custom label. Its own semantics merge into the checkbox's node.
+  final Widget? label;
+
+  /// A plain text label; also the accessible name.
+  final String? labelText;
+
+  /// Accessible name for a checkbox shown without visible text.
+  final String? semanticLabel;
+
+  final String? helperText;
+
+  /// Validation message shown with an icon and announced with the control;
+  /// takes the place of [helperText].
+  final String? errorText;
+
+  final bool readOnly;
+  final FocusNode? focusNode;
+  final bool autofocus;
+
+  bool get _isMixed => tristate && value == null;
+  bool get _isChecked => value == true;
+
+  bool? _next() {
+    if (!tristate) return !_isChecked;
+    return switch (value) {
+      false => true,
+      true => null,
+      null => false,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final enabled = onChanged != null;
+    final invalid = errorText != null;
+    final message = errorText ?? helperText;
+    final hasLabel = label != null || labelText != null;
+    final name = labelText ?? semanticLabel;
+    final typography = theme.typography;
+
+    Widget? labelWidget = label;
+    if (labelWidget == null && labelText != null) {
+      labelWidget = Text(
+        labelText!,
+        style: typography.body.copyWith(
+          color: enabled ? colors.textPrimary : colors.textDisabled,
+        ),
+      );
+    }
+
+    final row = CarbonInteraction(
+      onPressed: readOnly
+          ? (enabled ? _ignore : null)
+          : (enabled ? () => onChanged!(_next()) : null),
+      focusNode: focusNode,
+      autofocus: autofocus,
+      button: false,
+      label: name,
+      hint: message,
+      checked: _isChecked,
+      mixed: _isMixed,
+      excludeChildSemantics: labelText != null && label == null,
+      mouseCursor: readOnly ? SystemMouseCursors.basic : null,
+      builder: (context, state, _) {
+        final box = CarbonFocusRing(
+          visible: state.focusVisible,
+          child: _CheckboxIndicator(
+            checked: _isChecked,
+            mixed: _isMixed,
+            enabled: enabled,
+            readOnly: readOnly,
+            invalid: invalid,
+          ),
+        );
+        return ConstrainedBox(
+          constraints: BoxConstraints(minHeight: theme.minTarget),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasLabel)
+                box
+              else
+                SizedBox.square(
+                  dimension: theme.minTarget,
+                  child: Center(child: box),
+                ),
+              if (hasLabel) ...[
+                const SizedBox(width: CarbonSpacing.spacing03),
+                Flexible(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: CarbonSpacing.spacing02,
+                    ),
+                    child: DefaultTextStyle.merge(
+                      style: typography.body.copyWith(
+                        color: enabled
+                            ? colors.textPrimary
+                            : colors.textDisabled,
+                      ),
+                      child: labelWidget!,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+
+    // Explicit merge so a custom label widget joins the checkbox's own node.
+    final target = MergeSemantics(child: row);
+    if (message == null) return target;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        target,
+        _FieldMessage(text: message, error: invalid, enabled: enabled),
+      ],
+    );
+  }
+
+  static void _ignore() {}
+}
+
+/// The helper or error line under a checkbox or group.
+class _FieldMessage extends StatelessWidget {
+  const _FieldMessage({
+    required this.text,
+    required this.error,
+    required this.enabled,
+  });
+
+  final String text;
+  final bool error;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final style = theme.typography.helper.copyWith(
+      color: error
+          ? colors.textError
+          : (enabled ? colors.textHelper : colors.textDisabled),
+    );
+    return ExcludeSemantics(
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(
+          bottom: CarbonSpacing.spacing02,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (error) ...[
+              CarbonIcon(
+                CarbonIcons.errorFilled,
+                size: 16,
+                color: colors.supportError,
+              ),
+              const SizedBox(width: CarbonSpacing.spacing02),
+            ],
+            Flexible(child: Text(text, style: style)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CheckboxIndicator extends StatelessWidget {
+  const _CheckboxIndicator({
+    required this.checked,
+    required this.mixed,
+    required this.enabled,
+    required this.readOnly,
+    required this.invalid,
+  });
+
+  final bool checked;
+  final bool mixed;
+  final bool enabled;
+  final bool readOnly;
+  final bool invalid;
+
+  static const double _size = 16;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
+    final filled = (checked || mixed) && enabled && !readOnly;
+    final Color border;
+    if (!enabled) {
+      border = colors.iconDisabled;
+    } else if (readOnly) {
+      border = colors.borderDisabled;
+    } else if (invalid) {
+      border = colors.supportError;
+    } else {
+      border = colors.iconPrimary;
+    }
+    final Color fill = filled ? colors.iconPrimary : const Color(0x00000000);
+    final Color glyph = filled
+        ? colors.iconInverse
+        : (enabled ? colors.iconPrimary : colors.iconDisabled);
+    final showGlyph = checked || mixed;
+    return SizedBox.square(
+      dimension: _size,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: fill,
+          border: Border.all(
+            color: border,
+            width: invalid && enabled && !readOnly ? 2 : 1,
+          ),
+        ),
+        child: showGlyph
+            ? Center(
+                child: CarbonIcon(
+                  mixed ? CarbonIcons.subtract : CarbonIcons.checkmark,
+                  size: 12,
+                  color: glyph,
+                ),
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+/// One entry of a [CarbonCheckboxGroup]; identity is [value].
+@immutable
+class CarbonCheckboxItem<T> {
+  const CarbonCheckboxItem({
+    required this.value,
+    required this.label,
+    this.enabled = true,
+    this.helperText,
+  });
+
+  final T value;
+  final String label;
+  final bool enabled;
+  final String? helperText;
+}
+
+/// A legend plus a vertical list of checkboxes with a group-level helper or
+/// error.
+///
+/// The host owns [selected]; [onChanged] reports the full next selection,
+/// preserving the order of [items]. The group is announced with its legend as
+/// a named container so each checkbox is read in context.
+class CarbonCheckboxGroup<T> extends StatelessWidget {
+  const CarbonCheckboxGroup({
+    super.key,
+    required this.legend,
+    required this.items,
+    required this.selected,
+    required this.onChanged,
+    this.helperText,
+    this.errorText,
+    this.readOnly = false,
+  });
+
+  final String legend;
+  final List<CarbonCheckboxItem<T>> items;
+  final Set<T> selected;
+
+  /// Receives the whole next selection; null disables every checkbox.
+  final ValueChanged<Set<T>>? onChanged;
+
+  final String? helperText;
+  final String? errorText;
+  final bool readOnly;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final enabled = onChanged != null;
+    final invalid = errorText != null;
+    final message = errorText ?? helperText;
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      label: legend,
+      hint: message,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ExcludeSemantics(
+            child: Padding(
+              padding: const EdgeInsetsDirectional.only(
+                bottom: CarbonSpacing.spacing03,
+              ),
+              child: Text(
+                legend,
+                style: theme.typography.label.copyWith(
+                  color: enabled ? colors.textSecondary : colors.textDisabled,
+                ),
+              ),
+            ),
+          ),
+          for (final item in items)
+            CarbonCheckbox(
+              value: selected.contains(item.value),
+              labelText: item.label,
+              helperText: item.helperText,
+              readOnly: readOnly,
+              onChanged: enabled && item.enabled
+                  ? (checked) {
+                      final next = <T>{
+                        for (final other in items)
+                          if (other.value == item.value
+                              ? checked == true
+                              : selected.contains(other.value))
+                            other.value,
+                      };
+                      onChanged!(next);
+                    }
+                  : null,
+            ),
+          if (message != null)
+            _FieldMessage(text: message, error: invalid, enabled: enabled),
+        ],
+      ),
+    );
+  }
+}

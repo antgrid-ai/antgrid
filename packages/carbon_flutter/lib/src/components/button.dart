@@ -1,0 +1,737 @@
+import 'dart:math' as math;
+
+import 'package:flutter/rendering.dart';
+import 'package:flutter/widgets.dart';
+
+import '../foundations/localizations.dart';
+import '../foundations/theme.dart';
+import '../foundations/tokens.dart';
+import '../primitives/focus_ring.dart';
+import '../primitives/interaction.dart';
+import 'loading.dart';
+
+/// Carbon's button treatments.
+enum CarbonButtonKind {
+  /// The single most important action in a region.
+  primary,
+
+  /// An alternative to [primary] that carries equal weight, e.g. in a pair.
+  secondary,
+
+  /// An outlined, lower-emphasis action.
+  tertiary,
+
+  /// A text-only action with no resting container.
+  ghost,
+
+  /// A destructive action in the strongest treatment.
+  danger,
+
+  /// An outlined destructive action.
+  dangerTertiary,
+
+  /// A text-only destructive action.
+  dangerGhost,
+}
+
+/// Explicit heights for [CarbonButton], from Carbon's size scale.
+///
+/// Touch density never renders a button below 48 logical pixels whatever size
+/// is requested, and enlarged text grows a button past these heights.
+enum CarbonButtonSize {
+  small(CarbonSizes.sm),
+  medium(CarbonSizes.md),
+  large(CarbonSizes.lg),
+  extraLarge(CarbonSizes.xl);
+
+  const CarbonButtonSize(this.height);
+
+  final double height;
+}
+
+void _ignore() {}
+
+/// A Carbon button.
+///
+/// * Disabled: `onPressed` null. The button is inert and leaves the focus
+///   order.
+/// * Busy: [busy] true shows an inline spinner in place of the icon (or over
+///   the label of a text-only button) without changing the button's size, and
+///   swallows activation so a pending action cannot be submitted twice. The
+///   button keeps focus and announces the localized "Loading". The host owns
+///   the busy flag; the button never sets it.
+/// * Height follows density (32 compact, 48 touch) unless [size] is given.
+///   Text scaling grows the button; labels wrap rather than clip.
+/// * [CarbonButton.iconOnly] has a square footprint and requires a
+///   `semanticLabel`.
+///
+/// The [icon] is any widget, typically a `CarbonIcon`; it is sized to the
+/// density's icon size and sits at the trailing edge, as Carbon places it.
+class CarbonButton extends StatelessWidget {
+  const CarbonButton({
+    super.key,
+    required String this.label,
+    this.onPressed,
+    this.kind = CarbonButtonKind.primary,
+    this.size,
+    this.icon,
+    this.busy = false,
+    this.expand = false,
+    this.semanticLabel,
+    this.focusNode,
+    this.autofocus = false,
+  }) : _iconOnly = false;
+
+  /// A square button showing only [icon]. [semanticLabel] names it for
+  /// assistive technology.
+  const CarbonButton.iconOnly({
+    super.key,
+    required Widget this.icon,
+    required String this.semanticLabel,
+    this.onPressed,
+    this.kind = CarbonButtonKind.ghost,
+    this.size,
+    this.busy = false,
+    this.focusNode,
+    this.autofocus = false,
+  }) : label = null,
+       expand = false,
+       _iconOnly = true;
+
+  /// The visible text; null for an icon-only button.
+  final String? label;
+
+  /// Activation callback. Null disables the button.
+  final VoidCallback? onPressed;
+
+  final CarbonButtonKind kind;
+
+  /// Null uses the density's default control height.
+  final CarbonButtonSize? size;
+
+  final Widget? icon;
+
+  /// A host-owned pending flag; see the class documentation.
+  final bool busy;
+
+  /// Fills the available width with the label at the start and the icon at the
+  /// end. Requires a bounded width.
+  final bool expand;
+
+  /// Overrides the announced name; defaults to [label].
+  final String? semanticLabel;
+
+  final FocusNode? focusNode;
+  final bool autofocus;
+
+  final bool _iconOnly;
+
+  bool get _isFilled => switch (kind) {
+    CarbonButtonKind.primary ||
+    CarbonButtonKind.secondary ||
+    CarbonButtonKind.danger => true,
+    _ => false,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final loc = CarbonLocalizations.of(context);
+    final disabled = onPressed == null;
+    final height = math.max(
+      size?.height ?? theme.controlHeight,
+      theme.minTarget,
+    );
+    final name = semanticLabel ?? label ?? '';
+
+    return CarbonInteraction(
+      onPressed: disabled ? null : (busy ? _ignore : onPressed),
+      focusNode: focusNode,
+      autofocus: autofocus,
+      label: name,
+      value: busy ? loc.loading : null,
+      excludeChildSemantics: true,
+      mouseCursor: busy ? SystemMouseCursors.basic : null,
+      builder: (context, state, _) {
+        // A busy button reads as active, not disabled, but gives no hover or
+        // press feedback because pressing does nothing.
+        final hovered = state.hovered && !busy;
+        final pressed = state.pressed && !busy;
+        final style = _CarbonButtonStyle.resolve(
+          theme,
+          kind,
+          disabled: disabled,
+          hovered: hovered,
+          pressed: pressed,
+        );
+        return ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: height,
+            minWidth: _iconOnly
+                ? height
+                : (expand ? double.infinity : 0),
+          ),
+          child: CarbonFocusRing(
+            visible: state.focusVisible,
+            onColor: _isFilled,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: style.background,
+                border: style.border == null
+                    ? null
+                    : Border.all(
+                        color: style.border!,
+                        width: CarbonBorders.hairline,
+                      ),
+              ),
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: _iconOnly
+                      ? CarbonSpacing.spacing03
+                      : CarbonSpacing.spacing05,
+                  vertical: CarbonSpacing.spacing02 + CarbonSpacing.spacing01,
+                ),
+                child: Align(
+                  alignment: _iconOnly
+                      ? Alignment.center
+                      : AlignmentDirectional.centerStart,
+                  widthFactor: 1,
+                  heightFactor: 1,
+                  child: _content(context, theme, style),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _spinner(CarbonThemeData theme, _CarbonButtonStyle style) {
+    return CarbonSpinner(
+      size: theme.iconSize,
+      color: style.foreground,
+      trackColor: style.foreground.withValues(alpha: 0.3),
+    );
+  }
+
+  Widget _iconBox(CarbonThemeData theme, _CarbonButtonStyle style) {
+    final icon = this.icon;
+    return SizedBox.square(
+      dimension: theme.iconSize,
+      child: busy
+          ? _spinner(theme, style)
+          : IconTheme(
+              data: IconThemeData(
+                color: style.iconColor,
+                size: theme.iconSize,
+              ),
+              child: icon ?? const SizedBox.shrink(),
+            ),
+    );
+  }
+
+  Widget _content(
+    BuildContext context,
+    CarbonThemeData theme,
+    _CarbonButtonStyle style,
+  ) {
+    if (_iconOnly) return _iconBox(theme, style);
+
+    final text = Text(
+      label!,
+      style: theme.typography.control.copyWith(color: style.foreground),
+    );
+    final hasIcon = icon != null;
+    final labelWidget = hasIcon || !busy
+        ? text
+        // The label stays in layout, invisible, so a text-only button keeps
+        // its width while the spinner is shown.
+        : Stack(
+            alignment: Alignment.center,
+            children: [
+              Visibility(
+                visible: false,
+                maintainSize: true,
+                maintainAnimation: true,
+                maintainState: true,
+                child: text,
+              ),
+              _spinner(theme, style),
+            ],
+          );
+    if (!hasIcon) return expand ? _fill(labelWidget) : labelWidget;
+    final row = Row(
+      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        expand ? Expanded(child: labelWidget) : Flexible(child: labelWidget),
+        const SizedBox(width: CarbonSpacing.spacing05),
+        _iconBox(theme, style),
+      ],
+    );
+    return row;
+  }
+
+  Widget _fill(Widget child) => Row(children: [Expanded(child: child)]);
+}
+
+@immutable
+class _CarbonButtonStyle {
+  const _CarbonButtonStyle({
+    required this.background,
+    required this.foreground,
+    required this.iconColor,
+    this.border,
+  });
+
+  final Color background;
+  final Color foreground;
+  final Color iconColor;
+  final Color? border;
+
+  static const Color _clear = Color(0x00000000);
+
+  static _CarbonButtonStyle resolve(
+    CarbonThemeData theme,
+    CarbonButtonKind kind, {
+    required bool disabled,
+    required bool hovered,
+    required bool pressed,
+  }) {
+    final c = theme.colors;
+    Color pick(Color rest, Color hover, Color active) =>
+        pressed ? active : (hovered ? hover : rest);
+
+    if (disabled) {
+      return switch (kind) {
+        CarbonButtonKind.primary ||
+        CarbonButtonKind.secondary ||
+        CarbonButtonKind.danger => _CarbonButtonStyle(
+          background: c.buttonDisabled,
+          foreground: c.textOnColorDisabled,
+          iconColor: c.iconOnColorDisabled,
+        ),
+        CarbonButtonKind.tertiary ||
+        CarbonButtonKind.dangerTertiary => _CarbonButtonStyle(
+          background: _clear,
+          foreground: c.textDisabled,
+          iconColor: c.iconDisabled,
+          border: c.buttonDisabled,
+        ),
+        CarbonButtonKind.ghost ||
+        CarbonButtonKind.dangerGhost => _CarbonButtonStyle(
+          background: _clear,
+          foreground: c.textDisabled,
+          iconColor: c.iconDisabled,
+        ),
+      };
+    }
+
+    _CarbonButtonStyle filled(Color rest, Color hover, Color active) =>
+        _CarbonButtonStyle(
+          background: pick(rest, hover, active),
+          foreground: c.textOnColor,
+          iconColor: c.iconOnColor,
+        );
+
+    // Outlined and ghost treatments fill with their accent on hover, which
+    // flips the text to the on-color / inverse role for contrast.
+    _CarbonButtonStyle outlined(
+      Color accent,
+      Color hover,
+      Color active,
+      Color invertedText,
+      Color invertedIcon,
+    ) {
+      final on = hovered || pressed;
+      return _CarbonButtonStyle(
+        background: on ? pick(accent, hover, active) : _clear,
+        foreground: on ? invertedText : accent,
+        iconColor: on ? invertedIcon : accent,
+        border: accent,
+      );
+    }
+
+    _CarbonButtonStyle ghost(
+      Color text,
+      Color icon,
+      Color hover,
+      Color active,
+      Color invertedText,
+      Color invertedIcon,
+      Color hoverFill,
+      Color activeFill,
+    ) {
+      final on = hovered || pressed;
+      return _CarbonButtonStyle(
+        background: on ? pick(_clear, hoverFill, activeFill) : _clear,
+        foreground: on ? invertedText : text,
+        iconColor: on ? invertedIcon : icon,
+      );
+    }
+
+    return switch (kind) {
+      CarbonButtonKind.primary => filled(
+        c.buttonPrimary,
+        c.buttonPrimaryHover,
+        c.buttonPrimaryActive,
+      ),
+      CarbonButtonKind.secondary => filled(
+        c.buttonSecondary,
+        c.buttonSecondaryHover,
+        c.buttonSecondaryActive,
+      ),
+      CarbonButtonKind.danger => filled(
+        c.buttonDangerPrimary,
+        c.buttonDangerHover,
+        c.buttonDangerActive,
+      ),
+      CarbonButtonKind.tertiary => outlined(
+        c.buttonTertiary,
+        c.buttonTertiaryHover,
+        c.buttonTertiaryActive,
+        c.textInverse,
+        c.iconInverse,
+      ),
+      CarbonButtonKind.dangerTertiary => outlined(
+        c.buttonDangerSecondary,
+        c.buttonDangerHover,
+        c.buttonDangerActive,
+        c.textOnColor,
+        c.iconOnColor,
+      ),
+      CarbonButtonKind.ghost => ghost(
+        c.linkPrimary,
+        c.iconPrimary,
+        c.backgroundHover,
+        c.backgroundActive,
+        c.linkPrimary,
+        c.iconPrimary,
+        c.backgroundHover,
+        c.backgroundActive,
+      ),
+      CarbonButtonKind.dangerGhost => ghost(
+        c.buttonDangerSecondary,
+        c.buttonDangerSecondary,
+        c.buttonDangerHover,
+        c.buttonDangerActive,
+        c.textOnColor,
+        c.iconOnColor,
+        c.buttonDangerHover,
+        c.buttonDangerActive,
+      ),
+    };
+  }
+}
+
+/// How a [CarbonButtonSet] distributes its width.
+enum CarbonButtonSetAlignment {
+  /// Buttons share the full width equally.
+  fill,
+
+  /// Buttons keep their natural width and sit at the end of the row.
+  end,
+}
+
+/// Carbon's button group, as used in modal footers and forms.
+///
+/// Pass buttons in reading order (secondary first, primary last). They sit in
+/// one row separated by a 1px rule. When the row cannot show every label at its
+/// natural width, which happens in narrow containers or with enlarged text, the
+/// set stacks vertically with the last button on top, so labels are never
+/// clipped. Each stacked button spans the full width.
+class CarbonButtonSet extends StatelessWidget {
+  const CarbonButtonSet({
+    super.key,
+    required this.children,
+    this.alignment = CarbonButtonSetAlignment.end,
+  });
+
+  final List<Widget> children;
+  final CarbonButtonSetAlignment alignment;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    return _ButtonSetLayout(
+      alignment: alignment,
+      separatorColor: theme.colors.buttonSeparator,
+      textDirection: Directionality.of(context),
+      children: children,
+    );
+  }
+}
+
+class _ButtonSetLayout extends MultiChildRenderObjectWidget {
+  const _ButtonSetLayout({
+    required super.children,
+    required this.alignment,
+    required this.separatorColor,
+    required this.textDirection,
+  });
+
+  final CarbonButtonSetAlignment alignment;
+  final Color separatorColor;
+  final TextDirection textDirection;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderButtonSet(
+    alignment: alignment,
+    separatorColor: separatorColor,
+    textDirection: textDirection,
+  );
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderButtonSet renderObject) {
+    renderObject
+      ..alignment = alignment
+      ..separatorColor = separatorColor
+      ..textDirection = textDirection;
+  }
+}
+
+class _SetParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _SetPlan {
+  _SetPlan(this.size, this.offsets, this.stacked, this.childSizes);
+
+  final Size size;
+  final List<Offset> offsets;
+  final bool stacked;
+  final List<Size> childSizes;
+}
+
+class _RenderButtonSet extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _SetParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _SetParentData> {
+  _RenderButtonSet({
+    required CarbonButtonSetAlignment alignment,
+    required Color separatorColor,
+    required TextDirection textDirection,
+  }) : _alignment = alignment,
+       _separatorColor = separatorColor,
+       _textDirection = textDirection;
+
+  static const double _gap = CarbonBorders.hairline;
+
+  CarbonButtonSetAlignment _alignment;
+  CarbonButtonSetAlignment get alignment => _alignment;
+  set alignment(CarbonButtonSetAlignment v) {
+    if (_alignment == v) return;
+    _alignment = v;
+    markNeedsLayout();
+  }
+
+  Color _separatorColor;
+  Color get separatorColor => _separatorColor;
+  set separatorColor(Color v) {
+    if (_separatorColor == v) return;
+    _separatorColor = v;
+    markNeedsPaint();
+  }
+
+  TextDirection _textDirection;
+  TextDirection get textDirection => _textDirection;
+  set textDirection(TextDirection v) {
+    if (_textDirection == v) return;
+    _textDirection = v;
+    markNeedsLayout();
+  }
+
+  _SetPlan? _plan;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _SetParentData) child.parentData = _SetParentData();
+  }
+
+  List<RenderBox> get _kids {
+    final out = <RenderBox>[];
+    var child = firstChild;
+    while (child != null) {
+      out.add(child);
+      child = childAfter(child);
+    }
+    return out;
+  }
+
+  _SetPlan _compute(BoxConstraints constraints, {required bool dry}) {
+    final kids = _kids;
+    if (kids.isEmpty) {
+      return _SetPlan(constraints.constrain(Size.zero), [], false, []);
+    }
+    final n = kids.length;
+    final maxWidth = constraints.maxWidth;
+    final bounded = maxWidth.isFinite;
+    final gaps = _gap * (n - 1);
+
+    Size measure(RenderBox box, BoxConstraints c) =>
+        dry ? box.getDryLayout(c) : (box..layout(c, parentUsesSize: true)).size;
+
+    final natural = [
+      for (final k in kids) k.getMaxIntrinsicWidth(double.infinity),
+    ];
+
+    var stacked = false;
+    if (bounded) {
+      if (_alignment == CarbonButtonSetAlignment.fill) {
+        final share = (maxWidth - gaps) / n;
+        stacked = natural.any((w) => w > share + 0.01);
+      } else {
+        stacked = natural.fold<double>(0, (a, b) => a + b) + gaps >
+            maxWidth + 0.01;
+      }
+    }
+
+    final widths = <double>[];
+    if (stacked) {
+      widths.addAll(List.filled(n, maxWidth));
+    } else if (_alignment == CarbonButtonSetAlignment.fill && bounded) {
+      widths.addAll(List.filled(n, (maxWidth - gaps) / n));
+    } else {
+      widths.addAll(natural);
+    }
+
+    final heights = <double>[];
+    for (var i = 0; i < n; i++) {
+      final size = measure(
+        kids[i],
+        BoxConstraints(minWidth: widths[i], maxWidth: widths[i]),
+      );
+      heights.add(size.height);
+    }
+
+    final sizes = <Size>[];
+    final offsets = <Offset>[];
+    late final Size total;
+    if (stacked) {
+      var y = 0.0;
+      // The last button (primary) goes on top.
+      final order = [for (var i = n - 1; i >= 0; i--) i];
+      final placed = List<Offset>.filled(n, Offset.zero);
+      for (final i in order) {
+        placed[i] = Offset(0, y);
+        y += heights[i] + _gap;
+      }
+      offsets.addAll(placed);
+      for (var i = 0; i < n; i++) {
+        sizes.add(Size(widths[i], heights[i]));
+      }
+      total = constraints.constrain(Size(maxWidth, y - _gap));
+    } else {
+      final rowHeight = heights.fold<double>(0, math.max);
+      for (var i = 0; i < n; i++) {
+        // Equal heights so a wrapped label in one button does not leave its
+        // neighbors short.
+        final tight = measure(
+          kids[i],
+          BoxConstraints.tightFor(width: widths[i], height: rowHeight),
+        );
+        sizes.add(tight);
+      }
+      final used = widths.fold<double>(0, (a, b) => a + b) + gaps;
+      final rowWidth = bounded ? maxWidth : used;
+      final ltr = _textDirection == TextDirection.ltr;
+      // Logical start of the first button: end-aligned rows hug the end edge.
+      final lead = _alignment == CarbonButtonSetAlignment.end && bounded
+          ? rowWidth - used
+          : 0.0;
+      var x = lead;
+      for (var i = 0; i < n; i++) {
+        final w = widths[i];
+        final left = ltr ? x : rowWidth - x - w;
+        offsets.add(Offset(left, 0));
+        x += w + _gap;
+      }
+      total = constraints.constrain(Size(rowWidth, rowHeight));
+    }
+    return _SetPlan(total, offsets, stacked, sizes);
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      _compute(constraints, dry: true).size;
+
+  @override
+  void performLayout() {
+    final plan = _compute(constraints, dry: false);
+    _plan = plan;
+    final kids = _kids;
+    for (var i = 0; i < kids.length; i++) {
+      (kids[i].parentData! as _SetParentData).offset = plan.offsets[i];
+    }
+    size = plan.size;
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    var w = 0.0;
+    for (final k in _kids) {
+      w = math.max(w, k.getMinIntrinsicWidth(height));
+    }
+    return w;
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    var w = 0.0;
+    for (final k in _kids) {
+      w += k.getMaxIntrinsicWidth(height);
+    }
+    return w + _gap * math.max(0, childCount - 1);
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) {
+    var h = 0.0;
+    for (final k in _kids) {
+      h = math.max(h, k.getMinIntrinsicHeight(width));
+    }
+    return h;
+  }
+
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    var h = 0.0;
+    for (final k in _kids) {
+      h = math.max(h, k.getMaxIntrinsicHeight(width));
+    }
+    return h;
+  }
+
+  @override
+  double? computeDistanceToActualBaseline(TextBaseline baseline) =>
+      defaultComputeDistanceToHighestActualBaseline(baseline);
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final plan = _plan;
+    if (plan != null && childCount > 1) {
+      final paint = Paint()..color = _separatorColor;
+      final ltr = _textDirection == TextDirection.ltr;
+      for (var i = 0; i < plan.offsets.length; i++) {
+        final o = plan.offsets[i];
+        final s = plan.childSizes[i];
+        final Rect rule;
+        if (plan.stacked) {
+          // Child 0 is the bottom button and has nothing below it.
+          if (i == 0) continue;
+          rule = Rect.fromLTWH(o.dx, o.dy + s.height, size.width, _gap);
+        } else {
+          // The rule follows each button in reading order except the last.
+          if (i == plan.offsets.length - 1) continue;
+          final x = ltr ? o.dx + s.width : o.dx - _gap;
+          rule = Rect.fromLTWH(x, 0, _gap, size.height);
+        }
+        context.canvas.drawRect(rule.shift(offset), paint);
+      }
+    }
+    defaultPaint(context, offset);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+}

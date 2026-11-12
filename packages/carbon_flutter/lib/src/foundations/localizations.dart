@@ -33,6 +33,9 @@ class CarbonLocalizations {
     this.scrollBackward = 'Scroll back',
     this.scrollForward = 'Scroll forward',
     this.retry = 'Retry',
+    this.on = 'On',
+    this.off = 'Off',
+    this.unavailableValue = 'Unavailable',
     String Function(int count)? resultCount,
     String Function(String label)? removeItem,
   }) : _resultCount = resultCount,
@@ -66,6 +69,15 @@ class CarbonLocalizations {
   final String scrollBackward;
   final String scrollForward;
   final String retry;
+
+  /// The visible state word beside a toggle that is on, so its value is never
+  /// carried by color alone.
+  final String on;
+  final String off;
+
+  /// Shown by a select or dropdown whose committed value is not among its
+  /// options. The value is displayed as unavailable, never replaced.
+  final String unavailableValue;
   final String Function(int count)? _resultCount;
   final String Function(String label)? _removeItem;
 
