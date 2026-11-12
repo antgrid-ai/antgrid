@@ -4,11 +4,74 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/providers/control_plane.dart';
+import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
 void main() {
+  for (final status in <SupervisorStatus?>[
+    const Connected(),
+    const Climbing(ConnRung.payload),
+    const Blocked(BlockReason.handshakeFailing),
+    const Released(),
+    null,
+  ]) {
+    test('missing remote advert is retryable with $status', () async {
+      final container = ProviderContainer(
+        overrides: [
+          controlPlaneStateProvider(
+            'remote',
+          ).overrideWith((_) => Stream.value(const ControlPlaneState())),
+          supervisorStatusProvider(
+            'remote',
+          ).overrideWith((_) => Stream.value(status)),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(remoteDetectedToolsProvider('remote'), (_, _) {});
+      await pumpEventQueue();
+
+      final tools = container.read(remoteDetectedToolsProvider('remote'));
+      expect(tools.isLoading, isFalse);
+      expect(tools.hasError, isTrue);
+      expect(tools.value, isNull);
+    });
+  }
+
+  test(
+    'a blocked connection stops checking even while the dial is pending',
+    () async {
+      final statuses = StreamController<SupervisorStatus?>();
+      addTearDown(() => unawaited(statuses.close()));
+      final container = ProviderContainer(
+        overrides: [
+          controlPlaneStateProvider(
+            'remote',
+          ).overrideWith((_) => const Stream<ControlPlaneState>.empty()),
+          supervisorStatusProvider(
+            'remote',
+          ).overrideWith((_) => statuses.stream),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(remoteDetectedToolsProvider('remote'), (_, _) {});
+      statuses.add(const Climbing(ConnRung.payload));
+      await pumpEventQueue();
+      expect(
+        container.read(remoteDetectedToolsProvider('remote')).isLoading,
+        isTrue,
+      );
+
+      statuses.add(const Blocked(BlockReason.handshakeFailing));
+      await pumpEventQueue();
+      final tools = container.read(remoteDetectedToolsProvider('remote'));
+      expect(tools.isLoading, isFalse);
+      expect(tools.hasError, isTrue);
+    },
+  );
+
   Future<Map<String, String?>?> readTools(
     List<AdvertisedTool> advertised,
   ) async {
@@ -37,6 +100,7 @@ void main() {
   test('switching targets never shows the previous machine\'s tools', () async {
     final container = ProviderContainer(
       overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
         controlPlaneStateProvider('a').overrideWith(
           (ref) => Stream.value(
             const ControlPlaneState(
@@ -73,6 +137,45 @@ void main() {
     expect(seen, everyElement(isNull));
   });
 
+  test('a selected remote project keeps missing adverts retryable', () async {
+    final plane = StreamController<ControlPlaneState>();
+    addTearDown(() => unawaited(plane.close()));
+    final container = ProviderContainer(
+      overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
+        controlPlaneStateProvider('a').overrideWith((_) => plane.stream),
+        supervisorStatusProvider(
+          'a',
+        ).overrideWith((_) => Stream.value(const Connected())),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(newSessionDetectedToolsProvider, (_, _) {});
+    container.read(selectedTargetProjectProvider.notifier).set(_remote('a'));
+    const advert = ControlPlaneState(
+      toolsReceived: true,
+      tools: [AdvertisedTool(tool: 'codex', label: 'Codex')],
+    );
+    plane.add(advert);
+    await pumpEventQueue();
+    expect(container.read(newSessionDetectedToolsProvider).value, {
+      'codex': 'Codex',
+    });
+
+    plane.add(const ControlPlaneState());
+    await pumpEventQueue();
+    final tools = container.read(newSessionDetectedToolsProvider);
+    expect(tools.hasError, isTrue);
+    expect(tools.isLoading, isFalse);
+    expect(tools.value, isNull);
+
+    plane.add(advert);
+    await pumpEventQueue();
+    expect(container.read(newSessionDetectedToolsProvider).value, {
+      'codex': 'Codex',
+    });
+  });
+
   // Riverpod keeps the last map beside an error; a machine that dropped off
   // is no longer vouching for it.
   test('a machine that drops off stops offering its last list', () async {
@@ -80,6 +183,7 @@ void main() {
     addTearDown(() => unawaited(plane.close()));
     final container = ProviderContainer(
       overrides: [
+        pickerSourcesProvider.overrideWithValue(const []),
         controlPlaneStateProvider('a').overrideWith((ref) => plane.stream),
       ],
     );

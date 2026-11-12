@@ -13,7 +13,10 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../providers/demo_mode.dart';
 import '../providers/first_run.dart';
+import '../providers/agent_setup.dart';
+import '../providers/ui_attention_providers.dart';
 import '../utils/platform_utils.dart';
+import 'agent_setup.dart';
 
 /// Latch newly-done steps and record completion, from build — via a microtask,
 /// because provider state must never be written during build. Idempotent: the
@@ -102,9 +105,6 @@ String? _desktopHintFor(String? firstOpenStepId) => switch (firstOpenStepId) {
   FirstRunStepIds.startSession => 'Pick a project, describe a task, hit send.',
   FirstRunStepIds.connectPhone =>
     'Sign in to Antgrid on your phone with this account.',
-  FirstRunStepIds.armHandler =>
-    'Click the shield in a session title bar — Handler replies while you are '
-        'away.',
   _ => null,
 };
 
@@ -116,12 +116,8 @@ const _stepIndent =
 /// Desktop setup checklist, docked in the sidebar directly above `UpdateRow`
 /// and the account footer.
 ///
-/// It belongs to the DRAWER, not the New Session canvas, because the drawer is
-/// the only desktop surface mounted on both routes. Two of the five steps
-/// ("Connect your phone", "Arm Handler on a session") are performed from inside
-/// a session, where the canvas — and with it the checklist, its live signals
-/// and its latch — did not exist: the old card was never on screen at the
-/// moment its last steps became actionable.
+/// The drawer stays mounted both before and inside a session, so live setup
+/// signals can be latched wherever the user completes a step.
 ///
 /// Whether [FirstRunSetupSection] will render anything right now.
 ///
@@ -154,7 +150,15 @@ class FirstRunSetupSection extends ConsumerWidget {
     );
     final doneCount = steps.where((s) => s.done).length;
     final firstOpen = steps.firstWhereOrNull((s) => !s.done);
+    final detectingAgent = firstOpen?.id == FirstRunStepIds.detectAgent;
     final hint = _desktopHintFor(firstOpen?.id);
+    final machine = detectingAgent
+        ? ref.watch(agentSetupMachineProvider)
+        : null;
+    final setupOnCanvas =
+        detectingAgent &&
+        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession &&
+        ref.watch(newSessionNeedsAgentSetupProvider);
     return Container(
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: t.borderSubtle)),
@@ -218,16 +222,31 @@ class FirstRunSetupSection extends ConsumerWidget {
                       step: steps[i],
                       isCursor: steps[i].id == firstOpen?.id,
                     ),
-                  ],
-                  if (hint != null) ...[
-                    const SizedBox(height: AbTokens.space8),
-                    Text(
-                      hint,
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXxs,
-                        color: t.textMuted,
-                      ),
-                    ),
+                    if (steps[i].id == firstOpen?.id) ...[
+                      if (detectingAgent) ...[
+                        const SizedBox(height: AbTokens.space8),
+                        if (setupOnCanvas)
+                          Text(
+                            'Set up an agent in the New Session panel.',
+                            style: AbTokens.sansStyle(
+                              fontSize: AbTokens.fontXs,
+                              color: t.textSecondary,
+                            ),
+                          )
+                        else
+                          AgentSetupHelp(key: ValueKey(machine!.uuid)),
+                        const SizedBox(height: AbTokens.space8),
+                      ] else if (hint != null) ...[
+                        const SizedBox(height: AbTokens.space8),
+                        Text(
+                          hint,
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontXs,
+                            color: t.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ],
                   ],
                 ],
               ),
@@ -337,6 +356,7 @@ class MobileFirstRunChecklist extends ConsumerWidget {
               // is never a dead end while the checklist is open.
               AbButton(
                 label: kDemoEntryLabel,
+                wrapLabel: true,
                 onTap: () => enterDemoMode(ref.container),
               ),
             ],

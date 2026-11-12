@@ -679,6 +679,7 @@ const AgentProjectsMessage = BaseMessage.extend({
 const AgentDescriptorSchema = z.object({
   tool: z.string(),
   label: z.string(),
+  installUrl: z.url().optional(),
   chatCapable: z.boolean(),
   judgeCapable: z.boolean(),
   handler: z.object({ terminal: z.boolean(), chat: z.boolean() }),

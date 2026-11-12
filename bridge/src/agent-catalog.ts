@@ -21,6 +21,7 @@ export function buildAgentCatalog(runtime: AgentRuntime = agentRuntime): AgentDe
   return Object.entries(runtime.agents).map(([tool, spec]) => ({
     tool,
     label: spec.label,
+    ...(spec.installUrl ? { installUrl: spec.installUrl } : {}),
     chatCapable: spec.driver !== undefined,
     judgeCapable: runtime.judgeCapable(tool),
     handler: {

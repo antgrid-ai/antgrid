@@ -8,8 +8,8 @@
 /// the app can no longer answer these questions itself — a cached session row
 /// belongs to a machine whose tools were never probed here.
 ///
-/// Every field is required: a bridge that sends the array has answered all of
-/// it. The ARRAY is what is optional, and a key missing from the catalog means
+/// Capability fields are required; installation links may be absent on older
+/// bridges or adapters. The ARRAY is optional, and a key missing from the catalog means
 /// "no bridge has told us about this agent" — never a set of false
 /// capabilities.
 class AgentDescriptor {
@@ -19,6 +19,8 @@ class AgentDescriptor {
   /// Display name. Authoritative: the app has no table to fall back to beyond
   /// the raw key.
   final String label;
+
+  final String? installUrl;
 
   /// The agent has a chat driver, so a session of it can run in chat mode.
   final bool chatCapable;
@@ -42,6 +44,7 @@ class AgentDescriptor {
   const AgentDescriptor({
     required this.tool,
     required this.label,
+    this.installUrl,
     required this.chatCapable,
     required this.judgeCapable,
     required this.handlerTerminal,
@@ -81,6 +84,9 @@ class AgentDescriptor {
     return AgentDescriptor(
       tool: tool,
       label: label,
+      installUrl: json['installUrl'] is String
+          ? json['installUrl'] as String
+          : null,
       chatCapable: chatCapable,
       judgeCapable: judgeCapable,
       handlerTerminal: terminal,
@@ -96,6 +102,7 @@ class AgentDescriptor {
   Map<String, dynamic> toJson() => {
     'tool': tool,
     'label': label,
+    if (installUrl != null) 'installUrl': installUrl,
     'chatCapable': chatCapable,
     'judgeCapable': judgeCapable,
     'handler': {'terminal': handlerTerminal, 'chat': handlerChat},
@@ -114,6 +121,7 @@ class AgentDescriptor {
       other is AgentDescriptor &&
       other.tool == tool &&
       other.label == label &&
+      other.installUrl == installUrl &&
       other.chatCapable == chatCapable &&
       other.judgeCapable == judgeCapable &&
       other.handlerTerminal == handlerTerminal &&
@@ -126,6 +134,7 @@ class AgentDescriptor {
   int get hashCode => Object.hash(
     tool,
     label,
+    installUrl,
     chatCapable,
     judgeCapable,
     handlerTerminal,

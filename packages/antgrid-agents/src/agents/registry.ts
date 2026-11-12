@@ -76,6 +76,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "claude",
     discoveryPaths: () => [join(homedir(), ".claude/local")],
     label: "Claude Code",
+    installUrl: "https://code.claude.com/docs/en/quickstart",
     defaultApprovalGated: true,
     chatPermissionModes: CLAUDE_PERMISSION_MODES,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
@@ -184,6 +185,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "codex",
     normalizeTerminalNotification: (notice) => ({ type: "permission_request", message: notice.body ?? notice.title ?? "Codex needs approval" }),
     label: "Codex",
+    installUrl: "https://developers.openai.com/codex/cli/",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
@@ -282,6 +284,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     args: [OPENCODE_STANDALONE],
     prepareTerminal: prepareOpencodeTerminal,
     label: "opencode",
+    installUrl: "https://opencode.ai/docs/",
     defaultApprovalGated: false,
     approvalPolicies: {},
     // No `bridge hook` events: opencode's plugin runs inside its own runtime and
@@ -358,6 +361,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "cursor-agent": {
     bin: "cursor-agent",
     label: "Cursor",
+    installUrl: "https://cursor.com/docs/cli/installation",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "cursor",
@@ -385,6 +389,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "github-copilot": {
     bin: "copilot",
     label: "Copilot",
+    installUrl: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "github-copilot",
@@ -481,6 +486,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     bin: "agy",
     observeTitles: observeAntigravityTitles,
     label: "Antigravity",
+    installUrl: "https://antigravity.google/docs/getting-started?tab=cli",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
     hookName: "antigravity",
@@ -511,6 +517,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   kilo: {
     bin: "kilo",
     label: "Kilo",
+    installUrl: "https://kilo.ai/docs/code-with-ai/platforms/cli",
     defaultApprovalGated: true,
     approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: "kilo",
@@ -581,6 +588,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
+    installUrl: "https://github.com/mistralai/mistral-vibe",
     defaultApprovalGated: true,
     approvalPolicies: {},
     hookName: "mistral-vibe",

@@ -143,24 +143,36 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
           // is started from an empty list, which is exactly when an
           // unaccounted-for 30s wait is least explicable.
           const SliverToBoxAdapter(child: StartingSessionRow()),
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: showChecklist
-                ? const MobileFirstRunChecklist()
-                : AbEmptyState(
-                    title: 'No recent sessions',
-                    subtitle: hasTarget
-                        ? 'Describe a task below to start your first session.'
-                        : 'Pick a project, then describe a task below.',
-                    // Nothing picked means every path into a session is still
-                    // dead — offer the one that needs no machine at all.
-                    action: offerDemo
-                        ? AbButton(
-                            label: kDemoEntryLabel,
-                            onTap: () => enterDemoMode(ref.container),
-                          )
-                        : null,
+          // Intrinsic height undercounts wrapped checklist rows at the capped
+          // content width. Lay out at the real width and let the sliver scroll.
+          SliverLayoutBuilder(
+            builder: (context, constraints) => SliverToBoxAdapter(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: math.max(
+                    0,
+                    constraints.viewportMainAxisExtent -
+                        constraints.precedingScrollExtent,
                   ),
+                ),
+                child: showChecklist
+                    ? const MobileFirstRunChecklist()
+                    : AbEmptyState(
+                        title: 'No recent sessions',
+                        subtitle: hasTarget
+                            ? 'Describe a task below to start your first session.'
+                            : 'Pick a project, then describe a task below.',
+                        // Nothing picked means every path into a session is still
+                        // dead — offer the one that needs no machine at all.
+                        action: offerDemo
+                            ? AbButton(
+                                label: kDemoEntryLabel,
+                                onTap: () => enterDemoMode(ref.container),
+                              )
+                            : null,
+                      ),
+              ),
+            ),
           ),
         ],
       );

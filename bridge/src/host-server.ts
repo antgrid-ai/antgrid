@@ -1339,14 +1339,14 @@ export class HostServer {
    *  ride the sibling `agents` descriptor (buildAgentCatalog), because an app
    *  predating it would read a widened `tools[]` as "all of these are installed"
    *  and offer agents this machine cannot run. */
-  async buildToolsAdvertisement(opts: DetectOptions = {}) {
+  async buildToolsAdvertisement(opts: DetectOptions & { refresh?: boolean } = {}) {
     return (await detectAvailableTools(opts)).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
   }
 
-  private async sendToolsAdvertisement(bus: MessageBus): Promise<void> {
+  private async sendToolsAdvertisement(bus: MessageBus, refresh = false): Promise<void> {
     bus.publish(
       createMessage("agent:tools", {
-        tools: await this.buildToolsAdvertisement(),
+        tools: await this.buildToolsAdvertisement({ refresh }),
         agents: buildAgentCatalog(),
       }),
       "control",
@@ -1798,7 +1798,7 @@ export class HostServer {
       // payload is still a cheap no-op.
       if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:projects", "agent:tools"])) {
         this.sendProjectsAdvertisement(bus);
-        void this.sendToolsAdvertisement(bus)
+        void this.sendToolsAdvertisement(bus, true)
           .then(() => dispatchRpc(bus, msg))
           .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("state.snapshot discovery failed: %s", err));
@@ -2578,7 +2578,7 @@ export class HostServer {
           // Same builders as the remote `agent:tools` advert: the loopback and
           // relay pickers must describe a tool identically, and a second copy
           // of the entry shape is how they drift.
-          tools: await this.buildToolsAdvertisement(),
+          tools: await this.buildToolsAdvertisement({ refresh: true }),
           agents: buildAgentCatalog(),
         };
       case "project:open": {

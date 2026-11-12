@@ -40,7 +40,11 @@ const _allSteps = [
   (id: FirstRunStepIds.openProject, label: 'Open a project', done: false),
   (id: FirstRunStepIds.startSession, label: 'Start a session', done: false),
   (id: FirstRunStepIds.connectPhone, label: 'Connect your phone', done: false),
-  (id: FirstRunStepIds.armHandler, label: 'Arm Handler', done: false),
+  (
+    id: FirstRunStepIds.detectAgent,
+    label: 'Detect a supported coding agent',
+    done: false,
+  ),
 ];
 
 DrawerEntry _project(String id) => LocalProjectEntry(

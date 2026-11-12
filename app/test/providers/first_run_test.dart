@@ -8,6 +8,7 @@ import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/now_ticker.dart';
+import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/account_agents_api.dart';
@@ -78,6 +79,7 @@ void main() {
       List<DeviceSummary> phones = const [],
       Set<String> latched = const {},
       bool handlerArmed = false,
+      Map<String, String?> tools = const {},
     }) async {
       useInMemoryPrefs();
       final firstRunStore = await FirstRunStore.open();
@@ -106,6 +108,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           firstRunStoreProvider.overrideWithValue(firstRunStore),
+          localDetectedToolsProvider.overrideWith((_) async => tools),
           projectStoreProvider.overrideWithValue(projectStore),
           pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
           signedInProvider.overrideWith((_) => signedIn),
@@ -118,7 +121,7 @@ void main() {
     }
 
     test(
-      'all steps start unchecked with no signals, armHandler last',
+      'all steps start unchecked with no signals, agent detection before opening a project',
       () async {
         final (container, _) = await build(signedIn: null);
         final steps = container.read(desktopFirstRunStepsProvider);
@@ -127,9 +130,9 @@ void main() {
           FirstRunStepIds.openProject: false,
           FirstRunStepIds.startSession: false,
           FirstRunStepIds.connectPhone: false,
-          FirstRunStepIds.armHandler: false,
+          FirstRunStepIds.detectAgent: false,
         });
-        expect(steps.last.id, FirstRunStepIds.armHandler);
+        expect(steps[1].id, FirstRunStepIds.detectAgent);
       },
     );
 
@@ -139,11 +142,12 @@ void main() {
         withProject: true,
         recents: [_row('s1')],
         phones: [_device(kind: 'app', platform: 'ios', name: 'iPhone')],
-        handlerArmed: true,
+        tools: {'codex': 'Codex'},
       );
       // Keep the autoDispose chain alive across the device fetch.
       final sub = container.listen(desktopFirstRunStepsProvider, (_, _) {});
       await container.read(otherAccountMobileDevicesProvider.future);
+      await container.read(localDetectedToolsProvider.future);
       // Let the AsyncData notification propagate to the steps provider.
       await Future<void>.delayed(Duration.zero);
       final done = _doneById(sub.read());
@@ -164,14 +168,34 @@ void main() {
       },
     );
 
-    test('markHandlerArmed flips the armHandler step and persists', () async {
+    test('empty detection does not complete the agent step', () async {
+      final (container, _) = await build();
+      final sub = container.listen(desktopFirstRunStepsProvider, (_, _) {});
+      await container.read(localDetectedToolsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(_doneById(sub.read())[FirstRunStepIds.detectAgent], isFalse);
+    });
+
+    test('latched detection survives an empty scan', () async {
+      final (container, _) = await build(
+        latched: {FirstRunStepIds.detectAgent},
+      );
+      expect(
+        _doneById(
+          container.read(desktopFirstRunStepsProvider),
+        )[FirstRunStepIds.detectAgent],
+        isTrue,
+      );
+    });
+
+    test('Handler still persists independently of the checklist', () async {
       final (container, _) = await build(signedIn: null);
       var done = _doneById(container.read(desktopFirstRunStepsProvider));
-      expect(done[FirstRunStepIds.armHandler], isFalse);
+      expect(done.containsKey('armHandler'), isFalse);
 
       container.read(firstRunProvider.notifier).markHandlerArmed();
       done = _doneById(container.read(desktopFirstRunStepsProvider));
-      expect(done[FirstRunStepIds.armHandler], isTrue);
+      expect(done.containsKey('armHandler'), isFalse);
       // Fire-and-forget persist has landed in the WithCache cache already.
       expect((await FirstRunStore.open()).read().handlerArmedOnce, isTrue);
     });
