@@ -61,6 +61,7 @@ class CarbonNotification extends StatelessWidget {
     this.subtitle,
     this.action,
     this.onClose,
+    this.closeLabel,
     this.highContrast = false,
     this.announce = true,
   }) : assert(
@@ -78,6 +79,11 @@ class CarbonNotification extends StatelessWidget {
 
   /// Shows the close button when non-null.
   final VoidCallback? onClose;
+
+  /// Accessible name of the close button; defaults to the localized
+  /// "Dismiss notification". Set it when the close has a narrower meaning
+  /// than the default, such as "Don't show this again".
+  final String? closeLabel;
   final bool highContrast;
   final bool announce;
 
@@ -89,6 +95,7 @@ class CarbonNotification extends StatelessWidget {
       subtitle: subtitle,
       action: action,
       onClose: onClose,
+      closeLabel: closeLabel,
       highContrast: highContrast,
       announce: announce,
       stacked: false,
@@ -111,6 +118,7 @@ class CarbonToast extends StatelessWidget {
     this.caption,
     this.action,
     this.onClose,
+    this.closeLabel,
     this.highContrast = true,
     this.announce = true,
   });
@@ -121,6 +129,9 @@ class CarbonToast extends StatelessWidget {
   final String? caption;
   final CarbonNotificationAction? action;
   final VoidCallback? onClose;
+
+  /// Accessible name of the close button; see [CarbonNotification.closeLabel].
+  final String? closeLabel;
   final bool highContrast;
   final bool announce;
 
@@ -133,6 +144,7 @@ class CarbonToast extends StatelessWidget {
       caption: caption,
       action: action,
       onClose: onClose,
+      closeLabel: closeLabel,
       highContrast: highContrast,
       announce: announce,
       stacked: true,
@@ -148,6 +160,7 @@ class _NotificationCard extends StatefulWidget {
     this.caption,
     required this.action,
     required this.onClose,
+    required this.closeLabel,
     required this.highContrast,
     required this.announce,
     required this.stacked,
@@ -159,6 +172,7 @@ class _NotificationCard extends StatefulWidget {
   final String? caption;
   final CarbonNotificationAction? action;
   final VoidCallback? onClose;
+  final String? closeLabel;
   final bool highContrast;
   final bool announce;
 
@@ -487,7 +501,7 @@ class _NotificationCardState extends State<_NotificationCard> {
                   data: closeTheme,
                   child: CarbonButton.iconOnly(
                     icon: const CarbonIcon(CarbonIcons.close),
-                    semanticLabel: loc.dismissNotification,
+                    semanticLabel: widget.closeLabel ?? loc.dismissNotification,
                     hoverFill: false,
                     size: theme.isTouch ? null : CarbonButtonSize.large,
                     onPressed: onClose,

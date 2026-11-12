@@ -178,6 +178,31 @@ void main() {
   });
 
   group('activation', () {
+    testWidgets('a long-press runs onLongPress and not onPressed', (
+      tester,
+    ) async {
+      final log = <String>[];
+      await pumpCarbon(
+        tester,
+        CarbonContainedList(
+          label: 'L',
+          children: [
+            CarbonContainedListRow(
+              title: 'Row',
+              onPressed: () => log.add('press'),
+              onLongPress: () => log.add('long'),
+            ),
+          ],
+        ),
+      );
+      await tester.longPress(find.text('Row'));
+      await tester.pump();
+      expect(log, ['long']);
+      await tester.tap(find.text('Row'));
+      await tester.pump();
+      expect(log, ['long', 'press']);
+    });
+
     testWidgets('row tap activates the row only', (tester) async {
       final log = <String>[];
       await pumpCarbon(

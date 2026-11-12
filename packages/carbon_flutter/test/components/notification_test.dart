@@ -42,6 +42,39 @@ List<Map<Object?, Object?>> _captureAnnouncements(WidgetTester tester) {
 }
 
 void main() {
+  group('close label', () {
+    testWidgets('names the close button, defaulting to the localized text', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _top(
+          CarbonNotification(
+            subtitle: 'Message',
+            onClose: () {},
+            closeLabel: 'Never ask again',
+          ),
+        ),
+      );
+      expect(find.bySemanticsLabel('Never ask again'), findsOneWidget);
+      expect(find.bySemanticsLabel('Close notification'), findsNothing);
+
+      await pumpCarbon(
+        tester,
+        _top(CarbonToast(title: 'Saved', onClose: () {}, closeLabel: 'Hide')),
+      );
+      expect(find.bySemanticsLabel('Hide'), findsOneWidget);
+
+      await pumpCarbon(
+        tester,
+        _top(CarbonNotification(subtitle: 'Message', onClose: () {})),
+      );
+      expect(find.bySemanticsLabel('Close notification'), findsOneWidget);
+      handle.dispose();
+    });
+  });
+
   group('inline notification', () {
     testWidgets('every kind shows a labelled icon, never color alone', (
       tester,

@@ -146,6 +146,9 @@ class CarbonMenuRadioGroup<T> extends CarbonMenuEntry {
           kind: _FlatKind.item,
           label: option.label,
           icon: option.icon,
+          // Carbon's menu item has no secondary text; the shortcut slot carries
+          // the description.
+          shortcut: option.description,
           enabled: changed != null && option.enabled,
           checked: selected,
           radio: true,
@@ -346,6 +349,7 @@ class CarbonMenu extends StatefulWidget {
     this.minWidth = 160,
     this.maxWidth = 320,
     this.gap = 0,
+    this.preferAbove = false,
     this.closeOnToggle = true,
     this.rowHeight,
     this.border = false,
@@ -364,6 +368,10 @@ class CarbonMenu extends StatefulWidget {
   final double minWidth;
   final double maxWidth;
   final double gap;
+
+  /// Opens above the anchor when there is room, for triggers that sit above
+  /// content the menu must not cover; falls back below when it does not fit.
+  final bool preferAbove;
   final bool closeOnToggle;
 
   /// The height of an item row; null uses the density's control height.
@@ -432,6 +440,7 @@ class _CarbonMenuState extends State<CarbonMenu> {
         minWidth: widget.minWidth,
         maxWidth: widget.maxWidth,
         gap: widget.gap,
+        preferAbove: widget.preferAbove,
         raiseLayer: false,
         dismissOnOutsideTap: false,
         restoreFocus: widget.restoreFocus,

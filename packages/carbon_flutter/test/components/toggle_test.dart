@@ -125,6 +125,16 @@ void main() {
   });
 
   group('activation', () {
+    testWidgets('tapping the label requests the opposite value once', (
+      tester,
+    ) async {
+      final requests = <bool>[];
+      await pumpCarbon(tester, _toggle(value: true, onChanged: requests.add));
+      await tester.tap(find.text('Auto-save'));
+      await tester.pump();
+      expect(requests, [false]);
+    });
+
     testWidgets('tap requests the opposite value once', (tester) async {
       final requests = <bool>[];
       await pumpCarbon(tester, _toggle(value: true, onChanged: requests.add));
@@ -232,6 +242,16 @@ void main() {
           .getSemantics(find.bySemanticsLabel('Auto-save'))
           .getSemanticsData();
       expect(node.value, 'Loading');
+      handle.dispose();
+    });
+
+    testWidgets('label and switch are one semantics node', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, _toggle(value: true, onChanged: (_) {}));
+      final node = tester.getSemantics(find.bySemanticsLabel('Auto-save'));
+      expect(node.getSemanticsData().flagsCollection.isToggled, Tristate.isTrue);
+      expect(find.bySemanticsLabel('Auto-save'), findsOneWidget);
+      expect(find.bySemanticsLabel('On'), findsNothing);
       handle.dispose();
     });
 

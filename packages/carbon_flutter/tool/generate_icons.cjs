@@ -32,7 +32,9 @@ const ICONS = [
   ['chevronLeft', 'chevron--left', true],
   ['chevronRight', 'chevron--right', true],
   ['chevronUp', 'chevron--up', false],
+  ['chat', 'chat', false],
   ['circleDash', 'circle-dash', false],
+  ['code', 'code', false],
   ['close', 'close', false],
   ['copy', 'copy', false],
   ['document', 'document', false],
@@ -40,11 +42,16 @@ const ICONS = [
   ['error', 'error', false],
   ['errorFilled', 'error--filled', false],
   ['filter', 'filter', false],
+  ['folder', 'folder', false],
+  ['folderAdd', 'folder--add', false],
+  ['folderShared', 'folder--shared', false],
+  ['fork', 'fork', false],
   ['idea', 'idea', false],
   ['inProgress', 'in-progress', false],
   ['incomplete', 'incomplete', false],
   ['information', 'information', false],
   ['informationFilled', 'information--filled', false],
+  ['laptop', 'laptop', false],
   ['launch', 'launch', false],
   ['locked', 'locked', false],
   ['menu', 'menu', false],
@@ -54,10 +61,15 @@ const ICONS = [
   ['pendingFilled', 'pending--filled', false],
   ['play', 'play', false],
   ['renew', 'renew', false],
+  ['screen', 'screen', false],
   ['search', 'search', false],
+  ['send', 'send', false],
+  ['serverDns', 'server--dns', false],
   ['settings', 'settings', false],
   ['star', 'star', false],
+  ['stopFilled', 'stop--filled', false],
   ['subtract', 'subtract', false],
+  ['terminal', 'terminal', false],
   ['trashCan', 'trash-can', false],
   ['undefinedFilled', 'undefined--filled', false],
   ['unknownFilled', 'unknown--filled', false],
@@ -99,6 +111,10 @@ function toD(el, tag) {
 function transformOf(el) {
   const t = attr(el, 'transform');
   if (!t) return null;
+  // Carbon exports a sub-pixel nudge (0.01 units or less) on a few icons; dropping it
+  // is invisible, anything larger needs real path math.
+  const tr = t.match(/^translate\(\s*(-?[\d.]+)[ ,]+(-?[\d.]*)\s*\)$/);
+  if (tr && Math.abs(num(tr[1])) <= 0.01 && Math.abs(num(tr[2] || '0')) <= 0.01) return null;
   const m = t.match(/^rotate\(\s*(-?[\d.]+)[ ,]+(-?[\d.]+)[ ,]+(-?[\d.]+)\s*\)$/);
   if (!m) throw new Error(`unsupported transform ${t}`);
   return [num(m[1]), num(m[2]), num(m[3])];

@@ -26,6 +26,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Icons `circleDash`, `inProgress`, `incomplete`, `pendingFilled`,
   `undefinedFilled`, `unknownFilled`, `warningAltInvertedFilled` and
   `warningSquareFilled` join the bundled set.
+- Icons `send`, `stopFilled`, `terminal`, `chat`, `code`, `screen`, `serverDns`,
+  `folder`, `folderAdd`, `fork`, `folderShared` and `laptop` join the bundled
+  set (still @carbon/icons 11.92.0).
 
 ### Primitives
 
@@ -103,6 +106,24 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   remains the accessible name.
 - Notification: `CarbonNotificationAction.onPressed` may be null, which
   disables the action.
+- Menu: `preferAbove` on `CarbonMenu`, `CarbonMenuButton`, `CarbonOverflowMenu`
+  and `CarbonComboBox` opens the popup above the trigger when it fits (Carbon
+  `menuAlignment` top, `direction: top`).
+- Overflow menu: `CarbonOverflowMenu.icon` replaces the default dots (Carbon
+  `renderIcon`).
+- Combo box: `semanticLabel` is the accessible name when `label` is null (Carbon
+  `titleText` with `hideLabel`); `listMinWidth` and `listMaxWidth` clamp the
+  option list width.
+- Menu: `CarbonMenuRadioGroup` shows `CarbonOption.description` in the trailing
+  hint slot and announces it.
+- Notification: `CarbonNotification` and `CarbonToast` take `closeLabel`, the
+  close button's accessible name (default: localized "Close notification").
+- Toggle: the visible label is part of the tap target and shares one semantics
+  node with the switch, as upstream's `<label htmlFor>` does.
+- Contained list: `CarbonContainedListRow.onLongPress`; a long-press no longer
+  also runs `onPressed` on release.
+- Text input: `CarbonTextInput.bare` renders only the editable text (no fill,
+  border, outline, label, helper or counter) for hosts that draw their own frame.
 
 ### Interaction-state fixes
 

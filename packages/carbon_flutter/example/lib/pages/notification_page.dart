@@ -49,6 +49,13 @@ class NotificationPage extends StatelessWidget {
                 ),
                 onClose: () {},
               ),
+            CarbonNotification(
+              kind: CarbonNotificationKind.info,
+              subtitle: 'The close button announces its own name.',
+              announce: false,
+              closeLabel: 'Dismiss, do not ask again',
+              onClose: () {},
+            ),
           ],
         ),
         GallerySection(

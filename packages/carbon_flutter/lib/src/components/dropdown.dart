@@ -172,6 +172,10 @@ class CarbonComboBox<T> extends StatefulWidget {
     this.loading = false,
     this.listErrorText,
     this.emptyText,
+    this.semanticLabel,
+    this.listMinWidth,
+    this.listMaxWidth,
+    this.preferAbove = false,
   }) : assert(
          !allowCustomValue || onCustomValue != null,
          'allowCustomValue needs onCustomValue',
@@ -214,6 +218,19 @@ class CarbonComboBox<T> extends StatefulWidget {
   final bool loading;
   final String? listErrorText;
   final String? emptyText;
+
+  /// The field's announced name when [label] is null (Carbon's `titleText`
+  /// with `hideLabel`).
+  final String? semanticLabel;
+
+  /// Bounds for the option list, which is otherwise as wide as the field. A
+  /// narrow field can lift the list into Carbon's inline list box range
+  /// (288 to 480) so options stay readable.
+  final double? listMinWidth;
+  final double? listMaxWidth;
+
+  /// Opens the list above the field when it fits (Carbon's `direction: top`).
+  final bool preferAbove;
 
   @override
   State<CarbonComboBox<T>> createState() => _CarbonComboBoxState<T>();
@@ -728,6 +745,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
         enabled: enabled,
         readOnly: widget.readOnly,
         child: Semantics(
+          label: widget.label == null ? widget.semanticLabel : null,
           expanded: interactive ? open : null,
           // A TextField tap from assistive technology only requests the
           // keyboard, so expanding the list needs its own action.
@@ -741,6 +759,9 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
             child: CarbonAnchoredPopup(
               controller: _popup,
               matchAnchorWidth: true,
+              minWidth: widget.listMinWidth ?? 0,
+              maxWidth: widget.listMaxWidth,
+              preferAbove: widget.preferAbove,
               maxHeight: kOptionListMaxRows * extent,
               popupBuilder: (context, available) => TextFieldTapRegion(
                 child: CarbonOptionListbox<T>(

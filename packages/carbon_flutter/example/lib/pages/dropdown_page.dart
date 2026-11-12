@@ -142,6 +142,27 @@ class _DropdownPageState extends State<DropdownPage> {
           ],
         ),
         GallerySection(
+          title: 'Narrow field, wide list',
+          description:
+              'listMinWidth and listMaxWidth lift the list to the inline '
+              'list box range (288 to 480) when the field is narrow; '
+              'preferAbove opens it upward.',
+          children: [
+            SizedBox(
+              width: 160,
+              child: CarbonComboBox<String>(
+                semanticLabel: 'Branch',
+                options: _branches,
+                value: _combo,
+                onChanged: (v) => setState(() => _combo = v),
+                listMinWidth: 288,
+                listMaxWidth: 480,
+                preferAbove: true,
+              ),
+            ),
+          ],
+        ),
+        GallerySection(
           title: 'Large list',
           description: 'Rows are built lazily; 2,000 options.',
           children: [

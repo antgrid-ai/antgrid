@@ -245,7 +245,11 @@ class _CheckedDemoState extends State<_CheckedDemo> {
             label: 'Color mode',
             value: _mode,
             options: const [
-              CarbonOption(value: 'light', label: 'Light'),
+              CarbonOption(
+                value: 'light',
+                label: 'Light',
+                description: 'Default',
+              ),
               CarbonOption(value: 'dark', label: 'Dark'),
               CarbonOption(
                 value: 'auto',

@@ -598,4 +598,107 @@ void main() {
       expect(tester.widget<CarbonButton>(find.byType(CarbonButton)).maxLines, 1);
     });
   });
+
+  group('preferAbove', () {
+    Widget bottom(Widget child) => Align(
+      alignment: AlignmentDirectional.bottomStart,
+      child: Padding(padding: const EdgeInsets.all(40), child: child),
+    );
+
+    testWidgets('CarbonMenuButton opens above its trigger', (tester) async {
+      await pumpCarbon(
+        tester,
+        bottom(
+          CarbonMenuButton(
+            label: 'Actions',
+            preferAbove: true,
+            entries: _entries(<String>[]),
+          ),
+        ),
+        size: const Size(800, 600),
+      );
+      await tester.tap(find.text('Actions'));
+      await _settle(tester);
+      expect(
+        tester.getRect(find.text('Rename')).bottom,
+        lessThanOrEqualTo(tester.getRect(find.byType(CarbonButton)).top),
+      );
+    });
+
+    testWidgets('CarbonOverflowMenu opens above its trigger', (tester) async {
+      await pumpCarbon(
+        tester,
+        bottom(
+          CarbonOverflowMenu(preferAbove: true, entries: _entries(<String>[])),
+        ),
+        size: const Size(800, 600),
+      );
+      await tester.tap(find.byType(CarbonButton));
+      await _settle(tester);
+      expect(
+        tester.getRect(find.text('Rename')).bottom,
+        lessThanOrEqualTo(tester.getRect(find.byType(CarbonButton)).top),
+      );
+    });
+
+    testWidgets('a top-anchored trigger opens below unless asked', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        CarbonMenuButton(label: 'Actions', entries: _entries(<String>[])),
+      );
+      await tester.tap(find.text('Actions'));
+      await _settle(tester);
+      expect(
+        tester.getRect(find.text('Rename')).top,
+        greaterThanOrEqualTo(tester.getRect(find.byType(CarbonButton)).bottom),
+      );
+    });
+  });
+
+  group('CarbonOverflowMenu.icon', () {
+    testWidgets('replaces the dots', (tester) async {
+      await _pump(
+        tester,
+        CarbonOverflowMenu(
+          icon: const CarbonIcon(CarbonIcons.terminal),
+          entries: _entries(<String>[]),
+        ),
+      );
+      final icons = tester
+          .widgetList<CarbonIcon>(find.byType(CarbonIcon))
+          .map((i) => i.icon)
+          .toList();
+      expect(icons, contains(CarbonIcons.terminal));
+      expect(icons, isNot(contains(CarbonIcons.overflowMenuVertical)));
+    });
+  });
+
+  group('CarbonMenuRadioGroup descriptions', () {
+    testWidgets('draw in the hint slot and are announced', (tester) async {
+      final handle = tester.ensureSemantics();
+      await _pump(
+        tester,
+        CarbonMenuButton(
+          label: 'Project',
+          entries: <CarbonMenuEntry>[
+            CarbonMenuRadioGroup<String>(
+              value: 'a',
+              onChanged: (_) {},
+              options: const <CarbonOption<String>>[
+                CarbonOption(value: 'a', label: 'Alpha', description: 'Running'),
+                CarbonOption(value: 'b', label: 'Bravo'),
+              ],
+            ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('Project'));
+      await _settle(tester);
+      expect(find.text('Running'), findsOneWidget);
+      expect(tester.getSemantics(find.text('Alpha')).hint, 'Running');
+      handle.dispose();
+    });
+  });
 }

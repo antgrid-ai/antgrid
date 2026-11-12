@@ -54,6 +54,19 @@ class _TogglePageState extends State<TogglePage> {
           ],
         ),
         GallerySection(
+          title: 'Label is a target',
+          description:
+              'A tap on the label toggles, and label and switch are one '
+              'accessibility node.',
+          children: [
+            CarbonToggle(
+              value: _live,
+              labelText: 'Tap this label',
+              onChanged: (v) => setState(() => _live = v),
+            ),
+          ],
+        ),
+        GallerySection(
           title: 'States',
           children: [
             GalleryStateGrid(

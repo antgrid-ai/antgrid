@@ -33,8 +33,12 @@ enum CarbonIcons {
   chevronRight,
   /// Carbon `chevron--up`.
   chevronUp,
+  /// Carbon `chat`.
+  chat,
   /// Carbon `circle-dash`.
   circleDash,
+  /// Carbon `code`.
+  code,
   /// Carbon `close`.
   close,
   /// Carbon `copy`.
@@ -49,6 +53,14 @@ enum CarbonIcons {
   errorFilled,
   /// Carbon `filter`.
   filter,
+  /// Carbon `folder`.
+  folder,
+  /// Carbon `folder--add`.
+  folderAdd,
+  /// Carbon `folder--shared`.
+  folderShared,
+  /// Carbon `fork`.
+  fork,
   /// Carbon `idea`.
   idea,
   /// Carbon `in-progress`.
@@ -59,6 +71,8 @@ enum CarbonIcons {
   information,
   /// Carbon `information--filled`.
   informationFilled,
+  /// Carbon `laptop`.
+  laptop,
   /// Carbon `launch`.
   launch,
   /// Carbon `locked`.
@@ -77,14 +91,24 @@ enum CarbonIcons {
   play,
   /// Carbon `renew`.
   renew,
+  /// Carbon `screen`.
+  screen,
   /// Carbon `search`.
   search,
+  /// Carbon `send`.
+  send,
+  /// Carbon `server--dns`.
+  serverDns,
   /// Carbon `settings`.
   settings,
   /// Carbon `star`.
   star,
+  /// Carbon `stop--filled`.
+  stopFilled,
   /// Carbon `subtract`.
   subtract,
+  /// Carbon `terminal`.
+  terminal,
   /// Carbon `trash-can`.
   trashCan,
   /// Carbon `undefined--filled`.
@@ -160,8 +184,14 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.chevronUp: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M16 10 26 20 24.6 21.4 16 12.8 7.4 21.4 6 20z')],
   ),
+  CarbonIcons.chat: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M17.74,30,16,29l4-7h6a2,2,0,0,0,2-2V8a2,2,0,0,0-2-2H6A2,2,0,0,0,4,8V20a2,2,0,0,0,2,2h9v2H6a4,4,0,0,1-4-4V8A4,4,0,0,1,6,4H26a4,4,0,0,1,4,4V20a4,4,0,0,1-4,4H21.16Z'), _CarbonIconPath('M8 10H24V12H8z'), _CarbonIconPath('M8 16H18V18H8z')],
+  ),
   CarbonIcons.circleDash: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M7.7,4.7a14.7,14.7,0,0,0-3,3.1L6.3,9A13.26,13.26,0,0,1,8.9,6.3Z'), _CarbonIconPath('M4.6,12.3l-1.9-.6A12.51,12.51,0,0,0,2,16H4A11.48,11.48,0,0,1,4.6,12.3Z'), _CarbonIconPath('M2.7,20.4a14.4,14.4,0,0,0,2,3.9l1.6-1.2a12.89,12.89,0,0,1-1.7-3.3Z'), _CarbonIconPath('M7.8,27.3a14.4,14.4,0,0,0,3.9,2l.6-1.9A12.89,12.89,0,0,1,9,25.7Z'), _CarbonIconPath('M11.7,2.7l.6,1.9A11.48,11.48,0,0,1,16,4V2A12.51,12.51,0,0,0,11.7,2.7Z'), _CarbonIconPath('M24.2,27.3a15.18,15.18,0,0,0,3.1-3.1L25.7,23A11.53,11.53,0,0,1,23,25.7Z'), _CarbonIconPath('M27.4,19.7l1.9.6A15.47,15.47,0,0,0,30,16H28A11.48,11.48,0,0,1,27.4,19.7Z'), _CarbonIconPath('M29.2,11.6a14.4,14.4,0,0,0-2-3.9L25.6,8.9a12.89,12.89,0,0,1,1.7,3.3Z'), _CarbonIconPath('M24.1,4.6a14.4,14.4,0,0,0-3.9-2l-.6,1.9a12.89,12.89,0,0,1,3.3,1.7Z'), _CarbonIconPath('M20.3,29.3l-.6-1.9A11.48,11.48,0,0,1,16,28v2A21.42,21.42,0,0,0,20.3,29.3Z')],
+  ),
+  CarbonIcons.code: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M31 16 24 23 22.59 21.59 28.17 16 22.59 10.41 24 9 31 16z'), _CarbonIconPath('M1 16 8 9 9.41 10.41 3.83 16 9.41 21.59 8 23 1 16z'), _CarbonIconPath('M5.91 15H26.080000000000002V17H5.91z', rotation: <double>[-75, 15.996, 16])],
   ),
   CarbonIcons.close: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M17.4141 16 24 9.4141 22.5859 8 16 14.5859 9.4143 8 8 9.4141 14.5859 16 8 22.5859 9.4143 24 16 17.4141 22.5859 24 24 22.5859 17.4141 16z')],
@@ -185,6 +215,18 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.filter: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M18,28H14a2,2,0,0,1-2-2V18.41L4.59,11A2,2,0,0,1,4,9.59V6A2,2,0,0,1,6,4H26a2,2,0,0,1,2,2V9.59A2,2,0,0,1,27.41,11L20,18.41V26A2,2,0,0,1,18,28ZM6,6V9.59l8,8V26h4V17.59l8-8V6Z')],
   ),
+  CarbonIcons.folder: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M11.17,6l3.42,3.41.58.59H28V26H4V6h7.17m0-2H4A2,2,0,0,0,2,6V26a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10a2,2,0,0,0-2-2H16L12.59,4.59A2,2,0,0,0,11.17,4Z')],
+  ),
+  CarbonIcons.folderAdd: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26 20 24 20 24 24 20 24 20 26 24 26 24 30 26 30 26 26 30 26 30 24 26 24z'), _CarbonIconPath('M28,8H16l-3.4-3.4C12.2,4.2,11.7,4,11.2,4H4C2.9,4,2,4.9,2,6v20c0,1.1,0.9,2,2,2h14v-2H4V6h7.2l3.4,3.4l0.6,0.6H28v8h2v-8 C30,8.9,29.1,8,28,8z')],
+  ),
+  CarbonIcons.folderShared: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28,8H16L12.59,4.59A2,2,0,0,0,11.17,4H4A2,2,0,0,0,2,6V26a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10A2,2,0,0,0,28,8ZM22,26H14V25a1,1,0,0,1,1-1h6a1,1,0,0,1,1,1Zm6,0H24V25a3,3,0,0,0-3-3H15a3,3,0,0,0-3,3v1H4V6h7.17l3.42,3.41.58.59H28Z'), _CarbonIconPath('M14,17a4,4,0,1,0,4-4A4,4,0,0,0,14,17Zm4-2a2,2,0,1,1-2,2A2,2,0,0,1,18,15Z')],
+  ),
+  CarbonIcons.fork: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('m20,6c0,1.8584,1.2798,3.4106,3,3.8579v5.1421h-14v-5.1421c1.7202-.4473,3-1.9995,3-3.8579,0-2.2056-1.7944-4-4-4s-4,1.7944-4,4c0,1.8584,1.2798,3.4106,3,3.8579v5.1421c0,1.103.897,2,2,2h6v5.1421c-1.7202.4473-3,1.9995-3,3.8579,0,2.2056,1.7944,4,4,4s4-1.7944,4-4c0-1.8584-1.2798-3.4106-3-3.8579v-5.1421h6c1.103,0,2-.897,2-2v-5.1421c1.7202-.4473,3-1.9995,3-3.8579,0-2.2056-1.7944-4-4-4s-4,1.7944-4,4Zm-14,0c0-1.103.897-2,2-2s2,.897,2,2c0,1.103-.897,2-2,2s-2-.897-2-2Zm12,20c0,1.103-.897,2-2,2s-2-.897-2-2c0-1.103.897-2,2-2s2,.897,2,2ZM26,6c0,1.103-.897,2-2,2s-2-.897-2-2c0-1.103.897-2,2-2s2,.897,2,2Z')],
+  ),
   CarbonIcons.idea: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M11 24H21V26H11z'), _CarbonIconPath('M13 28H19V30H13z'), _CarbonIconPath('M16,2A10,10,0,0,0,6,12a9.19,9.19,0,0,0,3.46,7.62c1,.93,1.54,1.46,1.54,2.38h2c0-1.84-1.11-2.87-2.19-3.86A7.2,7.2,0,0,1,8,12a8,8,0,0,1,16,0,7.2,7.2,0,0,1-2.82,6.14c-1.07,1-2.18,2-2.18,3.86h2c0-.92.53-1.45,1.54-2.39A9.18,9.18,0,0,0,26,12,10,10,0,0,0,16,2Z')],
   ),
@@ -200,6 +242,9 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.informationFilled: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M16,2A14,14,0,1,0,30,16,14,14,0,0,0,16,2Zm0,6a1.5,1.5,0,1,1-1.5,1.5A1.5,1.5,0,0,1,16,8Zm4,16.125H12v-2.25h2.875v-5.75H13v-2.25h4.125v8H20Z')],
     inner: <_CarbonIconPath>[_CarbonIconPath('M16,8a1.5,1.5,0,1,1-1.5,1.5A1.5,1.5,0,0,1,16,8Zm4,13.875H17.125v-8H13v2.25h1.875v5.75H12v2.25h8Z')],
+  ),
+  CarbonIcons.laptop: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,24H6a2.0023,2.0023,0,0,1-2-2V8A2.002,2.002,0,0,1,6,6H26a2.0023,2.0023,0,0,1,2,2V22A2.0027,2.0027,0,0,1,26,24ZM6,8V22H26V8Z'), _CarbonIconPath('M2 26.005H30V28.005H2z')],
   ),
   CarbonIcons.launch: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M26,28H6a2.0027,2.0027,0,0,1-2-2V6A2.0027,2.0027,0,0,1,6,4H16V6H6V26H26V16h2V26A2.0027,2.0027,0,0,1,26,28Z'), _CarbonIconPath('M20 2 20 4 26.586 4 18 12.586 19.414 14 28 5.414 28 12 30 12 30 2 20 2z')],
@@ -229,8 +274,17 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.renew: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M12,10H6.78A11,11,0,0,1,27,16h2A13,13,0,0,0,6,7.68V4H4v8h8Z'), _CarbonIconPath('M20,22h5.22A11,11,0,0,1,5,16H3a13,13,0,0,0,23,8.32V28h2V20H20Z')],
   ),
+  CarbonIcons.screen: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28,4H4A2,2,0,0,0,2,6V22a2,2,0,0,0,2,2h8v4H8v2H24V28H20V24h8a2,2,0,0,0,2-2V6A2,2,0,0,0,28,4ZM18,28H14V24h4Zm10-6H4V6H28Z')],
+  ),
   CarbonIcons.search: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M29,27.5859l-7.5521-7.5521a11.0177,11.0177,0,1,0-1.4141,1.4141L27.5859,29ZM4,13a9,9,0,1,1,9,9A9.01,9.01,0,0,1,4,13Z')],
+  ),
+  CarbonIcons.send: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M27.45,15.11l-22-11a1,1,0,0,0-1.08.12,1,1,0,0,0-.33,1L7,16,4,26.74A1,1,0,0,0,5,28a1,1,0,0,0,.45-.11l22-11a1,1,0,0,0,0-1.78Zm-20.9,10L8.76,17H18V15H8.76L6.55,6.89,24.76,16Z')],
+  ),
+  CarbonIcons.serverDns: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16,2a8,8,0,1,0,8,8A8.0092,8.0092,0,0,0,16,2Zm5.91,7H19.4724a15.2457,15.2457,0,0,0-.7917-4.36A6.0088,6.0088,0,0,1,21.91,9ZM16.022,15.999h-.0076c-.3813-.1206-1.3091-1.8213-1.479-4.999h2.9292C17.2952,14.1763,16.3711,15.877,16.022,15.999ZM14.5354,9c.1694-3.1763,1.0935-4.877,1.4426-4.999h.0076c.3813.1206,1.3091,1.8213,1.479,4.999ZM13.3193,4.64A15.2457,15.2457,0,0,0,12.5276,9H10.09A6.0088,6.0088,0,0,1,13.3193,4.64ZM10.09,11h2.4373a15.2457,15.2457,0,0,0,.7917,4.36A6.0088,6.0088,0,0,1,10.09,11Zm8.59,4.36A15.2457,15.2457,0,0,0,19.4724,11H21.91A6.0088,6.0088,0,0,1,18.6807,15.36Z'), _CarbonIconPath('M28,30H4a2.0021,2.0021,0,0,1-2-2V22a2.0021,2.0021,0,0,1,2-2H28a2.0021,2.0021,0,0,1,2,2v6A2.0021,2.0021,0,0,1,28,30ZM4,22v6H28V22Z'), _CarbonIconPath('M6,25a1,1 0 1,0 2,0a1,1 0 1,0 -2,0z')],
   ),
   CarbonIcons.settings: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M27,16.76c0-.25,0-.5,0-.76s0-.51,0-.77l1.92-1.68A2,2,0,0,0,29.3,11L26.94,7a2,2,0,0,0-1.73-1,2,2,0,0,0-.64.1l-2.43.82a11.35,11.35,0,0,0-1.31-.75l-.51-2.52a2,2,0,0,0-2-1.61H13.64a2,2,0,0,0-2,1.61l-.51,2.52a11.48,11.48,0,0,0-1.32.75L7.43,6.06A2,2,0,0,0,6.79,6,2,2,0,0,0,5.06,7L2.7,11a2,2,0,0,0,.41,2.51L5,15.24c0,.25,0,.5,0,.76s0,.51,0,.77L3.11,18.45A2,2,0,0,0,2.7,21L5.06,25a2,2,0,0,0,1.73,1,2,2,0,0,0,.64-.1l2.43-.82a11.35,11.35,0,0,0,1.31.75l.51,2.52a2,2,0,0,0,2,1.61h4.72a2,2,0,0,0,2-1.61l.51-2.52a11.48,11.48,0,0,0,1.32-.75l2.42.82a2,2,0,0,0,.64.1,2,2,0,0,0,1.73-1L29.3,21a2,2,0,0,0-.41-2.51ZM25.21,24l-3.43-1.16a8.86,8.86,0,0,1-2.71,1.57L18.36,28H13.64l-.71-3.55a9.36,9.36,0,0,1-2.7-1.57L6.79,24,4.43,20l2.72-2.4a8.9,8.9,0,0,1,0-3.13L4.43,12,6.79,8l3.43,1.16a8.86,8.86,0,0,1,2.71-1.57L13.64,4h4.72l.71,3.55a9.36,9.36,0,0,1,2.7,1.57L25.21,8,27.57,12l-2.72,2.4a8.9,8.9,0,0,1,0,3.13L27.57,20Z'), _CarbonIconPath('M16,22a6,6,0,1,1,6-6A5.94,5.94,0,0,1,16,22Zm0-10a3.91,3.91,0,0,0-4,4,3.91,3.91,0,0,0,4,4,3.91,3.91,0,0,0,4-4A3.91,3.91,0,0,0,16,12Z')],
@@ -238,8 +292,14 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.star: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M16,6.52l2.76,5.58.46,1,1,.15,6.16.89L22,18.44l-.75.73.18,1,1.05,6.13-5.51-2.89L16,23l-.93.49L9.56,26.34l1-6.13.18-1L10,18.44,5.58,14.09l6.16-.89,1-.15.46-1L16,6.52M16,2l-4.55,9.22L1.28,12.69l7.36,7.18L6.9,30,16,25.22,25.1,30,23.36,19.87l7.36-7.17L20.55,11.22Z')],
   ),
+  CarbonIcons.stopFilled: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16,2A14,14,0,1,0,30,16,14,14,0,0,0,16,2Zm6,18a2,2,0,0,1-2,2H12a2,2,0,0,1-2-2V12a2,2,0,0,1,2-2h8a2,2,0,0,1,2,2Z')],
+  ),
   CarbonIcons.subtract: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M8 15H24V17H8z')],
+  ),
+  CarbonIcons.terminal: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,4H6A2,2,0,0,0,4,6V26a2,2,0,0,0,2,2H26a2,2,0,0,0,2-2V6A2,2,0,0,0,26,4Zm0,2v4H6V6ZM6,26V12H26V26Z'), _CarbonIconPath('M10.76 16.18 13.58 19.01 10.76 21.84 12.17 23.25 16.41 19.01 12.17 14.77 10.76 16.18z')],
   ),
   CarbonIcons.trashCan: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M12 12H14V24H12z'), _CarbonIconPath('M18 12H20V24H18z'), _CarbonIconPath('M4,6V8H6V28a2,2,0,0,0,2,2H24a2,2,0,0,0,2-2V8h2V6ZM8,28V8H24V28Z'), _CarbonIconPath('M12 2H20V4H12z')],

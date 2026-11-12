@@ -293,6 +293,9 @@ class CarbonActionFieldBox extends StatelessWidget {
 /// * Inside a [CarbonForm] the field registers itself, so the form's
 ///   controller can focus the first field showing an error.
 ///
+/// * [bare] renders only the editable text, for a host that draws its own
+///   frame (a composer, a chat prompt). See [bare] for what the host owns.
+///
 /// Changing theme, density, text scale or direction keeps text, selection
 /// and focus: the widget tree shape never depends on them.
 class CarbonTextInput extends StatefulWidget {
@@ -312,6 +315,7 @@ class CarbonTextInput extends StatefulWidget {
     this.readOnly = false,
     this.prefix,
     this.suffix,
+    this.bare = false,
     this.clearable = false,
     this.maxLength,
     this.showCounter = false,
@@ -359,11 +363,27 @@ class CarbonTextInput extends StatefulWidget {
   final bool enabled;
   final bool readOnly;
 
-  /// Shown inside the field before the text.
+  /// Shown inside the field before the text. When [bare], it sits directly
+  /// against the text, so it carries its own end spacing.
   final Widget? prefix;
 
   /// Shown inside the field after the text, before the field actions.
   final Widget? suffix;
+
+  /// Draws only the editable text: no field fill, bottom border, hover state,
+  /// focus outline, label, helper, error or counter. Placeholder, text style,
+  /// cursor, selection and toolbar, and the disabled and read-only colours stay
+  /// Carbon's. [prefix] and [suffix] still show; [clearable] and the
+  /// password variant's reveal action do not.
+  ///
+  /// The host owns the frame, its padding and a visible focus indicator
+  /// (read focus from the [focusNode]); with the outline gone, focus is
+  /// otherwise invisible. The label and error text still name and describe
+  /// the editable to assistive technology, but nothing shows them.
+  ///
+  /// Not in upstream Carbon; the closest is the Fluid text area, which is
+  /// still a filled field.
+  final bool bare;
 
   /// Offers a clear action while the field has text and is editable.
   final bool clearable;
@@ -696,6 +716,31 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
           onPressed: enabled ? _toggleReveal : null,
         ),
     ];
+
+    if (widget.bare) {
+      return CarbonFormFieldRegistrar(
+        invalid: error != null,
+        focusNode: _focus,
+        announcement: error == null
+            ? null
+            : <String>[?labelText, error].join('. '),
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          excludeFromSemantics: true,
+          onTap: enabled ? _focus.requestFocus : null,
+          child: Row(
+            crossAxisAlignment: multiline
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.center,
+            children: <Widget>[
+              ?widget.prefix,
+              Expanded(child: semantic),
+              ?widget.suffix,
+            ],
+          ),
+        ),
+      );
+    }
 
     Widget content = semantic;
     Widget? trailing = widget.suffix;

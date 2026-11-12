@@ -119,6 +119,34 @@ class _TextInputPageState extends State<TextInputPage> {
           ],
         ),
         GallerySection(
+          title: 'Bare',
+          description:
+              'Only the editable text: the host draws the frame and a focus '
+              'indicator.',
+          children: <Widget>[
+            DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(color: CarbonTheme.of(context).colors.borderStrong01),
+              ),
+              child: const Padding(
+                padding: EdgeInsets.all(CarbonSpacing.spacing03),
+                child: CarbonTextInput(
+                  bare: true,
+                  variant: CarbonTextInputVariant.multiline,
+                  semanticLabel: 'Prompt',
+                  placeholder: 'Describe the task',
+                  prefix: Padding(
+                    padding: EdgeInsetsDirectional.only(
+                      end: CarbonSpacing.spacing03,
+                    ),
+                    child: Text('>'),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        GallerySection(
           title: 'States',
           description:
               'Error and warning are text plus an icon, never color alone. '

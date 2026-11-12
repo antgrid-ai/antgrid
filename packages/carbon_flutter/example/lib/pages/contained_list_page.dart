@@ -53,6 +53,8 @@ class _ContainedListPageState extends State<ContainedListPage> {
                   secondary: 'Claude Code, 12 minutes ago',
                   leading: const CarbonIcon(CarbonIcons.checkmarkOutline),
                   onPressed: () => setState(() => _lastAction = 'open fix'),
+                  // Long-press is claimed, so its release does not open.
+                  onLongPress: () => setState(() => _lastAction = 'hold fix'),
                   actions: [_deleteAction('fix')],
                 ),
                 CarbonContainedListRow(

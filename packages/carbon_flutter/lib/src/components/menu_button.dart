@@ -54,6 +54,7 @@ class _MenuTrigger extends StatefulWidget {
     required this.entries,
     required this.builder,
     required this.alignment,
+    this.preferAbove = false,
     this.size,
     this.focusNode,
     this.onDismissed,
@@ -66,6 +67,7 @@ class _MenuTrigger extends StatefulWidget {
   final List<CarbonMenuEntry> entries;
   final _TriggerBuilder builder;
   final CarbonPopupAlignment alignment;
+  final bool preferAbove;
 
   /// The trigger's size; the menu's rows take its height.
   final CarbonButtonSize? size;
@@ -141,6 +143,7 @@ class _MenuTriggerState extends State<_MenuTrigger> {
       controller: _controller,
       entries: widget.entries,
       alignment: widget.alignment,
+      preferAbove: widget.preferAbove,
       rowHeight: size == null
           ? null
           : _buttonHeight(CarbonTheme.of(context), size),
@@ -188,6 +191,7 @@ class CarbonMenuButton extends StatelessWidget {
     this.size,
     this.enabled = true,
     this.alignment = CarbonPopupAlignment.start,
+    this.preferAbove = false,
     this.focusNode,
     this.onDismissed,
     this.onOpenChanged,
@@ -211,6 +215,10 @@ class CarbonMenuButton extends StatelessWidget {
   final CarbonButtonSize? size;
   final bool enabled;
   final CarbonPopupAlignment alignment;
+
+  /// Opens the menu above the trigger when it fits (Carbon's `top` menu
+  /// alignment), for triggers that sit below content the menu must not cover.
+  final bool preferAbove;
 
   /// The trigger's focus node; focus returns to it when the menu closes.
   final FocusNode? focusNode;
@@ -241,6 +249,7 @@ class CarbonMenuButton extends StatelessWidget {
     return _MenuTrigger(
       entries: entries,
       alignment: alignment,
+      preferAbove: preferAbove,
       size: size,
       focusNode: focusNode,
       onDismissed: onDismissed,
@@ -283,6 +292,8 @@ class CarbonOverflowMenu extends StatelessWidget {
     this.enabled = true,
     this.size,
     this.alignment = CarbonPopupAlignment.end,
+    this.preferAbove = false,
+    this.icon,
     this.focusNode,
     this.onDismissed,
     this.onOpenChanged,
@@ -300,6 +311,12 @@ class CarbonOverflowMenu extends StatelessWidget {
   /// The menu's edge that lines up with the trigger; the end by default so a
   /// trigger at the edge of a row or panel keeps the menu on screen.
   final CarbonPopupAlignment alignment;
+
+  /// Opens the menu above the trigger when it fits.
+  final bool preferAbove;
+
+  /// Replaces the dots (Carbon's `renderIcon`); [horizontal] is then ignored.
+  final Widget? icon;
   final FocusNode? focusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
 
@@ -321,6 +338,7 @@ class CarbonOverflowMenu extends StatelessWidget {
     return _MenuTrigger(
       entries: entries,
       alignment: alignment,
+      preferAbove: preferAbove,
       size: size,
       focusNode: focusNode,
       onDismissed: onDismissed,
@@ -349,11 +367,13 @@ class CarbonOverflowMenu extends StatelessWidget {
                   )
                 : const BoxDecoration(),
             child: CarbonButton.iconOnly(
-              icon: CarbonIcon(
-                horizontal
-                    ? CarbonIcons.overflowMenuHorizontal
-                    : CarbonIcons.overflowMenuVertical,
-              ),
+              icon:
+                  icon ??
+                  CarbonIcon(
+                    horizontal
+                        ? CarbonIcons.overflowMenuHorizontal
+                        : CarbonIcons.overflowMenuVertical,
+                  ),
               semanticLabel: name,
               size: size,
               focusNode: node,

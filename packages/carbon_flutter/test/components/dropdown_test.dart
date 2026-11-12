@@ -832,4 +832,79 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('CarbonComboBox list placement and naming', () {
+    Future<void> pumpCombo(
+      WidgetTester tester, {
+      double width = 120,
+      double? min,
+      double? max,
+      bool above = false,
+      Alignment align = Alignment.topLeft,
+    }) => pumpCarbon(
+      tester,
+      Align(
+        alignment: align,
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: SizedBox(
+            width: width,
+            child: CarbonComboBox<String>(
+              key: _dd,
+              semanticLabel: 'Branch',
+              options: _options,
+              value: null,
+              onChanged: (_) {},
+              listMinWidth: min,
+              listMaxWidth: max,
+              preferAbove: above,
+            ),
+          ),
+        ),
+      ),
+      size: const Size(800, 600),
+    );
+
+    testWidgets('listMinWidth lifts the list above a narrow field', (
+      tester,
+    ) async {
+      await pumpCombo(tester, min: 288, max: 480);
+      await tester.tap(_input);
+      await _settle(tester);
+      expect(tester.getSize(_list).width, 288);
+    });
+
+    testWidgets('listMaxWidth caps the list below a wide field', (
+      tester,
+    ) async {
+      await pumpCombo(tester, width: 600, min: 288, max: 480);
+      await tester.tap(_input);
+      await _settle(tester);
+      expect(tester.getSize(_list).width, 480);
+    });
+
+    testWidgets('the list matches the field without bounds', (tester) async {
+      await pumpCombo(tester);
+      await tester.tap(_input);
+      await _settle(tester);
+      expect(tester.getSize(_list).width, 120);
+    });
+
+    testWidgets('preferAbove opens the list above the field', (tester) async {
+      await pumpCombo(tester, above: true, align: Alignment.bottomLeft);
+      await tester.tap(_input);
+      await _settle(tester);
+      expect(
+        tester.getRect(_list).bottom,
+        lessThanOrEqualTo(tester.getRect(find.byKey(_dd)).top),
+      );
+    });
+
+    testWidgets('semanticLabel names a field with no label', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCombo(tester);
+      expect(find.bySemanticsLabel(RegExp('Branch')), findsWidgets);
+      handle.dispose();
+    });
+  });
 }

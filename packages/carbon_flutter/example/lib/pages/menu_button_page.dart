@@ -110,6 +110,15 @@ class _MenuButtonPageState extends State<MenuButtonPage> {
                   ),
                 ),
                 GalleryStateCell(
+                  'custom icon, opens above',
+                  CarbonOverflowMenu(
+                    icon: const CarbonIcon(CarbonIcons.terminal),
+                    semanticLabel: 'Mode',
+                    preferAbove: true,
+                    entries: _entries(_report),
+                  ),
+                ),
+                GalleryStateCell(
                   'disabled',
                   CarbonOverflowMenu(
                     enabled: false,

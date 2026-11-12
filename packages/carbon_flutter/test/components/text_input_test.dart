@@ -23,6 +23,76 @@ EditableText _editableWidget(WidgetTester tester) =>
     tester.widget<EditableText>(_editable);
 
 void main() {
+  group('bare', () {
+    testWidgets('draws no field box, label or counter; keeps editing', (
+      tester,
+    ) async {
+      final controller = TextEditingController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        _host(
+          CarbonTextInput(
+            key: _input,
+            controller: controller,
+            bare: true,
+            variant: CarbonTextInputVariant.multiline,
+            label: 'Prompt',
+            helperText: 'Helper',
+            maxLength: 20,
+            showCounter: true,
+            clearable: true,
+            placeholder: 'Type here',
+            prefix: const Text('>'),
+          ),
+        ),
+      );
+      expect(_box, findsNothing);
+      expect(find.byType(CarbonFieldFrame), findsNothing);
+      expect(find.text('Prompt'), findsNothing);
+      expect(find.text('Helper'), findsNothing);
+      expect(find.text('0/20'), findsNothing);
+      expect(find.text('Type here'), findsOneWidget);
+      expect(find.text('>'), findsOneWidget);
+
+      await tester.enterText(_editable, 'hello');
+      await tester.pump();
+      expect(controller.text, 'hello');
+      expect(_action('Clear'), findsNothing);
+    });
+
+    testWidgets('a tap anywhere on the row, prefix included, focuses', (
+      tester,
+    ) async {
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await pumpCarbon(
+        tester,
+        _host(
+          CarbonTextInput(
+            bare: true,
+            focusNode: node,
+            semanticLabel: 'Prompt',
+            prefix: const SizedBox(width: 24, height: 24),
+          ),
+        ),
+      );
+      await tester.tapAt(tester.getTopLeft(find.byType(CarbonTextInput)) + const Offset(4, 4));
+      await tester.pump();
+      expect(node.hasFocus, isTrue);
+    });
+
+    testWidgets('names the editable for assistive technology', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _host(const CarbonTextInput(bare: true, label: 'Prompt')),
+      );
+      expect(find.bySemanticsLabel('Prompt'), findsOneWidget);
+      handle.dispose();
+    });
+  });
+
   group('sizing', () {
     testWidgets('autocorrect and suggestions can be turned off; password '
         'never has them', (tester) async {

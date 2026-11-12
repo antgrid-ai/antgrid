@@ -18,6 +18,9 @@ import 'loading.dart';
 /// successful. While the host is persisting, set [busy] to show a spinner in
 /// the handle and block further activation; focus stays on the control.
 ///
+/// The label is part of the tap target, as upstream's `<label htmlFor>` is:
+/// a tap on it toggles, and it shares one semantics node with the switch.
+///
 /// The state is never color alone: the handle position, a visible "On"/"Off"
 /// word beside the switch (unless [hideStateText]) and the toggled semantics
 /// flag all carry it.
@@ -45,7 +48,8 @@ class CarbonToggle extends StatelessWidget {
   /// Requests the opposite value; null disables the toggle.
   final ValueChanged<bool>? onChanged;
 
-  /// A custom label shown above the switch.
+  /// A custom label shown above the switch. With no [labelText] or
+  /// [semanticLabel] it is also the accessible name.
   final Widget? label;
 
   /// A plain text label shown above the switch; also the accessible name.
@@ -109,7 +113,7 @@ class CarbonToggle extends StatelessWidget {
                 )
               : null);
 
-    final control = CarbonInteraction(
+    final row = CarbonInteraction(
       onPressed: enabled
           ? (inert ? _ignore : () => onChanged!(!value))
           : null,
@@ -119,7 +123,9 @@ class CarbonToggle extends StatelessWidget {
       label: name,
       value: busy ? loc.loading : null,
       toggled: value,
-      excludeChildSemantics: true,
+      // A custom label that is the only name must stay in the node; any
+      // other label would be read twice.
+      excludeChildSemantics: name != null || label == null,
       mouseCursor: inert ? SystemMouseCursors.basic : null,
       builder: (context, state, _) {
         final track = _ToggleTrack(
@@ -129,65 +135,63 @@ class CarbonToggle extends StatelessWidget {
           readOnly: readOnly,
           busy: busy,
         );
-        return ConstrainedBox(
-          constraints: BoxConstraints(
-            minWidth: theme.minTarget,
-            minHeight: theme.minTarget,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              CarbonFocusRing(
-                // :active draws the outline under pointer use too
-                // (toggle.scss:84).
-                visible: state.focusVisible || state.pressed,
-                borderRadius: BorderRadius.all(
-                  small ? const Radius.circular(8) : CarbonShape.toggle,
-                ),
-                child: track,
-              ),
-              if (!hideStateText) ...[
-                const SizedBox(width: CarbonSpacing.spacing03),
-                Flexible(
-                  child: Text(
-                    stateWord,
-                    style: theme.typography.control.copyWith(
-                      color: enabled ? colors.textPrimary : colors.textDisabled,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-
-    final target = Semantics(readOnly: readOnly ? true : null, child: control);
-    // A custom label widget is the only name the switch has unless the host
-    // gave a text or semantic label, so it joins the switch's node then.
-    final labelNamesSwitch = label != null && name == null;
-    // One Column shape whether or not a label is shown keeps the control's
-    // focus node and state across a label appearing.
-    return MergeSemantics(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (labelWidget != null)
-            ExcludeSemantics(
-              excluding: !labelNamesSwitch,
-              child: Padding(
+        // One Column shape whether or not a label is shown keeps the
+        // control's focus node and state across a label appearing.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (labelWidget != null)
+              Padding(
                 padding: EdgeInsetsDirectional.only(
                   bottom: _labelGap(theme),
                 ),
                 child: labelWidget,
               ),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                minWidth: theme.minTarget,
+                minHeight: theme.minTarget,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  CarbonFocusRing(
+                    // :active draws the outline under pointer use too
+                    // (toggle.scss:84).
+                    visible: state.focusVisible || state.pressed,
+                    borderRadius: BorderRadius.all(
+                      small ? const Radius.circular(8) : CarbonShape.toggle,
+                    ),
+                    child: track,
+                  ),
+                  if (!hideStateText) ...[
+                    const SizedBox(width: CarbonSpacing.spacing03),
+                    Flexible(
+                      // The state is already the toggled flag.
+                      child: ExcludeSemantics(
+                        child: Text(
+                          stateWord,
+                          style: theme.typography.control.copyWith(
+                            color: enabled
+                                ? colors.textPrimary
+                                : colors.textDisabled,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
-          target,
-        ],
-      ),
+          ],
+        );
+      },
+    );
+
+    return MergeSemantics(
+      child: Semantics(readOnly: readOnly ? true : null, child: row),
     );
   }
 }
