@@ -2,18 +2,13 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/ab_tokens.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
-import 'package:antgrid/design/widgets/ab_inline_banner.dart';
-
-import 'package:antgrid/design/widgets/ab_segmented.dart';
-
-import 'package:antgrid/design/widgets/ab_tooltip.dart';
+import 'package:antgrid/design/widgets/ab_agent_mark.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
+import 'package:antgrid/models/scheduler.dart' show ScheduleRun;
 import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -23,14 +18,17 @@ import 'package:antgrid/providers/scheduler_timezone.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/services/auth_service.dart';
+import 'package:antgrid/widgets/carbon_machine_selector.dart';
 import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_lanes.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_run_squares.dart';
+import 'package:antgrid/widgets/scheduler/scheduler_status_glyph.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -283,12 +281,74 @@ Future<void> pumpScreen(
   await tester.pumpAndSettle();
 }
 
-/// Scoped to the editor's content switchers, which do not upper-case labels
-/// the way the screen's AbSegmented does.
+/// Scoped to the editor's content switchers, so the screen's own Schedules and
+/// Runs switcher never answers.
 Finder seg(String label) => find.descendant(
   of: find.byType(CarbonContentSwitcher<String>),
   matching: find.text(label),
 );
+
+/// The screen's Schedules / Runs switcher option named [label].
+Finder tab(String label) => find.descendant(
+  of: find.byType(CarbonContentSwitcher<bool>),
+  matching: find.text(label),
+);
+
+/// The machine selector's trigger while it shows [name].
+Finder machineButton(String name) => find.descendant(
+  of: find.byType(CarbonMachineSelector),
+  matching: find.widgetWithText(CarbonButton, name),
+);
+
+/// A schedule row's overflow menu; any row's when [name] is null.
+Finder rowActions([String? name]) => find.byWidgetPredicate(
+  (w) =>
+      w is CarbonOverflowMenu &&
+      (name == null
+          ? (w.semanticLabel?.startsWith('Actions for ') ?? false)
+          : w.semanticLabel == 'Actions for $name'),
+);
+
+Finder newScheduleIcon() => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'New schedule',
+);
+
+/// Names of the `Ab*` widgets under the screen's Carbon scope, skipping the
+/// agent mark: its logo is content imagery and builds Ab widgets of its own.
+/// The pattern keeps framework widgets such as AbsorbPointer out.
+List<String> abWidgetsInScreen(WidgetTester tester) {
+  final found = <String>[];
+  void visit(Element element) {
+    final widget = element.widget;
+    if (widget is AbAgentMark) return;
+    final name = widget.runtimeType.toString();
+    if (RegExp(r'^Ab[A-Z]').hasMatch(name)) found.add(name);
+    element.visitChildren(visit);
+  }
+
+  tester
+      .element(
+        find.descendant(
+          of: find.byType(SchedulerScreen),
+          matching: find.byType(AbCarbonScope),
+        ),
+      )
+      .visitChildren(visit);
+  return found;
+}
+
+/// The semantics node of a table row; the key sits on a wrapper that has none.
+SemanticsNode tableRowSemantics(WidgetTester tester, Finder row) =>
+    tester.getSemantics(
+      find
+          .descendant(
+            of: row,
+            matching: find.byWidgetPredicate(
+              (w) => w is Semantics && w.properties.role == SemanticsRole.row,
+            ),
+          )
+          .first,
+    );
 
 /// Chooses [text] in the CarbonSelect named [label].
 Future<void> pickSelect(WidgetTester tester, String label, String text) async {
@@ -325,7 +385,7 @@ Finder get promptField => find.byWidgetPredicate(
 
 Future<void> pickMachine(WidgetTester tester, String target) async {
   final current = target == 'Laptop' ? 'Local machine' : 'Laptop';
-  await tester.tap(find.widgetWithText(AbButton, current));
+  await tester.tap(machineButton(current));
   await tester.pumpAndSettle();
   await tester.tap(find.text(target).last);
   await tester.pumpAndSettle();
@@ -353,12 +413,8 @@ void schedulerTestWidgets(String description, WidgetTesterCallback callback) {
 }
 
 Future<void> editSchedule(WidgetTester tester) async {
-  final actions = find.byWidgetPredicate(
-    (w) =>
-        w is AbIconButton && (w.tooltip?.startsWith('Actions for ') ?? false),
-  );
+  final actions = rowActions();
   if (actions.evaluate().isEmpty) {
-    // Phone rows open the editor on tap; there is no kebab.
     await tester.tap(
       find
           .byWidgetPredicate(
@@ -373,9 +429,7 @@ Future<void> editSchedule(WidgetTester tester) async {
     await tester.pumpAndSettle();
     return;
   }
-  final review = find.byWidgetPredicate(
-    (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
-  );
+  final review = rowActions('Daily review');
   await tester.tap(review.evaluate().isNotEmpty ? review : actions.first);
   await tester.pumpAndSettle();
   await tester.tap(find.text('Edit'));
@@ -431,7 +485,7 @@ void main() {
       // Past the 5s poll, which must not ask either.
       await tester.pump(const Duration(seconds: 6));
       expect(find.text('Connect a machine to schedule tasks'), findsOneWidget);
-      expect(find.byType(AbInlineBanner), findsNothing);
+      expect(find.byType(CarbonNotification), findsNothing);
       expect(find.textContaining('offline'), findsNothing);
       expect(host.calls, isEmpty);
     },
@@ -502,9 +556,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SCHEDULES'));
+      await tester.tap(tab('Schedules'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('New schedule'));
       await tester.pumpAndSettle();
@@ -660,13 +714,22 @@ void main() {
         ),
         findsOneWidget,
       );
-      final card = tester.widget<Container>(
-        find.byKey(const ValueKey('scheduler-run-manual')),
+      final focused = find.byKey(const ValueKey('scheduler-run-manual'));
+      final handle = tester.ensureSemantics();
+      await tester.pump();
+      expect(
+        tableRowSemantics(tester, focused).flagsCollection.isSelected,
+        ui.Tristate.isTrue,
       );
-      final context = tester.element(
-        find.byKey(const ValueKey('scheduler-run-manual')),
+      handle.dispose();
+      final context = tester.element(focused);
+      final fill = tester.widget<DecoratedBox>(
+        find.descendant(of: focused, matching: find.byType(DecoratedBox)).first,
       );
-      expect(card.color, context.antgrid.bgSelected);
+      expect(
+        (fill.decoration as BoxDecoration).color,
+        CarbonTheme.of(context).layerSelected(CarbonLayer.of(context)),
+      );
       host.history!.complete({'runs': []});
       await tester.pumpAndSettle();
       expect(
@@ -719,7 +782,7 @@ void main() {
           ),
         ];
       await pumpScreen(tester, containerFor(host));
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
       expect(find.text('Completed'), findsOneWidget);
       expect(find.text('Times in Asia/Kolkata'), findsOneWidget);
@@ -755,9 +818,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SCHEDULES'));
+      await tester.tap(tab('Schedules'));
       await tester.pumpAndSettle();
       await editSchedule(tester);
       expect(
@@ -899,11 +962,7 @@ void main() {
       await tester.tap(find.text('Discard draft'));
       await tester.pumpAndSettle();
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      await tester.tap(
-        find.byWidgetPredicate(
-          (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
-        ),
-      );
+      await tester.tap(rowActions('Daily review'));
       await tester.pumpAndSettle();
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
@@ -958,9 +1017,9 @@ void main() {
       expect(saveButton(tester).onPressed, isNull);
       await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SCHEDULES'));
+      await tester.tap(tab('Schedules'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Open retained draft'));
       await tester.pumpAndSettle();
@@ -1151,7 +1210,8 @@ void main() {
   schedulerTestWidgets(
     'missed records show the count, interval and no duration; catch-up runs are labelled',
     (tester) async {
-      sizeView(tester);
+      // Tall enough that every opened row stays built in the lazy list.
+      sizeView(tester, const Size(1200, 2400));
       final host = Host()
         ..schedules = []
         ..runs = [
@@ -1178,7 +1238,7 @@ void main() {
           },
         ];
       await pumpScreen(tester, containerFor(host));
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
       for (final id in ['gap', 'old', 'single']) {
         expect(
@@ -1207,9 +1267,15 @@ void main() {
       // Missed records never ran, so no row carries a duration; the one
       // completed catch-up run has none recorded either.
       expect(find.text('—'), findsNWidgets(4));
-      for (final tap in find.text('Details').evaluate().toList()) {
-        await tester.ensureVisible(find.byElementPredicate((e) => e == tap));
-        await tester.tap(find.byElementPredicate((e) => e == tap));
+      // Found through each row: the list builds lazily, so after a scroll a
+      // positional index names a different row.
+      for (final id in ['gap', 'old', 'late', 'single']) {
+        final toggle = find.descendant(
+          of: find.byKey(ValueKey('scheduler-run-$id')),
+          matching: find.text('Details'),
+        );
+        await tester.ensureVisible(toggle);
+        await tester.tap(toggle);
         await tester.pumpAndSettle();
       }
       expect(find.text('Missed while paused'), findsOneWidget);
@@ -1354,7 +1420,7 @@ void main() {
       });
       host.history = null;
       await tester.pumpAndSettle();
-      expect(find.widgetWithText(AbButton, 'Laptop'), findsOneWidget);
+      expect(machineButton('Laptop'), findsOneWidget);
       expect(find.textContaining('Needs input'), findsNothing);
       expect(find.text('Local machine'), findsNothing);
       expect(tester.takeException(), isNull);
@@ -1371,34 +1437,28 @@ void main() {
       final container = containerFor(host);
       await pumpScreen(tester, container, scale: 1.5);
       expect(
-        tester.getSize(find.widgetWithText(AbButton, 'Local machine')).height,
+        tester.getSize(machineButton('Local machine')).height,
         greaterThanOrEqualTo(44),
       );
       expect(
-        tester
-            .getSize(
-              find.byWidgetPredicate(
-                (w) => w is AbIconButton && w.tooltip == 'New schedule',
-              ),
-            )
-            .height,
+        tester.getSize(newScheduleIcon()).height,
         greaterThanOrEqualTo(44),
       );
-      final tabs = find.descendant(
-        of: find.byType(AbSegmented<bool>),
-        matching: find.byType(GestureDetector),
+      expect(
+        tester.getSize(find.byType(CarbonContentSwitcher<bool>)).height,
+        greaterThanOrEqualTo(AbTokens.tapTargetMin),
       );
-      for (final tab in tabs.evaluate()) {
+      for (final label in ['Schedules', 'Runs']) {
+        final option = find
+            .ancestor(of: tab(label), matching: find.byType(GestureDetector))
+            .first;
         expect(
-          tester.getSize(find.byElementPredicate((e) => e == tab)).height,
+          tester.getSize(option).height,
           greaterThanOrEqualTo(AbTokens.tapTargetMin),
+          reason: label,
         );
       }
-      await tester.tap(
-        find.byWidgetPredicate(
-          (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
-        ),
-      );
+      await tester.tap(rowActions('Daily review'));
       await tester.pumpAndSettle();
       final menuRow = find
           .ancestor(of: find.text('Edit'), matching: find.byType(GestureDetector))
@@ -1493,7 +1553,7 @@ void main() {
       ];
       expect(ys, [...ys]..sort());
       expect(ys.toSet(), hasLength(6));
-      final dots = find.descendant(of: strip, matching: find.byType(AbTooltip));
+      final dots = find.descendant(of: strip, matching: find.byType(CarbonTooltip));
       expect(dots, findsNWidgets(18));
       final box = tester.getRect(strip);
       for (final dot in dots.evaluate()) {
@@ -1535,7 +1595,7 @@ void main() {
       find.descendant(of: strip, matching: find.text('Lane 1')),
       findsNothing,
     );
-    expect(find.text('PAUSED AND FINISHED'), findsOneWidget);
+    expect(find.text('Paused and finished (1)'), findsOneWidget);
   });
 
   schedulerTestWidgets(
@@ -1579,7 +1639,7 @@ void main() {
       expect(squares, findsOneWidget, reason: 'only one schedule has runs');
       final cells = find.descendant(
         of: squares,
-        matching: find.byType(AbTooltip),
+        matching: find.byType(CarbonTooltip),
       );
       expect(cells, findsNWidgets(10));
       for (final cell in cells.evaluate()) {
@@ -1593,7 +1653,7 @@ void main() {
   );
 
   schedulerTestWidgets(
-    'run squares drop the oldest runs instead of overflowing a narrow table',
+    'the narrowest table keeps the full run history without overflowing',
     (tester) async {
       sizeView(tester, const Size(900, 900));
       final now = nowMs();
@@ -1611,11 +1671,40 @@ void main() {
       expect(tester.takeException(), isNull);
       final cells = find.descendant(
         of: find.byType(SchedulerRunSquares),
-        matching: find.byType(AbTooltip),
+        matching: find.byType(CarbonTooltip),
       );
-      expect(cells.evaluate().length, inInclusiveRange(1, 9));
+      expect(cells, findsNWidgets(10));
     },
   );
+
+  testWidgets('run squares drop the oldest runs instead of overflowing a '
+      'narrow cell', (tester) async {
+    final runs = [
+      for (var i = 0; i < 10; i++)
+        ScheduleRun.fromJson({
+          ...runRecord('n$i', i == 9 ? 'failed' : 'completed', at: i * hour),
+          'trigger': 'cron',
+          'finishedAt': i * hour + 100000,
+        }),
+    ];
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(width: 60, child: SchedulerRunSquares(runs: runs)),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    final cells = find.byType(CarbonTooltip);
+    expect(cells.evaluate().length, inInclusiveRange(1, 9));
+    expect(
+      tester.widget<CarbonTooltip>(cells.last).message,
+      'Failed',
+      reason: 'the newest run is the one kept',
+    );
+  });
 
   schedulerTestWidgets('a waiting run says how long it has been waiting', (
     tester,
@@ -1633,7 +1722,7 @@ void main() {
     await pumpScreen(tester, containerFor(host));
     expect(find.text('Needs input · waiting 6m'), findsOneWidget);
     expect(find.text('Open session'), findsOneWidget);
-    await tester.tap(find.text('RUNS'));
+    await tester.tap(tab('Runs'));
     await tester.pumpAndSettle();
     expect(find.text('waiting 6m'), findsOneWidget);
   });
@@ -1658,7 +1747,7 @@ void main() {
         runRecord('fine', 'completed', at: now - 5 * hour),
       ];
     await pumpScreen(tester, containerFor(host));
-    await tester.tap(find.text('RUNS'));
+    await tester.tap(tab('Runs'));
     await tester.pumpAndSettle();
     Finder chipFor(String name) =>
         find.byKey(ValueKey('scheduler-runs-filter-$name'));
@@ -1698,18 +1787,18 @@ void main() {
           runRecord('c', 'failed', at: twoDays - 1000),
         ];
       await pumpScreen(tester, containerFor(host));
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
       DateTime at(int ms) =>
           DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
       final todayHeader = schedulerDayHeader(at(today), 'Asia/Kolkata', now);
       final olderHeader = schedulerDayHeader(at(twoDays), 'Asia/Kolkata', now);
       expect(todayHeader, startsWith('Today'));
-      expect(find.text(todayHeader.toUpperCase()), findsOneWidget);
-      expect(find.text(olderHeader.toUpperCase()), findsOneWidget);
+      expect(find.text(todayHeader), findsOneWidget);
+      expect(find.text(olderHeader), findsOneWidget);
       expect(
-        tester.getTopLeft(find.text(todayHeader.toUpperCase())).dy,
-        lessThan(tester.getTopLeft(find.text(olderHeader.toUpperCase())).dy),
+        tester.getTopLeft(find.text(todayHeader)).dy,
+        lessThan(tester.getTopLeft(find.text(olderHeader)).dy),
       );
       double rowTop(String id) =>
           tester.getTopLeft(find.byKey(ValueKey('scheduler-run-$id'))).dy;
@@ -1768,6 +1857,304 @@ void main() {
     },
   );
 
+  Host richHost() {
+    final base = nowMs();
+    return Host()
+      ..schedules = [
+        {
+          ...settings,
+          'nextOccurrence': base + hour ~/ 2,
+          'upcoming': [base + hour ~/ 2, base + 5 * hour],
+        },
+        {...settings, 'id': 'notes', 'name': 'Release notes', 'enabled': false},
+      ]
+      ..runs = [
+        runRecord(
+          'wait',
+          'needs-input',
+          at: base - 6 * 60000 - 5000,
+          session: 'session',
+          reason: 'Permission required',
+        ),
+        {
+          ...runRecord('done', 'completed', at: base - 3 * hour),
+          'trigger': 'cron',
+          'finishedAt': base - 3 * hour + 100000,
+        },
+        runRecord('bad', 'failed', at: base - 4 * hour),
+        {
+          ...runRecord('gap', 'skipped', at: base - 5 * hour),
+          'trigger': 'missed',
+          'missedCount': 2,
+        },
+      ];
+  }
+
+  schedulerTestWidgets(
+    'the desktop screen is one Carbon scope with no Ab control inside it',
+    (tester) async {
+      sizeView(tester);
+      await pumpScreen(tester, containerFor(richHost()));
+      expect(find.byType(AbCarbonScope), findsOneWidget);
+      expect(find.byType(CarbonDataTable), findsNWidgets(2));
+      expect(abWidgetsInScreen(tester), isEmpty, reason: 'Schedules tab');
+      await tester.tap(tab('Runs'));
+      await tester.pumpAndSettle();
+      expect(find.byType(CarbonDataTable), findsWidgets);
+      expect(abWidgetsInScreen(tester), isEmpty, reason: 'Runs tab');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  schedulerTestWidgets(
+    'the phone screen is one Carbon scope with no Ab control inside it',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(400, 850));
+      await pumpScreen(tester, containerFor(richHost()));
+      expect(find.byType(AbCarbonScope), findsOneWidget);
+      expect(find.byType(CarbonContainedList), findsWidgets);
+      expect(abWidgetsInScreen(tester), isEmpty, reason: 'Schedules tab');
+      await tester.tap(tab('Runs'));
+      await tester.pumpAndSettle();
+      expect(find.byType(CarbonContainedList), findsWidgets);
+      expect(abWidgetsInScreen(tester), isEmpty, reason: 'Runs tab');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  schedulerTestWidgets(
+    'a needs-input row shows a warning glyph, its wait and a primary Open session without a tint',
+    (tester) async {
+      sizeView(tester);
+      await pumpScreen(tester, containerFor(richHost()));
+      final row = find.byKey(const ValueKey('scheduler-schedule-review'));
+      expect(row, findsOneWidget);
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.byWidgetPredicate(
+            (w) => w is CarbonStatusIcon && w.kind == CarbonStatusKind.warning,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final context = tester.element(row);
+      final theme = CarbonTheme.of(context);
+      final line = tester.widget<Text>(
+        find.descendant(
+          of: row,
+          matching: find.text('Needs input · waiting 6m'),
+        ),
+      );
+      expect(line.style!.color, schedulerAttentionTextColor(theme));
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is CarbonButton &&
+                w.label == 'Open session' &&
+                w.kind == CarbonButtonKind.primary,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final fill = tester.widget<DecoratedBox>(
+        find.descendant(of: row, matching: find.byType(DecoratedBox)).first,
+      );
+      expect(
+        (fill.decoration as BoxDecoration).color,
+        theme.layer(CarbonLayer.of(context)),
+        reason: 'attention is carried by the glyph and the button, not a tint',
+      );
+      // A resting schedule has no warning to carry.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('scheduler-schedule-notes')),
+          matching: find.byType(CarbonStatusIcon),
+        ),
+        findsNothing,
+      );
+    },
+  );
+
+  schedulerTestWidgets('the phone attention card offers a primary Open session', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    sizeView(tester, const Size(400, 850));
+    await pumpScreen(tester, containerFor(richHost()));
+    expect(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonButton &&
+            w.label == 'Open session' &&
+            w.kind == CarbonButtonKind.primary &&
+            w.onPressed != null,
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Needs input · waiting 6m'), findsOneWidget);
+  });
+
+  schedulerTestWidgets('a phone row opens the editor on tap', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    sizeView(tester, const Size(400, 850));
+    await pumpScreen(tester, containerFor(Host()));
+    await tester.tap(find.byKey(const ValueKey('scheduler-schedule-review')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ScheduleEditor), findsOneWidget);
+  });
+
+  schedulerTestWidgets('the machine menu switches the machine the screen shows', (
+    tester,
+  ) async {
+    sizeView(tester);
+    final container = containerFor(Host(), remote: Host()..schedules = []);
+    await pumpScreen(tester, container);
+    expect(machineButton('Local machine'), findsOneWidget);
+    expect(find.text('Daily review'), findsOneWidget);
+    await tester.tap(machineButton('Local machine'));
+    await tester.pumpAndSettle();
+    // The open menu lists both machines as radio options.
+    expect(find.text('Laptop'), findsOneWidget);
+    await tester.tap(find.text('Laptop'));
+    await tester.pumpAndSettle();
+    expect(container.read(schedulerTargetProvider), 'remote');
+    expect(machineButton('Laptop'), findsOneWidget);
+    expect(find.text('Daily review'), findsNothing);
+    expect(find.text('No schedules'), findsOneWidget);
+    await pickMachine(tester, 'Local machine');
+    expect(container.read(schedulerTargetProvider), isNull);
+    expect(find.text('Daily review'), findsOneWidget);
+  });
+
+  for (final runsTab in [false, true]) {
+    schedulerTestWidgets(
+      'the wheel scrolls the ${runsTab ? 'Runs' : 'Schedules'} pane from its side gutter',
+      (tester) async {
+        sizeView(tester, const Size(1000, 450));
+        final base = nowMs();
+        final host = Host()
+          ..schedules = [
+            for (var i = 0; i < 12; i++)
+              {...settings, 'id': 's$i', 'name': 'Schedule $i'},
+          ]
+          ..runs = [
+            for (var i = 0; i < 14; i++)
+              {
+                ...runRecord('r$i', 'completed', at: base - (i + 1) * hour),
+                'trigger': 'cron',
+                'finishedAt': base - (i + 1) * hour + 100000,
+              },
+          ];
+        await pumpScreen(tester, containerFor(host));
+        if (runsTab) {
+          await tester.tap(tab('Runs'));
+          await tester.pumpAndSettle();
+        }
+        final pane = find.byType(ListView).first;
+        final position = tester
+            .state<ScrollableState>(
+              find.descendant(of: pane, matching: find.byType(Scrollable)).first,
+            )
+            .position;
+        expect(position.maxScrollExtent, greaterThan(0));
+        final rect = tester.getRect(pane);
+        expect(rect.width, 1000, reason: 'the scroll view spans the pane');
+        final pointer = TestPointer(1, PointerDeviceKind.mouse);
+        await tester.sendEventToBinding(
+          pointer.hover(Offset(rect.right - 4, rect.center.dy)),
+        );
+        await tester.sendEventToBinding(pointer.scroll(const Offset(0, 200)));
+        await tester.pump();
+        expect(position.pixels, greaterThan(0));
+      },
+    );
+  }
+
+  for (final tabName in ['Schedules', 'Runs']) {
+    schedulerTestWidgets(
+      'a 320 wide phone at double text size has no overflow on $tabName',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        sizeView(tester, const Size(320, 700));
+        await pumpScreen(tester, containerFor(richHost()), scale: 2);
+        expect(tester.takeException(), isNull, reason: 'Schedules tab');
+        if (tabName == 'Runs') {
+          await tester.tap(tab('Runs'));
+          await tester.pumpAndSettle();
+        }
+        expect(tester.takeException(), isNull, reason: '$tabName tab');
+      },
+    );
+  }
+
+  schedulerTestWidgets(
+    'the narrowest desktop width fits the needs-input and running rows',
+    (tester) async {
+      sizeView(tester, const Size(840, 900));
+      final base = nowMs();
+      final host = richHost();
+      host.runs = [
+        ...host.runs,
+        {
+          ...runRecord(
+            'live',
+            'running',
+            at: base - 2 * 60000,
+            session: 'live-session',
+          ),
+          'scheduleId': 'notes',
+          'scheduleName': 'Release notes',
+        },
+      ];
+      await pumpScreen(tester, containerFor(host));
+      expect(tester.takeException(), isNull, reason: 'Schedules tab');
+      await tester.tap(tab('Runs'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'Runs tab');
+      expect(find.text('Open session'), findsWidgets);
+    },
+  );
+
+  schedulerTestWidgets('the Runs Details toggle announces its expanded state', (
+    tester,
+  ) async {
+    sizeView(tester);
+    final handle = tester.ensureSemantics();
+    final host = Host()
+      ..runs = [
+        {
+          ...runRecord('late', 'completed', at: nowMs() - hour),
+          'trigger': 'catch-up',
+        },
+      ];
+    await pumpScreen(tester, containerFor(host));
+    await tester.tap(tab('Runs'));
+    await tester.pumpAndSettle();
+    final details = find.widgetWithText(CarbonButton, 'Details');
+    expect(details, findsOneWidget);
+    expect(
+      tester.getSemantics(details).flagsCollection.isExpanded,
+      ui.Tristate.isFalse,
+    );
+    expect(tester.widget<CarbonButton>(details).expanded, isFalse);
+    await tester.tap(details);
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSemantics(details).flagsCollection.isExpanded,
+      ui.Tristate.isTrue,
+    );
+    expect(tester.widget<CarbonButton>(details).expanded, isTrue);
+    handle.dispose();
+  });
+
   for (final mobile in [false, true]) {
     schedulerTestWidgets(
       'render ${mobile ? 'mobile' : 'desktop'} scheduler review screenshots',
@@ -1789,6 +2176,40 @@ void main() {
             await (FontLoader(
               AbTokens.fontSans,
             )..addFont(Future.value(ByteData.sublistView(bytes)))).load();
+            // The Scheduler is a Carbon surface: its text is the package's IBM
+            // Plex, registered under the package-qualified family names the
+            // styles resolve to.
+            for (final (family, files) in const [
+              (
+                CarbonTypography.sansFamily,
+                [
+                  'IBMPlexSans-Light.ttf',
+                  'IBMPlexSans-Regular.ttf',
+                  'IBMPlexSans-Medium.ttf',
+                  'IBMPlexSans-SemiBold.ttf',
+                ],
+              ),
+              (
+                CarbonTypography.monoFamily,
+                [
+                  'IBMPlexMono-Regular.ttf',
+                  'IBMPlexMono-Medium.ttf',
+                  'IBMPlexMono-SemiBold.ttf',
+                ],
+              ),
+            ]) {
+              final loader = FontLoader(
+                'packages/${CarbonTypography.package}/$family',
+              );
+              for (final file in files) {
+                loader.addFont(
+                  rootBundle.load(
+                    'packages/${CarbonTypography.package}/assets/fonts/$file',
+                  ),
+                );
+              }
+              await loader.load();
+            }
           });
         }
         final host = Host()
@@ -1910,10 +2331,10 @@ void main() {
         }
 
         await capture('schedules');
-        await tester.tap(find.text('RUNS'));
+        await tester.tap(tab('Runs'));
         await tester.pumpAndSettle();
         await capture('runs');
-        await tester.tap(find.text('SCHEDULES'));
+        await tester.tap(tab('Schedules'));
         await tester.pumpAndSettle();
         await editSchedule(tester);
         await capture('editor');

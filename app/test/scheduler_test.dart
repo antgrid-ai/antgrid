@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
 
 import 'package:antgrid/launcher/host_control_client.dart';
@@ -353,7 +352,9 @@ void main() {
     expect(find.text('Open session'), findsOneWidget);
     await tester.tap(
       find.byWidgetPredicate(
-        (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
+        (w) =>
+            w is CarbonOverflowMenu &&
+            w.semanticLabel == 'Actions for Daily review',
       ),
     );
     await tester.pumpAndSettle();
@@ -367,7 +368,10 @@ void main() {
       ),
       isTrue,
     );
-    await tester.tap(find.text('RUNS'));
+    await tester.tap(find.descendant(
+        of: find.byType(CarbonContentSwitcher<bool>),
+        matching: find.text('Runs'),
+      ));
     await tester.pumpAndSettle();
     expect(find.textContaining('Permission required'), findsOneWidget);
     expect(find.textContaining('Needs input'), findsWidgets);
@@ -390,12 +394,12 @@ void main() {
       host.offline = true;
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      final add = tester.widget<AbIconButton>(
+      final add = tester.widget<CarbonButton>(
         find.byWidgetPredicate(
-          (w) => w is AbIconButton && w.tooltip == 'New schedule',
+          (w) => w is CarbonButton && w.semanticLabel == 'New schedule',
         ),
       );
-      expect(add.onTap, isNull);
+      expect(add.onPressed, isNull);
       expect(find.textContaining('Disconnected'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
@@ -412,7 +416,9 @@ void main() {
     container.read(_connection.notifier).set(false);
     await tester.pump();
     expect(
-      tester.widget<AbButton>(find.widgetWithText(AbButton, 'Run now')).onTap,
+      tester
+          .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Run now'))
+          .onPressed,
       isNull,
     );
     expect(
@@ -433,7 +439,9 @@ void main() {
       expect(find.text('Workspace ownership cleanup pending'), findsOneWidget);
       expect(find.text('Daily review'), findsOneWidget);
       expect(
-        tester.widget<AbButton>(find.widgetWithText(AbButton, 'Run now')).onTap,
+        tester
+            .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Run now'))
+            .onPressed,
         isNotNull,
       );
     },

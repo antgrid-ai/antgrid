@@ -1,8 +1,5 @@
 import 'dart:ui' show Size;
 
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/providers/scheduler_drafts.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
@@ -38,8 +35,6 @@ Future<void> settle(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-Finder chip(String label) => find.widgetWithText(AbChip, label);
-
 String timeText(WidgetTester tester) =>
     '${tester.widget<CarbonTextInput>(field('yyyy-MM-dd')).controller!.text} '
     '${tester.widget<CarbonTextInput>(field('HH:mm')).controller!.text}';
@@ -55,12 +50,7 @@ Future<void> enterWhen(WidgetTester tester, String value) async {
 }
 
 Future<void> openMenu(WidgetTester tester) async {
-  await tester.tap(
-    find.byWidgetPredicate(
-      (w) =>
-          w is AbIconButton && (w.tooltip?.startsWith('Actions for ') ?? false),
-    ),
-  );
+  await tester.tap(rowActions());
   await tester.pumpAndSettle();
 }
 
@@ -128,16 +118,16 @@ void main() {
       expect(timeText(tester), '2001-09-09 07:16');
       await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
       host.oneOffs = [
         oneOff(runAt: pastMs, extra: {'firedRunId': 'r', 'firedAt': pastMs}),
       ];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SCHEDULES'));
+      await tester.tap(tab('Schedules'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Set a new time'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Set a new time'));
       await settle(tester);
       final now = schedulerWallTime(DateTime.now(), 'Asia/Kolkata');
       final suggested = timeText(tester);
@@ -165,9 +155,9 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('Scheduler'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('RUNS'));
+    await tester.tap(tab('Runs'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('SCHEDULES'));
+    await tester.tap(tab('Schedules'));
     await tester.pumpAndSettle();
     expect(find.text('Draft'), findsOneWidget);
     await editSchedule(tester);
@@ -231,12 +221,12 @@ void main() {
       await settle(tester);
       await tester.tap(find.text('Scheduler'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('RUNS'));
+      await tester.tap(tab('Runs'));
       await tester.pumpAndSettle();
       host.oneOffs = [];
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SCHEDULES'));
+      await tester.tap(tab('Schedules'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Open retained draft'));
       await tester.pumpAndSettle();

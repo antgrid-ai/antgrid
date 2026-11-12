@@ -6,7 +6,6 @@ import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/demo_scheduler.dart';
 import 'package:antgrid/demo/fixtures/demo_scheduler_fixtures.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
-import 'package:antgrid/design/widgets/ab_inline_banner.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/demo_mode.dart';
@@ -54,17 +53,27 @@ Finder field(String hint) =>
       (w) => w is CarbonTextInput && w.placeholder == hint,
     );
 
-/// AbSegmented upper-cases its labels.
-Finder seg(String label) => find.text(label.toUpperCase());
+/// An option of the screen's Schedules / Runs switcher.
+Finder seg(String label) => find.descendant(
+  of: find.byType(CarbonContentSwitcher<bool>),
+  matching: find.text(label),
+);
+
+/// The header's New schedule control: icon-only on a phone-width pane, a
+/// labelled button beside the title on a wide one.
+Finder newSchedule() => find.byWidgetPredicate(
+  (w) =>
+      w is CarbonButton &&
+      (w.semanticLabel == 'New schedule' || w.label == 'New schedule'),
+);
 
 Finder inScreen(Finder f) =>
     find.descendant(of: find.byType(SchedulerScreen), matching: f);
 
-/// DemoFrame's strip is itself an AbInlineBanner, so every "nothing red"
-/// check is scoped to the Scheduler. The editor reports its errors as Carbon
+/// DemoFrame's strip is itself a banner, so every "nothing red" check is
+/// scoped to the Scheduler, whose own banners and editor errors are Carbon
 /// notifications.
 void expectNothingRed() {
-  expect(inScreen(find.byType(AbInlineBanner)), findsNothing);
   expect(
     inScreen(
       find.byWidgetPredicate(
@@ -120,7 +129,9 @@ void iosTest(
 }
 
 Future<void> openRowMenu(WidgetTester tester, String name) async {
-  final trigger = find.byTooltip('Actions for $name');
+  final trigger = find.byWidgetPredicate(
+    (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Actions for $name',
+  );
   await tester.ensureVisible(trigger);
   await tester.pump();
   await tester.tap(trigger);
@@ -153,7 +164,7 @@ void main() {
   ) async {
     await openScheduler(tester);
 
-    await tester.tap(find.byTooltip('New schedule'));
+    await tester.tap(newSchedule());
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Review open PRs');
     await tester.enterText(
@@ -257,7 +268,7 @@ void main() {
   iosTest('leaving the sample drops what was made in it', (tester) async {
     final container = await openScheduler(tester);
 
-    await tester.tap(find.byTooltip('New schedule'));
+    await tester.tap(newSchedule());
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Throwaway schedule');
     await tester.enterText(

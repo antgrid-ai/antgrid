@@ -7,25 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_carbon.dart';
-import '../design/ab_colors.dart';
 import '../constants/breakpoints.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_status_tone.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_agent_mark.dart';
-import '../design/widgets/ab_branch_pill.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_section_header.dart';
-import '../design/widgets/ab_status_dot.dart';
-import '../design/widgets/ab_switch.dart';
-import '../design/widgets/ab_inline_banner.dart';
-import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_segmented.dart';
 import '../launcher/host_control_client.dart';
 import '../models/scheduler.dart';
 import '../models/session_target.dart';
@@ -42,13 +25,14 @@ import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
+import '../widgets/carbon_machine_selector.dart';
 import '../widgets/drawer_entry_row.dart' show activateDrawerEntryById;
-import '../widgets/machine_selector_button.dart';
 import '../widgets/scheduler/schedule_editor.dart';
 import '../widgets/scheduler/scheduler_format.dart';
 import '../widgets/scheduler/scheduler_lanes.dart';
 import '../widgets/scheduler/scheduler_run_squares.dart';
 import '../widgets/scheduler/scheduler_runs_view.dart';
+import '../widgets/scheduler/scheduler_status_glyph.dart';
 import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 export '../widgets/scheduler/scheduler_format.dart' show schedulerTime;
 
@@ -75,6 +59,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   int _generation = 0;
   int? _refreshToken;
   Timer? _poll;
+  // A context under the Carbon scope; this State's own sits above it.
+  BuildContext? _scoped;
 
   @override
   void initState() {
@@ -197,15 +183,32 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   }
 
   Future<void> _delete(AgentSchedule schedule) async {
+    // The modal needs a context under the Carbon scope; this State's own sits
+    // above it and would resolve a default theme.
+    final scoped = _scoped;
+    if (scoped == null || !scoped.mounted) return;
     final machine = ref.read(schedulerTargetProvider);
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
-      title: 'Delete schedule',
-      body:
-          "\"${schedule.name}\" won't run again. Its runs, sessions and worktree stay. A run in progress finishes.",
-      confirmLabel: 'Delete schedule',
-      destructive: true,
-    );
+    final confirmed =
+        await showCarbonModal<bool>(
+          scoped,
+          builder: (dialog) => CarbonModal.confirmation(
+            title: 'Delete schedule',
+            body: Text(
+              "\"${schedule.name}\" won't run again. Its runs, sessions and worktree stay. A run in progress finishes.",
+            ),
+            danger: true,
+            secondary: CarbonModalAction(
+              label: 'Cancel',
+              autofocus: true,
+              onPressed: () => Navigator.of(dialog).pop(false),
+            ),
+            primary: CarbonModalAction(
+              label: 'Delete schedule',
+              onPressed: () => Navigator.of(dialog).pop(true),
+            ),
+          ),
+        ) ??
+        false;
     if (!mounted ||
         !confirmed ||
         machine != ref.read(schedulerTargetProvider)) {
@@ -271,6 +274,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         'this machine';
   }
 
+  CarbonThemeData get _t => CarbonTheme.of(_scoped!);
+
   @override
   Widget build(BuildContext context) {
     final connected = ref.watch(schedulerConnectedProvider);
@@ -297,140 +302,247 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     ref.watch(schedulerDraftsProvider.select((drafts) => drafts.length));
     final machineName = machines[machine ?? kLocalMachineKey] ?? 'this machine';
     final noMachine = machines.isEmpty;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wide = constraints.maxWidth >= kMediumBreakpoint;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // A narrow editor is a page of its own with its own breadcrumb.
-            if (!(_editing && !wide))
-              _header(
-                wide: wide,
-                machines: machines,
-                machine: machine ?? kLocalMachineKey,
-                machineName: machineName,
-                connected: connected,
-                onNew: _newScheduleTap(snapshot, machine, localTimezone),
-              ),
-            if (_error != null && !noMachine)
-              AbInlineBanner(text: _error!, color: context.antgrid.error),
-            if (!_loading && !connected && _error == null && !noMachine)
-              AbInlineBanner(
-                text:
-                    '$machineName is offline. Changes are paused until it reconnects.',
-                color: context.antgrid.textMuted,
-              ),
-            if (_actionError != null)
-              Semantics(
-                liveRegion: true,
-                child: AbInlineBanner(
-                  text: _actionError!,
-                  color: context.antgrid.error,
-                ),
-              ),
-            if (_feedbackRun case final run?)
-              Padding(
-                padding: const EdgeInsets.all(AbTokens.space12),
-                child: Wrap(
-                  spacing: AbTokens.space8,
-                  runSpacing: AbTokens.space8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+    return AbCarbonScope(
+      child: Builder(
+        builder: (scoped) {
+          _scoped = scoped;
+          final t = CarbonTheme.of(scoped);
+          return ColoredBox(
+            color: t.colors.background,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= kMediumBreakpoint;
+                final inset = wide
+                    ? CarbonSpacing.spacing06
+                    : CarbonSpacing.spacing05;
+                Widget banner(Widget notification) => Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    inset,
+                    CarbonSpacing.spacing02,
+                    inset,
+                    CarbonSpacing.spacing03,
+                  ),
+                  child: notification,
+                );
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        run.status == 'skipped'
-                            ? 'Run skipped: ${run.reason ?? 'No reason supplied by the machine'}'
-                            : '${schedulerRunStatusWord(run.status, trigger: run.trigger)}${run.reason == null ? '' : ': ${run.reason}'}',
-                        style: AbTokens.sansStyle(
-                          color: run.status == 'skipped'
-                              ? context.antgrid.warning
-                              : context.antgrid.textPrimary,
+                    // A narrow editor is a page of its own with its own
+                    // breadcrumb.
+                    if (!(_editing && !wide))
+                      _header(
+                        wide: wide,
+                        machines: machines,
+                        machine: machine ?? kLocalMachineKey,
+                        machineName: machineName,
+                        connected: connected,
+                        onNew: _newScheduleTap(
+                          snapshot,
+                          machine,
+                          localTimezone,
                         ),
                       ),
+                    if (_error != null && !noMachine)
+                      banner(
+                        CarbonNotification(
+                          kind: CarbonNotificationKind.error,
+                          subtitle: _error!,
+                        ),
+                      ),
+                    if (!_loading && !connected && _error == null && !noMachine)
+                      banner(
+                        CarbonNotification(
+                          subtitle:
+                              '$machineName is offline. Changes are paused until it reconnects.',
+                        ),
+                      ),
+                    if (_actionError != null)
+                      // Keyed by text so a new failure is announced again.
+                      banner(
+                        CarbonNotification(
+                          key: ValueKey(_actionError),
+                          kind: CarbonNotificationKind.error,
+                          subtitle: _actionError!,
+                        ),
+                      ),
+                    if (_feedbackRun case final run?)
+                      banner(
+                        CarbonNotification(
+                          key: ValueKey('${run.id}:${run.status}'),
+                          kind: switch (schedulerRunTone(
+                            run.status,
+                            trigger: run.trigger,
+                          )) {
+                            SchedulerRunTone.error =>
+                              CarbonNotificationKind.error,
+                            SchedulerRunTone.success =>
+                              CarbonNotificationKind.success,
+                            SchedulerRunTone.attention ||
+                            SchedulerRunTone.warning =>
+                              CarbonNotificationKind.warning,
+                            SchedulerRunTone.active ||
+                            SchedulerRunTone.muted =>
+                              CarbonNotificationKind.info,
+                          },
+                          subtitle: run.status == 'skipped'
+                              ? 'Run skipped: ${run.reason ?? 'No reason supplied by the machine'}'
+                              : '${schedulerRunStatusWord(run.status, trigger: run.trigger)}${run.reason == null ? '' : ': ${run.reason}'}',
+                          action: CarbonNotificationAction(
+                            label: 'View run',
+                            onPressed: () => _viewRun(run),
+                          ),
+                        ),
+                      ),
+                    if (snapshot?.capabilities.error != null)
+                      banner(
+                        CarbonNotification(
+                          kind: snapshot!.capabilities.supported
+                              ? CarbonNotificationKind.warning
+                              : CarbonNotificationKind.error,
+                          subtitle: snapshot.capabilities.error!,
+                        ),
+                      ),
+                    Expanded(
+                      child: noMachine
+                          ? _emptyState(
+                              icon: CarbonIcons.calendar,
+                              title: 'Connect a machine to schedule tasks',
+                              subtitle:
+                                  'Schedules run on your computer, in the Antgrid '
+                                  'desktop app, at the times you set. Connect it to '
+                                  'create and manage them here.',
+                              // The one Scheduler a machine-less viewer can use:
+                              // an App Review iPad has no machine. The
+                              // container, not ref, because entering swaps this
+                              // screen out.
+                              action: CarbonButton(
+                                label: kDemoEntryLabel,
+                                onPressed: () =>
+                                    enterDemoScheduler(ref.container),
+                              ),
+                            )
+                          : _loading
+                          ? const Center(
+                              child: CarbonLoading(
+                                message: 'Loading schedules…',
+                              ),
+                            )
+                          : snapshot == null
+                          ? _emptyState(
+                              title: 'Machine unavailable',
+                              subtitle: _error,
+                              // A phone signed in to an account whose only
+                              // machine is offline has no other way to see the
+                              // Scheduler work. Desktop is left alone: its
+                              // local host is a different failure.
+                              action: isMobilePlatform
+                                  ? CarbonButton(
+                                      label: kDemoEntryLabel,
+                                      onPressed: () =>
+                                          enterDemoScheduler(ref.container),
+                                    )
+                                  : null,
+                            )
+                          : !snapshot.capabilities.supported
+                          ? _emptyState(
+                              title: 'Scheduler unavailable',
+                              subtitle:
+                                  'Update Antgrid on $machineName to use the scheduler.',
+                            )
+                          : _editing
+                          ? ScheduleEditor(
+                              key: ValueKey(
+                                '${machine ?? kLocalMachineKey}:${_editedSchedule?.id ?? 'new'}',
+                              ),
+                              snapshot: snapshot,
+                              machineId: machine ?? kLocalMachineKey,
+                              schedule: _editedSchedule,
+                              request: ref.watch(schedulerRequestProvider),
+                              writable: _writable,
+                              showBreadcrumb: !wide,
+                              onClose: () => setState(() => _editing = false),
+                              onSaved: () {
+                                setState(() => _editing = false);
+                                detached(
+                                  'Scheduler',
+                                  'refresh after save failed',
+                                  _refresh,
+                                );
+                              },
+                            )
+                          : _runsTab
+                          ? _runs(snapshot, wide)
+                          : _schedules(snapshot, wide),
                     ),
-                    AbButton(label: 'View run', onTap: () => _viewRun(run)),
+                  ],
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Scrolls from anywhere in the pane, so the wheel never lands on a dead
+  /// margin beside the centred column.
+  Widget _emptyState({
+    CarbonIcons? icon,
+    required String title,
+    String? subtitle,
+    Widget? action,
+  }) {
+    final t = _t;
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(CarbonSpacing.spacing06),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxWidth: CarbonSpacing.spacing09 * 8,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  spacing: CarbonSpacing.spacing03,
+                  children: [
+                    if (icon != null)
+                      CarbonIcon(
+                        icon,
+                        size: CarbonSpacing.spacing07,
+                        color: t.colors.iconSecondary,
+                      ),
+                    Text(
+                      title,
+                      textAlign: TextAlign.center,
+                      style: t.typography.heading.copyWith(
+                        color: t.colors.textPrimary,
+                      ),
+                    ),
+                    if (subtitle != null)
+                      Text(
+                        subtitle,
+                        textAlign: TextAlign.center,
+                        style: t.typography.body.copyWith(
+                          color: t.colors.textSecondary,
+                        ),
+                      ),
+                    if (action != null)
+                      Padding(
+                        padding: const EdgeInsets.only(
+                          top: CarbonSpacing.spacing03,
+                        ),
+                        child: action,
+                      ),
                   ],
                 ),
               ),
-            if (snapshot?.capabilities.error != null)
-              AbInlineBanner(
-                text: snapshot!.capabilities.error!,
-                color: snapshot.capabilities.supported
-                    ? context.antgrid.warning
-                    : context.antgrid.error,
-              ),
-            Expanded(
-              child: noMachine
-                  ? AbEmptyState(
-                      icon: AbIcons.calendar,
-                      title: 'Connect a machine to schedule tasks',
-                      subtitle:
-                          'Schedules run on your computer, in the Antgrid '
-                          'desktop app, at the times you set. Connect it to '
-                          'create and manage them here.',
-                      // The one Scheduler a machine-less viewer can use: an
-                      // App Review iPad has no machine. The container, not
-                      // ref, because entering swaps this screen out.
-                      action: AbButton(
-                        label: kDemoEntryLabel,
-                        onTap: () => enterDemoScheduler(ref.container),
-                      ),
-                    )
-                  : _loading
-                  ? const Center(
-                      child: AbLoading(message: 'Loading schedules…'),
-                    )
-                  : snapshot == null
-                  ? AbEmptyState(
-                      title: 'Machine unavailable',
-                      subtitle: _error,
-                      // A phone signed in to an account whose only machine is
-                      // offline has no other way to see the Scheduler work.
-                      // Desktop is left alone: its local host is a different
-                      // failure.
-                      action: isMobilePlatform
-                          ? AbButton(
-                              label: kDemoEntryLabel,
-                              onTap: () => enterDemoScheduler(ref.container),
-                            )
-                          : null,
-                    )
-                  : !snapshot.capabilities.supported
-                  ? AbEmptyState(
-                      title: 'Scheduler unavailable',
-                      subtitle:
-                          'Update Antgrid on $machineName to use the scheduler.',
-                    )
-                  : _editing
-                  ? ScheduleEditor(
-                      key: ValueKey(
-                        '${machine ?? kLocalMachineKey}:${_editedSchedule?.id ?? 'new'}',
-                      ),
-                      snapshot: snapshot,
-                      machineId: machine ?? kLocalMachineKey,
-                      schedule: _editedSchedule,
-                      request: ref.watch(schedulerRequestProvider),
-                      writable: _writable,
-                      showBreadcrumb: !wide,
-                      onClose: () => setState(() => _editing = false),
-                      onSaved: () {
-                        setState(() => _editing = false);
-                        detached(
-                          'Scheduler',
-                          'refresh after save failed',
-                          _refresh,
-                        );
-                      },
-                    )
-                  : _runsTab
-                  ? _runs(snapshot, wide)
-                  : _schedules(snapshot, wide),
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ),
     );
   }
 
@@ -464,24 +576,24 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     required bool connected,
     required VoidCallback? onNew,
   }) {
-    final p = context.antgrid;
+    final t = _t;
     final title = Text(
       'Scheduler',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontLg,
-        fontWeight: FontWeight.w600,
-      ),
+      // Never smaller than the section titles the tables below carry.
+      style: (t.isTouch ? t.typography.headingLarge : t.typography.title)
+          .copyWith(color: t.colors.textPrimary),
     );
-    final segmented = AbSegmented<bool>(
+    final switcher = CarbonContentSwitcher<bool>(
       expand: !wide,
-      segments: const [
-        AbSegment(value: false, label: 'Schedules'),
-        AbSegment(value: true, label: 'Runs'),
+      size: CarbonContentSwitcherSize.small,
+      options: const [
+        CarbonOption<bool>(value: false, label: 'Schedules'),
+        CarbonOption<bool>(value: true, label: 'Runs'),
       ],
-      selected: _runsTab,
-      onSelect: (value) => setState(() {
+      value: _runsTab,
+      onChanged: (value) => setState(() {
         _runsTab = value;
         _editing = false;
         _runScheduleId = null;
@@ -489,7 +601,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     );
     final machineButton = machines.isEmpty
         ? null
-        : MachineSelectorButton(
+        : CarbonMachineSelector(
             machines: machines,
             currentId: machine,
             name: machineName,
@@ -497,57 +609,66 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             wide: wide,
             onPicked: _pickMachine,
           );
-    final refresh = AbIconButton(
-      icon: AbIcons.refresh,
-      tooltip: 'Refresh',
-      onTap: _busy
+    final refresh = CarbonButton.iconOnly(
+      icon: const CarbonIcon(CarbonIcons.renew),
+      semanticLabel: 'Refresh',
+      onPressed: _busy
           ? null
           : () => detached('Scheduler', 'refresh failed', _refresh),
     );
     if (wide) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(
-          AbTokens.space24,
-          AbTokens.space16,
-          AbTokens.space24,
-          AbTokens.space12,
+          CarbonSpacing.spacing06,
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing06,
+          CarbonSpacing.spacing04,
         ),
-        child: Row(
-          spacing: AbTokens.space12,
+        // Two groups that share a line when they fit; in a narrow pane (an
+        // iPad beside the sidebar, large text) the actions wrap below the
+        // title instead of overflowing.
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: CarbonSpacing.spacing04,
+          runSpacing: CarbonSpacing.spacing03,
           children: [
-            // While editing, the screen title becomes the editor's way back,
-            // so the name appears once, above the schedule's own title.
-            if (_editing)
-              AbCarbonScope(
-                child: CarbonBreadcrumb(
-                  items: [
-                    CarbonBreadcrumbItem(
-                      label: 'Scheduler',
-                      onPressed: () => setState(() => _editing = false),
-                    ),
-                  ],
-                ),
-              )
-            else
-              title,
-            if (!_editing) segmented,
-            const Spacer(),
-            // A long machine name gives way before the actions do.
-            if (machineButton != null) Flexible(child: machineButton),
-            refresh,
-            if (!_editing)
-              AbButton(
-                label: 'New schedule',
-                variant: AbButtonVariant.primary,
-                fontSize: AbTokens.fontMd,
-                fontWeight: FontWeight.w600,
-                leading: AbIcon(
-                  AbIcons.add,
-                  size: AbTokens.iconButtonGlyph,
-                  color: p.accentForeground,
-                ),
-                onTap: onNew,
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: CarbonSpacing.spacing04,
+              children: [
+                // While editing, the screen title becomes the editor's way
+                // back, so the name appears once, above the schedule's own
+                // title.
+                if (_editing)
+                  CarbonBreadcrumb(
+                    items: [
+                      CarbonBreadcrumbItem(
+                        label: 'Scheduler',
+                        onPressed: () => setState(() => _editing = false),
+                      ),
+                    ],
+                  )
+                else
+                  title,
+                if (!_editing) switcher,
+              ],
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: CarbonSpacing.spacing04,
+              children: [
+                // A long machine name gives way before the actions do.
+                if (machineButton != null) Flexible(child: machineButton),
+                refresh,
+                if (!_editing)
+                  CarbonButton(
+                    label: 'New schedule',
+                    icon: const CarbonIcon(CarbonIcons.add),
+                    onPressed: onNew,
+                  ),
+              ],
+            ),
           ],
         ),
       );
@@ -557,41 +678,41 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(
-            AbTokens.space8,
-            AbTokens.space8,
-            AbTokens.space8,
-            AbTokens.space4,
+            CarbonSpacing.spacing03,
+            CarbonSpacing.spacing03,
+            CarbonSpacing.spacing03,
+            CarbonSpacing.spacing02,
           ),
           child: Row(
-            spacing: AbTokens.space4,
+            spacing: CarbonSpacing.spacing02,
             children: [
               if (isMobilePlatform && widget.onOpenDrawer != null)
-                AbIconButton(
-                  icon: AbIcons.menu,
-                  tooltip: 'Open drawer',
-                  onTap: widget.onOpenDrawer,
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.menu),
+                  semanticLabel: 'Open drawer',
+                  onPressed: widget.onOpenDrawer,
                 )
               else
-                const SizedBox(width: AbTokens.space8),
+                const SizedBox(width: CarbonSpacing.spacing03),
               Expanded(child: title),
               if (machineButton != null) Flexible(child: machineButton),
-              AbIconButton(
-                icon: AbIcons.add,
-                tooltip: 'New schedule',
-                tone: AbIconButtonTone.accent,
-                onTap: onNew,
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.add),
+                semanticLabel: 'New schedule',
+                kind: CarbonButtonKind.primary,
+                onPressed: onNew,
               ),
             ],
           ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(
-            AbTokens.space16,
-            AbTokens.space4,
-            AbTokens.space16,
-            AbTokens.space12,
+            CarbonSpacing.spacing05,
+            CarbonSpacing.spacing02,
+            CarbonSpacing.spacing05,
+            CarbonSpacing.spacing04,
           ),
-          child: SizedBox(width: double.infinity, child: segmented),
+          child: SizedBox(width: double.infinity, child: switcher),
         ),
       ],
     );
@@ -614,7 +735,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           !snapshot.schedules.any((s) => s.id == entry.key.scheduleId),
     );
     if (snapshot.schedules.isEmpty && deletedDrafts.isEmpty) {
-      return const AbEmptyState(
+      return _emptyState(
         title: 'No schedules',
         subtitle: 'Send a saved prompt to an agent on a timer.',
       );
@@ -635,43 +756,54 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       for (final s in snapshot.schedules)
         if (resting(s)) s,
     ];
-    final p = context.antgrid;
 
-    Widget group(List<AgentSchedule> schedules, {required bool muted}) =>
-        Container(
-          decoration: BoxDecoration(
-            color: p.bgSurface,
-            border: Border.all(color: p.borderDefault),
-            borderRadius: AbTokens.borderRadius8,
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (wide && !muted) _tableHeader(),
-              for (final (i, s) in schedules.indexed)
-                _divided(
-                  divider: i > 0 || (wide && !muted),
-                  child: wide
-                      ? _scheduleRow(snapshot, s, now, viewerZone)
-                      : _phoneRow(snapshot, s, now, viewerZone),
-                ),
-            ],
-          ),
+    final zoneLabel = 'Times in $viewerZone';
+    final restLabel = 'Paused and finished (${rest.length})';
+
+    Widget table(
+      List<AgentSchedule> schedules, {
+      String? title,
+      String? description,
+    }) => CarbonDataTable(
+      title: title,
+      description: description,
+      columns: const [
+        CarbonDataTableColumn(label: '', width: _statusColumnWidth),
+        CarbonDataTableColumn(label: 'Schedule', flex: 24),
+        CarbonDataTableColumn(label: 'Repeats', flex: 12),
+        CarbonDataTableColumn(label: 'Next run', flex: 11),
+        CarbonDataTableColumn(label: 'Recent runs', width: _recentRunsWidth),
+        CarbonDataTableColumn(
+          label: 'Active',
+          width: _actionsWidth,
+          align: CarbonDataTableAlign.end,
+        ),
+      ],
+      rows: [
+        for (final s in schedules) _scheduleRow(snapshot, s, now, viewerZone),
+      ],
+    );
+
+    Widget list(List<AgentSchedule> schedules, String label) =>
+        CarbonContainedList(
+          label: label,
+          children: [
+            for (final s in schedules) _phoneRow(snapshot, s, now, viewerZone),
+          ],
         );
 
     final padding = wide
         ? const EdgeInsets.fromLTRB(
-            AbTokens.space24,
-            AbTokens.space4,
-            AbTokens.space24,
-            AbTokens.space24,
+            CarbonSpacing.spacing06,
+            CarbonSpacing.spacing02,
+            CarbonSpacing.spacing06,
+            CarbonSpacing.spacing06,
           )
         : const EdgeInsets.fromLTRB(
-            AbTokens.space16,
+            CarbonSpacing.spacing05,
             0,
-            AbTokens.space16,
-            AbTokens.space16,
+            CarbonSpacing.spacing05,
+            CarbonSpacing.spacing05,
           );
     final summary = schedulerHorizonSummary(snapshot.schedules, now);
     final attention = [
@@ -695,7 +827,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       children: [
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: wide ? AbTokens.space16 : AbTokens.space12,
+          spacing: wide ? CarbonSpacing.spacing05 : CarbonSpacing.spacing04,
           children: [
             if (wide)
               SchedulerLaneStrip(
@@ -708,31 +840,26 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
               for (final item in attention)
                 _attentionCard(item.schedule, item.run, now),
             ],
-            if (!stripShown)
+            if (!stripShown && listed.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: AbTokens.space4,
+                  horizontal: CarbonSpacing.spacing02,
                 ),
-                child: _label('Times in $viewerZone'),
+                child: _label(zoneLabel),
               ),
-            if (listed.isNotEmpty) group(listed, muted: false),
-            if (rest.isNotEmpty) ...[
-              AbSectionHeader(
-                label: 'Paused and finished',
-                count: rest.length,
-                padding: const EdgeInsets.only(
-                  left: AbTokens.space4,
-                  top: AbTokens.space4,
-                ),
-              ),
-              group(rest, muted: true),
-            ],
+            if (listed.isNotEmpty)
+              wide
+                  ? table(listed, description: stripShown ? null : zoneLabel)
+                  : list(listed, zoneLabel),
+            if (rest.isNotEmpty)
+              wide ? table(rest, title: restLabel) : list(rest, restLabel),
             for (final entry in deletedDrafts)
-              _card([
-                _label('Deleted schedule draft: ${entry.value.values['name']}'),
-                AbButton(
+              CarbonNotification(
+                subtitle:
+                    'Deleted schedule draft: ${entry.value.values['name']}',
+                action: CarbonNotificationAction(
                   label: 'Open retained draft',
-                  onTap: () => setState(() {
+                  onPressed: () => setState(() {
                     _editing = true;
                     // A draft's runAt may be unparsed wall-clock text, and the
                     // editor restores the time from the draft itself.
@@ -743,79 +870,45 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                     });
                   }),
                 ),
-              ]),
+              ),
           ],
         ),
       ],
     );
   }
 
-  Widget _divided({required bool divider, required Widget child}) =>
-      DecoratedBox(
-        decoration: BoxDecoration(
-          border: divider
-              ? Border(top: BorderSide(color: context.antgrid.borderDefault))
-              : null,
-        ),
-        child: child,
-      );
-
   Widget _label(
     String value, {
-    double? size,
     Color? color,
-    FontWeight weight = FontWeight.normal,
     bool mono = false,
+    bool small = true,
     int maxLines = 1,
   }) {
-    size ??= AbTokens.fontSm;
-    final c = color ?? context.antgrid.textSecondary;
+    final t = _t;
+    final style = mono
+        ? t.typography.code
+        : small
+        ? t.typography.helper
+        : t.typography.label;
     return Text(
       value,
       maxLines: maxLines,
       overflow: TextOverflow.ellipsis,
-      style: mono
-          ? AbTokens.monoStyle(fontSize: size, color: c, fontWeight: weight)
-          : AbTokens.sansStyle(fontSize: size, color: c, fontWeight: weight),
+      style: style.copyWith(color: color ?? t.colors.textSecondary),
     );
   }
 
-  static const _actionsWidth = 344.0;
-
-  Widget _tableHeader() {
-    Widget cell(String label, int flex) => Expanded(
-      flex: flex,
-      child: AbSectionHeader(label: label, padding: EdgeInsets.zero),
-    );
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space16,
-        vertical: AbTokens.space8,
-      ),
-      child: Row(
-        spacing: AbTokens.space16,
-        children: [
-          const SizedBox(width: AbTokens.dotSizeMd),
-          cell('Schedule', 24),
-          cell('Repeats', 12),
-          cell('Next run', 11),
-          cell('Recent runs', 12),
-          const SizedBox(
-            width: _actionsWidth,
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: IntrinsicWidth(
-                child: AbSectionHeader(
-                  label: 'Active',
-                  padding: EdgeInsets.zero,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // Both table widths include the 32px cell padding the table adds.
+  static const _statusColumnWidth =
+      SchedulerStatusGlyph.extent + CarbonSpacing.spacing07;
+  // Fits Open session, Stop, the toggle and the menu on one line in the
+  // common case; the cell's Wrap takes anything wider to a second line rather
+  // than starving the text columns.
+  static const _actionsWidth = 288.0;
+  // Fixed so a desktop row always shows the full ten-run history; as a share
+  // of the leftover width it dropped the oldest square at common sizes.
+  static const _recentRunsWidth =
+      SchedulerRunSquares.fullWidth + 2 * CarbonSpacing.spacing05;
 
   bool _hasDraft(AgentSchedule s) =>
       ref.read(schedulerDraftsProvider).containsKey((
@@ -829,33 +922,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     return who == null ? null : 'by $who';
   }
 
-  Widget _badge(String label, {Color? color}) {
-    final p = context.antgrid;
-    final c = color ?? p.textSecondary;
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space6,
-        vertical: AbTokens.space2,
-      ),
-      decoration: BoxDecoration(
-        border: Border.all(
-          color: color == null ? p.borderStrong : c.withValues(alpha: 0.45),
-        ),
-        borderRadius: AbTokens.borderRadius3,
-      ),
-      child: Text(
-        label,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          fontWeight: FontWeight.w500,
-          color: c,
-        ),
-      ),
-    );
-  }
-
   List<Widget> _badges(SchedulerSnapshot snapshot, AgentSchedule s) {
-    final p = context.antgrid;
     final mode = s.mode == 'chat' && s.chatMode != null
         ? snapshot.capabilities.chatModes[s.agentId]
                   ?.where((m) => m.id == s.chatMode)
@@ -865,41 +932,52 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         : null;
     final by = _by(s);
     return [
-      ?(mode == null ? null : _badge(mode)),
-      if (s.approvalPolicy == 'bypass') _badge('Bypass', color: p.warning),
+      ?(mode == null ? null : CarbonTag(label: mode, size: CarbonTagSize.small)),
+      if (s.approvalPolicy == 'bypass')
+        const CarbonTag(
+          label: 'Bypass',
+          color: CarbonTagColor.red,
+          size: CarbonTagSize.small,
+        ),
       if (s.workspace == 'worktree' && s.baseBranch != null)
-        AbBranchPill(branch: s.baseBranch!),
-      if (_hasDraft(s)) _badge('Draft', color: p.unread),
-      ?(by == null ? null : _badge(by)),
+        CarbonTag(
+          label: s.baseBranch!,
+          color: CarbonTagColor.outline,
+          size: CarbonTagSize.small,
+          icon: const CarbonIcon(CarbonIcons.branch),
+        ),
+      if (_hasDraft(s))
+        const CarbonTag(
+          label: 'Draft',
+          color: CarbonTagColor.blue,
+          size: CarbonTagSize.small,
+        ),
+      ?(by == null ? null : _label(by)),
     ];
   }
 
   String _agentLabel(String agentId) =>
       ref.read(agentLabelsProvider)[agentId] ?? agentId;
 
-  Widget _identity(SchedulerSnapshot snapshot, AgentSchedule s, bool muted) {
-    final p = context.antgrid;
+  Widget _identity(SchedulerSnapshot snapshot, AgentSchedule s) {
+    final t = _t;
     final label = _agentLabel(s.agentId);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      spacing: AbTokens.space4,
+      spacing: CarbonSpacing.spacing02,
       children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => _editSchedule(s),
-          child: _label(
-            s.name,
-            size: AbTokens.fontBody,
-            weight: FontWeight.w600,
-            color: muted ? p.textSecondary : p.textPrimary,
-          ),
-        ),
+        CarbonLink(label: s.name, onPressed: () => _editSchedule(s)),
         Wrap(
-          spacing: AbTokens.space6,
-          runSpacing: AbTokens.space4,
+          spacing: CarbonSpacing.spacing03,
+          runSpacing: CarbonSpacing.spacing02,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            AbAgentMark(toolKey: s.agentId, label: label),
+            AbAgentMark(
+              toolKey: s.agentId,
+              label: label,
+              size: t.iconSize,
+              color: t.colors.iconSecondary,
+            ),
             _label('$label · ${_projectName(snapshot, s.projectId)}'),
             ..._badges(snapshot, s),
           ],
@@ -908,26 +986,12 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     );
   }
 
-  Widget _statusDot(ScheduleRun? active, AgentSchedule s, bool resting) {
-    if (resting) {
-      return const AbStatusDot(
-        tone: AbStatusTone.disabled,
-        size: AbDotSize.md,
-        style: AbDotStyle.hollow,
-      );
-    }
+  String _stateWord(ScheduleRun? active, bool resting, bool finished) {
+    if (resting) return finished ? 'Finished' : 'Paused';
     return switch (active?.status) {
-      'needs-input' => const AbStatusDot(
-        tone: AbStatusTone.warning,
-        size: AbDotSize.md,
-        pulse: true,
-      ),
-      'running' || 'preparing' => const AbStatusDot(
-        tone: AbStatusTone.info,
-        size: AbDotSize.md,
-        pulse: true,
-      ),
-      _ => const AbStatusDot(tone: AbStatusTone.agentIdle, size: AbDotSize.md),
+      'needs-input' => 'Needs input',
+      'running' || 'preparing' => 'Running',
+      _ => 'Idle',
     };
   }
 
@@ -941,7 +1005,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     DateTime now,
     String viewerZone,
   ) {
-    final p = context.antgrid;
+    final c = _t.colors;
     if (active != null) {
       final attention = active.status == 'needs-input';
       return (
@@ -951,7 +1015,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             : active.trigger == 'manual'
             ? 'Started with Run now'
             : schedulerTrigger(active.trigger),
-        color: attention ? p.warning : p.accent,
+        color: attention ? schedulerAttentionTextColor(_t) : c.supportInfo,
         mono: false,
       );
     }
@@ -959,7 +1023,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       return (
         main: schedulerOneOffOutcome(s, snapshot.runs),
         sub: null,
-        color: p.textSecondary,
+        color: c.textSecondary,
         mono: false,
       );
     }
@@ -967,37 +1031,38 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       return (
         main: 'Time passed',
         sub: null,
-        color: p.textSecondary,
+        color: c.textSecondary,
         mono: false,
       );
     }
     if (!s.enabled) {
-      return (main: 'Paused', sub: null, color: p.textSecondary, mono: false);
+      return (main: 'Paused', sub: null, color: c.textSecondary, mono: false);
     }
     final next = s.nextOccurrence ?? s.runAt;
     if (next == null) {
-      return (main: '—', sub: null, color: p.textSecondary, mono: true);
+      return (main: '—', sub: null, color: c.textSecondary, mono: true);
     }
     final wall = schedulerWallCompact(next, viewerZone, now);
     return (
       main: schedulerRelative(next, now),
       sub: s.timezone == viewerZone ? wall : '$wall your time',
-      color: p.textPrimary,
+      color: c.textPrimary,
       mono: true,
     );
   }
 
-  Widget _scheduleRow(
+  CarbonDataTableRow _scheduleRow(
     SchedulerSnapshot snapshot,
     AgentSchedule s,
     DateTime now,
     String viewerZone,
   ) {
-    final p = context.antgrid;
+    final c = _t.colors;
     final active = schedulerActiveRun(snapshot.runs, s.id);
     final last = schedulerLastOccurrence(snapshot.runs, s.id);
     final oneOff = s.isOneOff ? schedulerOneOffState(s, now) : null;
-    final resting = !s.enabled || oneOff == SchedulerOneOffState.finished;
+    final finished = oneOff == SchedulerOneOffState.finished;
+    final resting = !s.enabled || finished;
     final detail = [
       ?schedulerRepeatsDetail(s, viewerZone),
       if (snapshot.capabilities.supportsCatchUp)
@@ -1005,78 +1070,56 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     ].join(' · ');
     final next = _nextCell(snapshot, s, active, oneOff, now, viewerZone);
     final recent = schedulerRecentRuns(snapshot.runs, s.id);
-    final attention = active?.status == 'needs-input';
-    return Container(
+    return CarbonDataTableRow(
       key: ValueKey('scheduler-schedule-${s.id}'),
-      color: attention ? p.warning.withValues(alpha: 0.05) : null,
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space16,
-        vertical: AbTokens.space12,
-      ),
-      child: Row(
-        spacing: AbTokens.space16,
-        children: [
-          _statusDot(active, s, resting),
-          Expanded(flex: 24, child: _identity(snapshot, s, resting)),
-          Expanded(
-            flex: 12,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              spacing: AbTokens.space4,
-              children: [
-                _label(
-                  schedulerRepeats(s),
-                  size: AbTokens.fontMd,
-                  color: resting ? p.textSecondary : p.textPrimary,
-                ),
-                if (detail.isNotEmpty)
-                  _label(
-                    detail,
-                    size: AbTokens.fontXs,
-                    mono: schedulerRepeats(s) == 'Custom',
-                  ),
-              ],
+      cells: [
+        SchedulerStatusGlyph.schedule(
+          active: active,
+          resting: resting,
+          semanticLabel: _stateWord(active, resting, finished),
+        ),
+        _identity(snapshot, s),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: CarbonSpacing.spacing02,
+          children: [
+            _label(
+              schedulerRepeats(s),
+              small: false,
+              color: resting ? c.textSecondary : c.textPrimary,
             ),
-          ),
-          Expanded(
-            flex: 11,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              spacing: AbTokens.space4,
-              children: [
-                _label(
-                  next.main,
-                  size: AbTokens.fontMd,
-                  color: next.color,
-                  weight: FontWeight.w500,
-                  mono: next.mono,
-                ),
-                if (next.sub != null) _label(next.sub!, size: AbTokens.fontXs),
-              ],
+            if (detail.isNotEmpty)
+              _label(detail, mono: schedulerRepeats(s) == 'Custom'),
+          ],
+        ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: CarbonSpacing.spacing02,
+          children: [
+            _label(
+              next.main,
+              small: false,
+              color: next.color,
+              mono: next.mono,
+              maxLines: 2,
             ),
-          ),
-          Expanded(
-            flex: 12,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              spacing: AbTokens.space6,
-              children: [
-                if (recent.isNotEmpty) SchedulerRunSquares(runs: recent),
-                _label(
-                  last == null
-                      ? schedulerNoRunsYet
-                      : schedulerLastRunLine(last, now),
-                  size: AbTokens.fontXs,
-                ),
-              ],
+            if (next.sub != null) _label(next.sub!),
+          ],
+        ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          spacing: CarbonSpacing.spacing03,
+          children: [
+            if (recent.isNotEmpty) SchedulerRunSquares(runs: recent),
+            _label(
+              last == null
+                  ? schedulerNoRunsYet
+                  : schedulerLastRunLine(last, now),
             ),
-          ),
-          SizedBox(
-            width: _actionsWidth,
-            child: _actions(snapshot, s, active, oneOff),
-          ),
-        ],
-      ),
+          ],
+        ),
+        _actions(snapshot, s, active, oneOff),
+      ],
     );
   }
 
@@ -1086,13 +1129,16 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     ScheduleRun? active,
     SchedulerOneOffState? oneOff,
   ) {
-    final p = context.antgrid;
     final finished = oneOff == SchedulerOneOffState.finished;
     final needsNewTime =
         finished || oneOff == SchedulerOneOffState.pausedPassed;
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
-      spacing: AbTokens.space6,
+    // A Wrap, not a Row: the cell narrows with the window and the controls
+    // must drop to a second line rather than overflow.
+    return Wrap(
+      alignment: WrapAlignment.end,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: CarbonSpacing.spacing02,
+      runSpacing: CarbonSpacing.spacing02,
       children: [
         if (active == null) ...[
           _action(
@@ -1105,7 +1151,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             active.sessionId == null ? 'View run' : 'Open session',
             s.name,
             () => _openOrView(active),
-            color: p.warning,
+            kind: CarbonButtonKind.primary,
           ),
           _action(
             'Stop run',
@@ -1129,8 +1175,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         if (needsNewTime)
           _action('Set a new time', s.name, () async => _editSchedule(s)),
         if (!finished)
-          AbSwitch(
+          CarbonToggle(
             value: s.enabled,
+            small: true,
+            hideStateText: true,
             semanticLabel: 'Active: ${s.name}',
             onChanged: _writable && !needsNewTime
                 ? (value) => detached(
@@ -1143,21 +1191,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                   )
                 : null,
           ),
-        Builder(
-          builder: (anchor) => Semantics(
-            label: 'More actions for ${s.name}',
-            child: AbIconButton(
-              icon: AbIcons.more,
-              tooltip: 'Actions for ${s.name}',
-              onTap: _writable
-                  ? () => detached(
-                      'Scheduler',
-                      'menu failed',
-                      () => _scheduleMenu(anchor, s),
-                    )
-                  : null,
-            ),
-          ),
+        CarbonOverflowMenu(
+          entries: _scheduleEntries(s),
+          enabled: _writable,
+          size: CarbonButtonSize.small,
+          semanticLabel: 'Actions for ${s.name}',
         ),
       ],
     );
@@ -1176,31 +1214,22 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     ({int runs, bool capped, SchedulerLane? next}) summary,
     DateTime now,
   ) {
-    final p = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space14,
-        vertical: AbTokens.space12,
-      ),
-      decoration: BoxDecoration(
-        color: p.bgSurface,
-        border: Border.all(color: p.borderDefault),
-        borderRadius: AbTokens.borderRadius8,
-      ),
+    final t = _t;
+    return CarbonLayerSurface(
+      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
       child: Row(
-        spacing: AbTokens.space10,
+        spacing: CarbonSpacing.spacing03,
         children: [
-          AbIcon(AbIcons.calendar, color: p.textSecondary),
+          CarbonIcon(CarbonIcons.calendar, color: t.colors.iconSecondary),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              spacing: AbTokens.space2,
+              spacing: CarbonSpacing.spacing02,
               children: [
                 Text.rich(
                   TextSpan(
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontMd,
-                      color: p.textPrimary,
+                    style: t.typography.body.copyWith(
+                      color: t.colors.textPrimary,
                     ),
                     children: [
                       const TextSpan(text: 'Next: '),
@@ -1211,9 +1240,8 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
                       const TextSpan(text: ' '),
                       TextSpan(
                         text: schedulerRelative(next.dots.first, now),
-                        style: AbTokens.monoStyle(
-                          fontSize: AbTokens.fontMd,
-                          color: p.textPrimary,
+                        style: t.typography.code.copyWith(
+                          color: t.colors.textPrimary,
                         ),
                       ),
                     ],
@@ -1231,55 +1259,46 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
   }
 
   Widget _attentionCard(AgentSchedule s, ScheduleRun run, DateTime now) {
-    final p = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space14,
-        vertical: AbTokens.space12,
-      ),
-      decoration: BoxDecoration(
-        color: p.warning.withValues(alpha: 0.06),
-        border: Border.all(color: p.warning.withValues(alpha: 0.35)),
-        borderRadius: AbTokens.borderRadius8,
-      ),
+    final t = _t;
+    return CarbonLayerSurface(
+      border: true,
+      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: AbTokens.space10,
+        spacing: CarbonSpacing.spacing04,
         children: [
           Row(
-            spacing: AbTokens.space10,
+            spacing: CarbonSpacing.spacing04,
             children: [
-              const AbStatusDot(
-                tone: AbStatusTone.warning,
-                size: AbDotSize.md,
-                pulse: true,
-              ),
+              const SchedulerStatusGlyph.run(SchedulerRunTone.attention),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  spacing: AbTokens.space2,
+                  spacing: CarbonSpacing.spacing02,
                   children: [
-                    _label(
+                    Text(
                       s.name,
-                      size: AbTokens.fontBody,
-                      weight: FontWeight.w600,
-                      color: p.textPrimary,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: t.typography.heading.copyWith(
+                        color: t.colors.textPrimary,
+                      ),
                     ),
-                    _label(schedulerActiveRunLine(run, now), color: p.warning),
+                    _label(
+                      schedulerActiveRunLine(run, now),
+                      color: schedulerAttentionTextColor(t),
+                    ),
                   ],
                 ),
               ),
             ],
           ),
-          SizedBox(
-            height: AbTokens.tapTargetMin,
-            child: _action(
-              run.sessionId == null ? 'View run' : 'Open session',
-              s.name,
-              () => _openOrView(run),
-              color: p.warning,
-              expand: true,
-            ),
+          _action(
+            run.sessionId == null ? 'View run' : 'Open session',
+            s.name,
+            () => _openOrView(run),
+            kind: CarbonButtonKind.primary,
+            expand: true,
           ),
         ],
       ),
@@ -1292,7 +1311,6 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     DateTime now,
     String viewerZone,
   ) {
-    final p = context.antgrid;
     final active = schedulerActiveRun(snapshot.runs, s.id);
     final oneOff = s.isOneOff ? schedulerOneOffState(s, now) : null;
     final resting = !s.enabled || oneOff == SchedulerOneOffState.finished;
@@ -1303,86 +1321,26 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       if (zone != null) _zoneCity(zone),
     ].join(' ');
     final recent = schedulerRecentRuns(snapshot.runs, s.id);
-    return Builder(
+    // Keyed outside the context menu: an unkeyed menu keeps its open state by
+    // list position, so a poll that moves a row above would leave the open
+    // menu showing, and acting on, the schedule that slid into its slot.
+    return CarbonContextMenu(
       key: ValueKey('scheduler-schedule-${s.id}'),
-      builder: (anchor) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => _editSchedule(s),
-        onLongPress: _writable
-            ? () => detached(
-                'Scheduler',
-                'menu failed',
-                () => _scheduleMenu(anchor, s, phone: true, active: active),
-              )
-            : null,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            minHeight: AbTokens.tapTargetMin + AbTokens.space16,
+      entries: _scheduleEntries(s, phone: true, active: active),
+      enabled: _writable,
+      child: CarbonContainedListRow(
+        title: s.name,
+        secondary: '$repeats · ${next.main}',
+        leading: SchedulerStatusGlyph.schedule(active: active, resting: resting),
+        onPressed: () => _editSchedule(s),
+        actions: [
+          if (recent.isNotEmpty && !resting) SchedulerMiniBars(runs: recent),
+          CarbonOverflowMenu(
+            entries: _scheduleEntries(s, phone: true, active: active),
+            enabled: _writable,
+            semanticLabel: 'Actions for ${s.name}',
           ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AbTokens.space14,
-              vertical: AbTokens.space10,
-            ),
-            child: Row(
-              spacing: AbTokens.space12,
-              children: [
-                _statusDot(active, s, resting),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    spacing: AbTokens.space2,
-                    children: [
-                      _label(
-                        s.name,
-                        size: AbTokens.fontBody,
-                        weight: FontWeight.w600,
-                        color: resting ? p.textSecondary : p.textPrimary,
-                      ),
-                      Text.rich(
-                        TextSpan(
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontSm,
-                            color: p.textSecondary,
-                          ),
-                          children: [
-                            TextSpan(text: '$repeats · '),
-                            TextSpan(
-                              text: next.main,
-                              style: TextStyle(color: next.color),
-                            ),
-                          ],
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                ),
-                if (recent.isNotEmpty && !resting)
-                  SchedulerMiniBars(runs: recent),
-                Builder(
-                  builder: (button) => AbIconButton(
-                    icon: AbIcons.more,
-                    tooltip: 'Actions for ${s.name}',
-                    onTap: _writable
-                        ? () => detached(
-                            'Scheduler',
-                            'menu failed',
-                            () => _scheduleMenu(
-                              button,
-                              s,
-                              phone: true,
-                              active: active,
-                            ),
-                          )
-                        : null,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+        ],
       ),
     );
   }
@@ -1392,25 +1350,17 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     String name,
     Future<void> Function() action, {
     String? display,
-    Color? color,
+    CarbonButtonKind kind = CarbonButtonKind.ghost,
     bool expand = false,
-  }) => Semantics(
-    label: '$label for $name',
-    button: true,
-    enabled: _writable,
-    excludeSemantics: true,
-    onTap: _writable
+  }) => CarbonButton(
+    label: display ?? label,
+    semanticLabel: '$label for $name',
+    kind: kind,
+    size: expand ? null : CarbonButtonSize.small,
+    expand: expand,
+    onPressed: _writable
         ? () => detached('Scheduler', 'action failed', action)
         : null,
-    child: AbButton(
-      label: display ?? label,
-      compact: true,
-      color: color,
-      expand: expand,
-      onTap: _writable
-          ? () => detached('Scheduler', 'action failed', action)
-          : null,
-    ),
   );
 
   void _editSchedule(AgentSchedule schedule) => setState(() {
@@ -1418,14 +1368,11 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     _editedSchedule = schedule;
   });
 
-  Future<void> _scheduleMenu(
-    BuildContext anchor,
+  List<CarbonMenuEntry> _scheduleEntries(
     AgentSchedule schedule, {
     bool phone = false,
     ScheduleRun? active,
-  }) async {
-    final rect = abMenuAnchorRect(anchor);
-    if (rect == null) return;
+  }) {
     final machine = ref.read(schedulerTargetProvider);
     final needsNewTime =
         schedule.isOneOff &&
@@ -1433,65 +1380,73 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           SchedulerOneOffState.finished,
           SchedulerOneOffState.pausedPassed,
         }.contains(schedulerOneOffState(schedule, DateTime.now()));
-    final selected = await showAbMenu<String>(
-      context: anchor,
-      anchorRect: rect,
-      header: schedule.name,
-      entries: [
-        // Phone rows have no inline buttons, so the run controls live here.
-        if (phone && active == null)
-          const AbMenuItem(label: 'Run now', value: 'run', icon: AbIcons.start),
-        if (phone && active != null) ...[
-          if (active.sessionId != null)
-            const AbMenuItem(label: 'Open session', value: 'open')
-          else
-            const AbMenuItem(label: 'View run', value: 'view'),
-          const AbMenuItem(label: 'Stop run', value: 'stop'),
-        ],
-        AbMenuItem(
-          label: needsNewTime ? 'Set a new time' : 'Edit',
-          value: 'edit',
-          icon: AbIcons.edit,
-        ),
-        // Resuming a one-off whose time has passed is refused by the bridge;
-        // the new-time editor is the only way back.
-        if (!needsNewTime)
-          AbMenuItem(
-            label: schedule.enabled ? 'Pause' : 'Resume',
-            value: 'pause',
+    // Entries are built long before one is chosen, so a machine switch or a
+    // lost connection in between must be caught when the item fires.
+    VoidCallback guarded(String what, Future<void> Function() run) => () {
+      if (!mounted || machine != ref.read(schedulerTargetProvider)) return;
+      if (!_writable) return;
+      detached('Scheduler', what, run);
+    };
+    return [
+      CarbonMenuGroup(
+        label: schedule.name,
+        children: [
+          // Phone rows have no inline buttons, so the run controls live here.
+          if (phone && active == null)
+            CarbonMenuItem(
+              label: 'Run now',
+              icon: const CarbonIcon(CarbonIcons.play),
+              onPressed: guarded(
+                'run failed',
+                () => _act('scheduler.runNow', {'id': schedule.id}),
+              ),
+            ),
+          if (phone && active != null) ...[
+            if (active.sessionId != null)
+              CarbonMenuItem(
+                label: 'Open session',
+                onPressed: guarded('open failed', () => _open(active)),
+              )
+            else
+              CarbonMenuItem(
+                label: 'View run',
+                onPressed: guarded('view failed', () async => _viewRun(active)),
+              ),
+            CarbonMenuItem(
+              label: 'Stop run',
+              onPressed: guarded(
+                'stop failed',
+                () => _act('scheduler.stop', {'id': active.id}),
+              ),
+            ),
+          ],
+          CarbonMenuItem(
+            label: needsNewTime ? 'Set a new time' : 'Edit',
+            icon: const CarbonIcon(CarbonIcons.edit),
+            onPressed: guarded('edit failed', () async => _editSchedule(schedule)),
           ),
-        const AbMenuItem(
-          label: 'Delete',
-          value: 'delete',
-          icon: AbIcons.trash,
-          danger: true,
-        ),
-      ],
-    );
-    if (!mounted ||
-        machine != ref.read(schedulerTargetProvider) ||
-        !_writable) {
-      return;
-    }
-    switch (selected) {
-      case 'run':
-        await _act('scheduler.runNow', {'id': schedule.id});
-      case 'open':
-        await _open(active!);
-      case 'view':
-        _viewRun(active!);
-      case 'stop':
-        await _act('scheduler.stop', {'id': active!.id});
-      case 'edit':
-        _editSchedule(schedule);
-      case 'pause':
-        await _act('scheduler.update', {
-          'id': schedule.id,
-          'patch': {'enabled': !schedule.enabled},
-        });
-      case 'delete':
-        await _delete(schedule);
-    }
+          // Resuming a one-off whose time has passed is refused by the bridge;
+          // the new-time editor is the only way back.
+          if (!needsNewTime)
+            CarbonMenuItem(
+              label: schedule.enabled ? 'Pause' : 'Resume',
+              onPressed: guarded(
+                'pause failed',
+                () => _act('scheduler.update', {
+                  'id': schedule.id,
+                  'patch': {'enabled': !schedule.enabled},
+                }),
+              ),
+            ),
+          CarbonMenuItem(
+            label: 'Delete',
+            icon: const CarbonIcon(CarbonIcons.trashCan),
+            kind: CarbonMenuItemKind.danger,
+            onPressed: guarded('delete failed', () => _delete(schedule)),
+          ),
+        ],
+      ),
+    ];
   }
 
   Widget _runs(SchedulerSnapshot snapshot, bool wide) {
@@ -1521,6 +1476,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
         _runScheduleId = id;
         if (id == null) _focusedRunId = null;
       }),
+      onEditSchedule: _editSchedule,
       focusedRunId: _focusedRunId,
       onOpenSession: (run) =>
           detached('Scheduler', 'open failed', () => _open(run)),
@@ -1531,20 +1487,6 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       ),
     );
   }
-
-  Widget _card(List<Widget> children) => Container(
-    padding: const EdgeInsets.all(AbTokens.space12),
-    decoration: BoxDecoration(
-      color: context.antgrid.bgSurface,
-      border: Border.all(color: context.antgrid.borderSubtle),
-      borderRadius: AbTokens.borderRadius5,
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      spacing: AbTokens.space6,
-      children: children,
-    ),
-  );
 }
 
 ScheduleRun? schedulerActiveRun(List<ScheduleRun> runs, String scheduleId) =>
@@ -1583,3 +1525,4 @@ String schedulerError(
   if (error is StateError) return error.message;
   return caughtErrorCopy(error, "Couldn't reach the scheduler on $machineName.");
 }
+

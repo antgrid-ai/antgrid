@@ -1,20 +1,15 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_tooltip.dart';
 import '../../models/scheduler.dart';
 import 'scheduler_format.dart';
+import 'scheduler_status_glyph.dart';
 
 Color schedulerToneColor(BuildContext context, SchedulerRunTone tone) {
-  final p = context.antgrid;
-  return switch (tone) {
-    SchedulerRunTone.active => p.accent,
-    SchedulerRunTone.attention || SchedulerRunTone.warning => p.warning,
-    SchedulerRunTone.success => p.success,
-    SchedulerRunTone.error => p.error,
-    SchedulerRunTone.muted => p.statusIdle,
-  };
+  final t = CarbonTheme.of(context);
+  return tone == SchedulerRunTone.muted
+      ? t.borderStrong(CarbonLayer.of(context))
+      : schedulerCarbonToneColor(t, tone);
 }
 
 /// Outcome of each recent run, oldest first. A missed run is hollow because
@@ -25,16 +20,21 @@ class SchedulerRunSquares extends StatelessWidget {
 
   static const _side = 9.0;
 
+  /// Width of the full ten-run history (schedulerRecentRuns' default), for a
+  /// column that should never drop a square.
+  static const fullWidth = 10 * _side + 9 * CarbonSpacing.spacing02;
+
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         // The table cell can be narrower than the full history; the newest
         // runs are the ones worth keeping.
-        const pitch = _side + AbTokens.space4;
+        const pitch = _side + CarbonSpacing.spacing02;
         final fit = constraints.hasBoundedWidth
-            ? ((constraints.maxWidth + AbTokens.space4) / pitch).floor()
+            ? ((constraints.maxWidth + CarbonSpacing.spacing02) / pitch)
+                  .floor()
             : runs.length;
         final shown = fit >= runs.length
             ? runs
@@ -43,10 +43,10 @@ class SchedulerRunSquares extends StatelessWidget {
           label: 'Last ${shown.length} runs',
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            spacing: AbTokens.space4,
+            spacing: CarbonSpacing.spacing02,
             children: [
               for (final run in shown)
-                AbTooltip(
+                CarbonTooltip(
                   message: schedulerRunStatusWord(
                     run.status,
                     trigger: run.trigger,
@@ -66,9 +66,8 @@ class SchedulerRunSquares extends StatelessWidget {
                               ? null
                               : schedulerToneColor(context, tone),
                           border: hollow
-                              ? Border.all(color: p.textMuted)
+                              ? Border.all(color: t.colors.iconSecondary)
                               : null,
-                          borderRadius: BorderRadius.circular(AbTokens.radius),
                         ),
                       );
                     },
@@ -92,28 +91,22 @@ class SchedulerMiniBars extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
+    final strong = t.borderStrong(CarbonLayer.of(context));
     return Semantics(
       label: 'Recent runs',
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        spacing: AbTokens.space2,
+        spacing: CarbonSpacing.spacing01,
         children: [
           for (final run in runs)
             Container(
               width: _width,
               height: _height,
-              decoration: BoxDecoration(
-                color: switch (schedulerRunTone(
-                  run.status,
-                  trigger: run.trigger,
-                )) {
-                  SchedulerRunTone.muted ||
-                  SchedulerRunTone.warning => p.borderStrong,
-                  final tone => schedulerToneColor(context, tone),
-                },
-                borderRadius: BorderRadius.circular(AbTokens.radius),
-              ),
+              color: switch (schedulerRunTone(run.status, trigger: run.trigger)) {
+                SchedulerRunTone.muted || SchedulerRunTone.warning => strong,
+                final tone => schedulerCarbonToneColor(t, tone),
+              },
             ),
         ],
       ),
