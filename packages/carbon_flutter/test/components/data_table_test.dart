@@ -372,4 +372,155 @@ void main() {
       expect(tester.getSize(find.byType(CarbonDataTable)).width, 320);
     }
   });
+
+  group('selected rows', () {
+    List<CarbonDataTableRow> rows() => [
+      const CarbonDataTableRow(
+        cells: [Text('alpha'), Text('5')],
+        selected: true,
+      ),
+      const CarbonDataTableRow(cells: [Text('beta'), Text('4')]),
+    ];
+
+    testWidgets('fill layer-selected, hover layer-selected-hover', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _table(rows: rows()), theme: light);
+      var decoration = _ruled(tester, 'alpha');
+      expect(decoration.color, light.layerSelected(1));
+      expect((decoration.border! as Border).top.color, light.layerSelected(1));
+      expect(_ruled(tester, 'beta').color, light.layer(1));
+      await _hover(tester, tester.getCenter(find.text('alpha')));
+      decoration = _ruled(tester, 'alpha');
+      expect(decoration.color, light.layerSelectedHover(1));
+      expect(
+        (decoration.border! as Border).bottom.color,
+        light.layerSelectedHover(1),
+      );
+      expect(_style(tester, 'alpha').color, light.colors.textPrimary);
+    });
+
+    testWidgets('only the selected row is marked selected', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, _table(rows: rows()), theme: light);
+      Finder rowSemantics(String cell) => find
+          .ancestor(
+            of: find.text(cell),
+            matching: find.byWidgetPredicate(
+              (w) => w is Semantics && w.properties.role == SemanticsRole.row,
+            ),
+          )
+          .first;
+      expect(
+        tester.getSemantics(rowSemantics('alpha')),
+        isSemantics(isSelected: true),
+      );
+      expect(
+        tester.getSemantics(rowSemantics('beta')),
+        isNot(isSemantics(isSelected: true)),
+      );
+      handle.dispose();
+    });
+  });
+
+  group('expansion', () {
+    const probe = Key('probe');
+    List<CarbonDataTableRow> rows({Widget? expansion, bool selected = false}) =>
+        [
+          CarbonDataTableRow(
+            cells: const [Text('alpha'), Text('5')],
+            selected: selected,
+            expansion: expansion,
+          ),
+          const CarbonDataTableRow(cells: [Text('beta'), Text('4')]),
+        ];
+
+    Finder block(Key key) => find
+        .ancestor(
+          of: find.byKey(key),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is DecoratedBox &&
+                (w.decoration as BoxDecoration).border != null,
+          ),
+        )
+        .first;
+
+    testWidgets('renders below the cells at full width inside the rule', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        _table(rows: rows(expansion: const SizedBox(key: probe, height: 20))),
+        theme: light,
+      );
+      final table = tester.getRect(find.byType(CarbonDataTable));
+      final expansion = tester.getRect(find.byKey(probe));
+      expect(
+        expansion.top,
+        greaterThanOrEqualTo(tester.getRect(find.text('alpha')).bottom),
+      );
+      expect(expansion.left, table.left + CarbonSpacing.spacing05);
+      expect(expansion.right, table.right - CarbonSpacing.spacing05);
+      final rect = tester.getRect(block(probe));
+      expect(rect.width, table.width);
+      expect(rect.bottom, greaterThan(expansion.bottom));
+      expect(tester.getRect(find.text('beta')).top, greaterThan(rect.bottom));
+      final border =
+          (tester.widget<DecoratedBox>(block(probe)).decoration
+                  as BoxDecoration)
+              .border!
+          as Border;
+      expect(border.bottom.color, light.borderSubtle(1));
+    });
+
+    testWidgets('takes the row fill, selected and hovered', (tester) async {
+      await pumpCarbon(
+        tester,
+        _table(rows: rows(expansion: const Text('details'), selected: true)),
+        theme: light,
+      );
+      expect(_ruled(tester, 'details').color, light.layerSelected(1));
+      await _hover(tester, tester.getCenter(find.text('details')));
+      expect(_ruled(tester, 'details').color, light.layerSelectedHover(1));
+    });
+
+    testWidgets('hover does not recolour the expansion text', (tester) async {
+      await pumpCarbon(
+        tester,
+        _table(rows: rows(expansion: const Text('details'))),
+        theme: light,
+      );
+      await _hover(tester, tester.getCenter(find.text('alpha')));
+      expect(_style(tester, 'alpha').color, light.colors.textPrimary);
+      expect(_style(tester, 'details').color, light.colors.textSecondary);
+    });
+
+    testWidgets('absent when null', (tester) async {
+      await pumpCarbon(tester, _table(rows: rows()), theme: light);
+      expect(find.byKey(probe), findsNothing);
+      expect(tester.getSize(_row('alpha')).height, 48);
+    });
+
+    testWidgets('does not overflow at 320 wide and 200% text', (tester) async {
+      for (final density in CarbonDensity.values) {
+        await pumpCarbon(
+          tester,
+          _table(
+            width: 320,
+            rows: rows(
+              expansion: const Text(
+                'Last run finished with warnings in the dependency step.',
+              ),
+            ),
+          ),
+          theme: CarbonThemeData(density: density),
+          textScale: 2,
+          size: const Size(320, 2000),
+        );
+        expect(tester.takeException(), isNull);
+        expect(tester.getSize(find.byType(CarbonDataTable)).width, 320);
+      }
+    });
+  });
 }

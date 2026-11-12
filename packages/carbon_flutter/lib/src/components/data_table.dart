@@ -55,10 +55,25 @@ class CarbonDataTableColumn {
 
 /// One row of a [CarbonDataTable]: one cell widget per column.
 class CarbonDataTableRow {
-  const CarbonDataTableRow({this.key, required this.cells});
+  const CarbonDataTableRow({
+    this.key,
+    required this.cells,
+    this.selected = false,
+    this.expansion,
+  });
 
   final Key? key;
   final List<Widget> cells;
+
+  /// Fills the row with `layer-selected` (`layer-selected-hover` while
+  /// hovered) and marks it selected for assistive technology. The table has no
+  /// selection column; the host decides what selects a row.
+  final bool selected;
+
+  /// Content shown below the cells at the table's full width, inside the
+  /// row's own fill and above its bottom rule. The host owns whether it is
+  /// open: pass null to collapse. The table draws no toggle.
+  final Widget? expansion;
 }
 
 double _rowHeight(CarbonDataTableSize size) => switch (size) {
@@ -88,7 +103,8 @@ double _blockPadding(CarbonDataTableSize size) => switch (size) {
 ///   `body-compact-01` `text-secondary`, separated by 1px `border-subtle`
 ///   rules. A hovered row fills with `layer-hover`, its rules follow and its
 ///   text turns `text-primary`; rows are not interactive, so hover is the only
-///   state.
+///   state. A [CarbonDataTableRow.selected] row fills with `layer-selected`
+///   and `layer-selected-hover` instead.
 /// * [size] sets each row's minimum height; touch density floors every row at
 ///   [CarbonThemeData.touchTarget]. Rows grow with wrapped text and cells are
 ///   centred vertically.
@@ -192,6 +208,8 @@ class CarbonDataTable extends StatelessWidget {
                   key: row.key,
                   columns: columns,
                   cells: row.cells,
+                  selected: row.selected,
+                  expansion: row.expansion,
                   minHeight: minHeight,
                   blockPadding: _blockPadding(size),
                 ),
@@ -314,12 +332,16 @@ class _BodyRow extends StatefulWidget {
     super.key,
     required this.columns,
     required this.cells,
+    required this.selected,
+    required this.expansion,
     required this.minHeight,
     required this.blockPadding,
   });
 
   final List<CarbonDataTableColumn> columns;
   final List<Widget> cells;
+  final bool selected;
+  final Widget? expansion;
   final double minHeight;
   final double blockPadding;
 
@@ -339,7 +361,14 @@ class _BodyRowState extends State<_BodyRow> {
     final theme = CarbonTheme.of(context);
     final level = CarbonLayer.of(context);
     final colors = theme.colors;
-    final fill = _hovered ? theme.layerHover(level) : theme.layer(level);
+    final restFill = widget.selected
+        ? theme.layerSelected(level)
+        : theme.layer(level);
+    final fill = _hovered
+        ? (widget.selected
+              ? theme.layerSelectedHover(level)
+              : theme.layerHover(level))
+        : restFill;
     final style = theme.typography.control.copyWith(
       color: _hovered ? colors.textPrimary : colors.textSecondary,
     );
@@ -349,6 +378,7 @@ class _BodyRowState extends State<_BodyRow> {
       child: Semantics(
         role: SemanticsRole.row,
         container: true,
+        selected: widget.selected ? true : null,
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: fill,
@@ -357,7 +387,7 @@ class _BodyRowState extends State<_BodyRow> {
               // block; at rest the top rule is the layer and the bottom the
               // subtle divider.
               top: BorderSide(
-                color: _hovered ? fill : theme.layer(level),
+                color: _hovered ? fill : restFill,
                 width: CarbonBorders.hairline,
               ),
               bottom: BorderSide(
@@ -366,21 +396,47 @@ class _BodyRowState extends State<_BodyRow> {
               ),
             ),
           ),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: widget.minHeight),
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                vertical: widget.blockPadding + CarbonBorders.hairline,
-              ),
-              child: _cells(
-                columns: widget.columns,
-                cell: (i) => Semantics(
-                  role: SemanticsRole.cell,
-                  container: true,
-                  child: _cellFrame(widget.columns[i], style, widget.cells[i]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              ConstrainedBox(
+                constraints: BoxConstraints(minHeight: widget.minHeight),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    vertical: widget.blockPadding + CarbonBorders.hairline,
+                  ),
+                  child: _cells(
+                    columns: widget.columns,
+                    cell: (i) => Semantics(
+                      role: SemanticsRole.cell,
+                      container: true,
+                      child: _cellFrame(
+                        widget.columns[i],
+                        style,
+                        widget.cells[i],
+                      ),
+                    ),
+                  ),
                 ),
               ),
-            ),
+              if (widget.expansion != null)
+                // Not under the hover recolour: the content is free-form and
+                // keeps whatever text colour it brings.
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(
+                    start: CarbonSpacing.spacing05,
+                    end: CarbonSpacing.spacing05,
+                    bottom: CarbonSpacing.spacing05,
+                  ),
+                  child: DefaultTextStyle(
+                    style: theme.typography.control.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                    child: widget.expansion!,
+                  ),
+                ),
+            ],
           ),
         ),
       ),

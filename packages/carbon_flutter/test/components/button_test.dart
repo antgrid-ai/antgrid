@@ -546,6 +546,92 @@ void main() {
     });
   });
 
+  group('expanded', () {
+    for (final open in [true, false]) {
+      testWidgets('expanded: $open is announced', (tester) async {
+        final handle = tester.ensureSemantics();
+        await pumpCarbon(
+          tester,
+          _aligned(
+            CarbonButton(
+              key: _btn,
+              label: 'Details',
+              expanded: open,
+              onPressed: () {},
+            ),
+          ),
+        );
+        expect(
+          tester.getSemantics(find.byKey(_btn)),
+          matchesSemantics(
+            label: 'Details',
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            isFocusable: true,
+            hasTapAction: true,
+            hasFocusAction: true,
+            hasExpandedState: true,
+            isExpanded: open,
+          ),
+        );
+        handle.dispose();
+      });
+    }
+
+    testWidgets('null says nothing about expansion', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _aligned(CarbonButton(key: _btn, label: 'Details', onPressed: () {})),
+      );
+      expect(
+        tester.getSemantics(find.byKey(_btn)),
+        matchesSemantics(
+          label: 'Details',
+          isButton: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          isFocusable: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+        ),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('an icon-only button can disclose too', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonButton.iconOnly(
+            key: _btn,
+            icon: const CarbonIcon(CarbonIcons.close),
+            semanticLabel: 'Toggle',
+            expanded: true,
+            onPressed: () {},
+          ),
+        ),
+      );
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Toggle')),
+        matchesSemantics(
+          label: 'Toggle',
+          isButton: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          isFocusable: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+          hasExpandedState: true,
+          isExpanded: true,
+        ),
+      );
+      handle.dispose();
+    });
+  });
+
   group('lifecycle', () {
     testWidgets('density and theme switches keep focus', (tester) async {
       final node = FocusNode();

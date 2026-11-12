@@ -9,6 +9,7 @@ import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
 import 'button.dart';
+import 'status_icon.dart';
 
 /// The meaning of a notification, which picks its icon, accent and
 /// announcement urgency.
@@ -138,10 +139,6 @@ class CarbonToast extends StatelessWidget {
   }
 }
 
-// The "!" of the warning glyph must read dark on Carbon's yellow in every
-// theme, so it is not taken from a theme role that flips with brightness.
-const Color _warningGlyph = Color(0xFF161616);
-
 class _NotificationCard extends StatefulWidget {
   const _NotificationCard({
     required this.kind,
@@ -232,11 +229,11 @@ class _NotificationCardState extends State<_NotificationCard> {
     CarbonNotificationKind.error => loc.error,
   };
 
-  CarbonIcons get _icon => switch (widget.kind) {
-    CarbonNotificationKind.info => CarbonIcons.informationFilled,
-    CarbonNotificationKind.success => CarbonIcons.checkmarkFilled,
-    CarbonNotificationKind.warning => CarbonIcons.warningAltFilled,
-    CarbonNotificationKind.error => CarbonIcons.errorFilled,
+  CarbonStatusKind get _statusKind => switch (widget.kind) {
+    CarbonNotificationKind.info => CarbonStatusKind.info,
+    CarbonNotificationKind.success => CarbonStatusKind.success,
+    CarbonNotificationKind.warning => CarbonStatusKind.warning,
+    CarbonNotificationKind.error => CarbonStatusKind.error,
   };
 
   static CarbonThemeScheme _inverseScheme(CarbonThemeScheme scheme) =>
@@ -282,8 +279,10 @@ class _NotificationCardState extends State<_NotificationCard> {
         accent = high ? colors.supportErrorInverse : colors.supportError;
     }
     textColor = high ? colors.textInverse : colors.textPrimary;
+    // Null keeps the warning's fixed dark "!"; the others take the card
+    // background so the mark reads as a cut-out.
     final glyphInner = kind == CarbonNotificationKind.warning
-        ? _warningGlyph
+        ? null
         : background;
 
     // Buttons on the inverse surface need the inverse theme's roles to stay
@@ -381,8 +380,8 @@ class _NotificationCardState extends State<_NotificationCard> {
             padding: EdgeInsets.only(
               top: compact ? 0 : math.max(0, (lineHeight - iconSize) / 2),
             ),
-            child: CarbonIcon(
-              _icon,
+            child: CarbonStatusIcon(
+              _statusKind,
               size: iconSize,
               color: accent,
               innerColor: glyphInner,

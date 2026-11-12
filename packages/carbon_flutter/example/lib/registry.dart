@@ -22,6 +22,7 @@ import 'pages/modal_page.dart';
 import 'pages/notification_page.dart';
 import 'pages/search_page.dart';
 import 'pages/select_page.dart';
+import 'pages/status_icon_page.dart';
 import 'pages/tabs_page.dart';
 import 'pages/tag_page.dart';
 import 'pages/text_input_page.dart';
@@ -218,6 +219,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Data table',
     group: 'Components',
     builder: (_) => const DataTablePage(),
+  ),
+  GalleryEntry(
+    id: 'status-icon',
+    title: 'Status icon',
+    group: 'Components',
+    builder: (_) => const StatusIconPage(),
   ),
   GalleryEntry(
     id: 'settings-form',

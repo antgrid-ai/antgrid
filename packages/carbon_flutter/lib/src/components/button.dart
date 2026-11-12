@@ -86,6 +86,7 @@ class CarbonButton extends StatelessWidget {
     this.semanticLabel,
     this.focusNode,
     this.autofocus = false,
+    this.expanded,
   }) : iconSize = null,
        hoverFill = true,
        _iconOnly = false;
@@ -104,6 +105,7 @@ class CarbonButton extends StatelessWidget {
     this.autofocus = false,
     this.iconSize,
     this.hoverFill = true,
+    this.expanded,
   }) : label = null,
        expand = false,
        minWidth = null,
@@ -111,6 +113,11 @@ class CarbonButton extends StatelessWidget {
 
   /// The visible text; null for an icon-only button.
   final String? label;
+
+  /// For a button that discloses content: whether that content is showing.
+  /// Null (the default) says nothing; true or false announces the expanded or
+  /// collapsed state. The host owns the state and what it reveals.
+  final bool? expanded;
 
   /// Activation callback. Null disables the button.
   final VoidCallback? onPressed;
@@ -189,6 +196,7 @@ class CarbonButton extends StatelessWidget {
       onPressed: disabled ? null : (busy ? _ignore : onPressed),
       focusNode: focusNode,
       autofocus: autofocus,
+      expanded: expanded,
       label: name,
       value: busy ? loc.loading : null,
       excludeChildSemantics: true,

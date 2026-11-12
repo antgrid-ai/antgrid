@@ -75,10 +75,16 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   `CarbonContainedListRow` (optional `disabled`).
 - Data table: `CarbonDataTable` with `CarbonDataTableColumn` and
   `CarbonDataTableRow` for static rows (sizes, fixed or flexible columns,
-  end alignment, row hover, empty state).
+  end alignment, row hover, empty state). `CarbonDataTableRow.selected` fills a
+  row with the selected layer colours; `CarbonDataTableRow.expansion` shows
+  host-owned content below a row's cells.
 - Link: `CarbonLink` (small, medium, large; inline; optional trailing icon;
   disabled), also used for breadcrumb links, which now announce as links
   rather than buttons.
+- Status icon: `CarbonStatusIcon` and `CarbonStatusKind` (error, warning,
+  success, info); notifications now draw their leading icon through it.
+- Button: `expanded` on `CarbonButton` and `CarbonButton.iconOnly` announces
+  the expanded or collapsed state of a disclosure control.
 
 ### Interaction-state fixes
 

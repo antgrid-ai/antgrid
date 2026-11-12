@@ -21,6 +21,7 @@ export 'src/components/modal.dart';
 export 'src/components/notification.dart';
 export 'src/components/search.dart';
 export 'src/components/select.dart';
+export 'src/components/status_icon.dart';
 export 'src/components/tabs.dart';
 export 'src/components/tag.dart';
 export 'src/components/text_input.dart';
