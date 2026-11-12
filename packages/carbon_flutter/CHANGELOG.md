@@ -71,6 +71,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Tag: `CarbonTag` (read-only, dismissible, selectable, operational).
 - Contained list: `CarbonContainedList`, `CarbonContainedListSliver` and
   `CarbonContainedListRow` (optional `disabled`).
+- Data table: `CarbonDataTable` with `CarbonDataTableColumn` and
+  `CarbonDataTableRow` for static rows (sizes, fixed or flexible columns,
+  end alignment, row hover, empty state).
 
 ### Interaction-state fixes
 

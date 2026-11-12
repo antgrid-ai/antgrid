@@ -9,6 +9,7 @@ import 'pages/compositions/row_actions_list_page.dart';
 import 'pages/compositions/searchable_picker_page.dart';
 import 'pages/compositions/confirmation_flow_page.dart';
 import 'pages/contained_list_page.dart';
+import 'pages/data_table_page.dart';
 import 'pages/content_switcher_page.dart';
 import 'pages/dropdown_page.dart';
 import 'pages/form_page.dart';
@@ -204,6 +205,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Contained list',
     group: 'Components',
     builder: (_) => const ContainedListPage(),
+  ),
+  GalleryEntry(
+    id: 'data-table',
+    title: 'Data table',
+    group: 'Components',
+    builder: (_) => const DataTablePage(),
   ),
   GalleryEntry(
     id: 'settings-form',

@@ -9,6 +9,7 @@ export 'src/components/button.dart';
 export 'src/components/checkbox.dart';
 export 'src/components/contained_list.dart';
 export 'src/components/content_switcher.dart';
+export 'src/components/data_table.dart';
 export 'src/components/dropdown.dart';
 export 'src/components/form.dart';
 export 'src/components/inline_loading.dart';
