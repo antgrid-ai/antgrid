@@ -55,6 +55,7 @@ class CarbonFieldFrame extends StatelessWidget {
     this.enabled = true,
     this.readOnly = false,
     this.excludeTextSemantics = false,
+    this.announceError = false,
     required this.child,
   });
 
@@ -79,6 +80,12 @@ class CarbonFieldFrame extends StatelessWidget {
   /// Removes the label, helper and message texts from the semantics tree, for
   /// fields that carry those strings on their own node.
   final bool excludeTextSemantics;
+
+  /// Keeps the error message in the semantics tree as a polite live region,
+  /// even with [excludeTextSemantics], so an error appearing while the field
+  /// is in use is announced. For fields whose status line otherwise carries a
+  /// live region of its own (a result count) that the error replaces.
+  final bool announceError;
 
   final Widget child;
 
@@ -170,7 +177,17 @@ class CarbonFieldFrame extends StatelessWidget {
         field,
         if (message != null) ...<Widget>[
           const SizedBox(height: CarbonSpacing.spacing02),
-          text(message, type.helper.copyWith(color: messageColor)),
+          if (announceError && error != null)
+            Semantics(
+              container: true,
+              liveRegion: true,
+              child: Text(
+                message,
+                style: type.helper.copyWith(color: messageColor),
+              ),
+            )
+          else
+            text(message, type.helper.copyWith(color: messageColor)),
         ],
       ],
     );

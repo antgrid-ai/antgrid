@@ -118,6 +118,15 @@ class OptionTypeahead {
     _last = null;
   }
 
+  /// Whether a search string is still within its window, which is when Space
+  /// belongs to the search rather than to activation.
+  bool get active {
+    final last = _last;
+    return _buffer.isNotEmpty &&
+        last != null &&
+        DateTime.now().difference(last) <= _window;
+  }
+
   /// The index to highlight after [character] was typed while [from] was
   /// highlighted, or -1 when nothing enabled matches.
   int match<T>(

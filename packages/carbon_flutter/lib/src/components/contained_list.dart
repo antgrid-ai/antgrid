@@ -535,11 +535,14 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       );
     } else {
       target = MergeSemantics(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: theme.minTarget),
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: text,
+        child: Semantics(
+          selected: selectable ? selected : null,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: theme.minTarget),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: text,
+            ),
           ),
         ),
       );

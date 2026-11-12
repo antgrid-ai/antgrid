@@ -124,7 +124,7 @@ class CarbonFieldAction extends StatelessWidget {
 
 /// How far a [CarbonFieldAction]'s hover fill stays inside its field box.
 class _ActionInset extends InheritedWidget {
-  const _ActionInset({required this.insets, required super.child});
+  const _ActionInset({super.key, required this.insets, required super.child});
 
   final EdgeInsetsGeometry insets;
 
@@ -227,7 +227,10 @@ class CarbonActionFieldBox extends StatelessWidget {
                   : CrossAxisAlignment.stretch,
               children: <Widget>[
                 for (var i = 0; i < actions.length; i++)
+                  // Keyed like the action so a leaving sibling cannot hand its
+                  // element, focus and hover state to a different action.
                   _ActionInset(
+                    key: actions[i].key,
                     insets: EdgeInsetsDirectional.only(
                       top: edge,
                       bottom: outline,
@@ -430,7 +433,10 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       _controller.addListener(_handleText);
       _syncText();
     }
-    if (oldWidget.maxLength != widget.maxLength) _syncText();
+    if (oldWidget.maxLength != widget.maxLength ||
+        oldWidget.showCounter != widget.showCounter) {
+      _syncText();
+    }
     // A disabled field offers no way to hide the text again.
     if (!widget.enabled) _revealed = false;
     if (!identical(oldWidget.focusNode, widget.focusNode)) {
@@ -462,16 +468,19 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     SchedulerBinding.instance.addPostFrameCallback((_) => notifier.dispose());
   }
 
+  // Only the counter reads the length; TextField enforces maxLength itself.
+  bool get _tracksLength => widget.showCounter && widget.maxLength != null;
+
   void _syncText() {
     final text = _controller.text;
     _hasText = text.isNotEmpty;
-    _length = widget.maxLength == null ? 0 : text.characters.length;
+    _length = _tracksLength ? text.characters.length : 0;
   }
 
   void _handleText() {
     final text = _controller.text;
     final hasText = text.isNotEmpty;
-    final length = widget.maxLength == null ? 0 : text.characters.length;
+    final length = _tracksLength ? text.characters.length : 0;
     if (hasText == _hasText && length == _length) return;
     _hasText = hasText;
     _length = length;
@@ -637,12 +646,14 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     final actions = <Widget>[
       if (widget.clearable && editable && _hasText)
         CarbonFieldAction(
+          key: const ValueKey<String>('clear'),
           icon: const CarbonIcon(CarbonIcons.close),
           semanticLabel: messages.clear,
           onPressed: _clear,
         ),
       if (password && enabled)
         CarbonFieldAction(
+          key: const ValueKey<String>('reveal'),
           icon: CarbonIcon(
             _revealed ? CarbonIcons.viewOff : CarbonIcons.view,
           ),
@@ -713,6 +724,9 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     return CarbonFormFieldRegistrar(
       invalid: error != null,
       focusNode: _focus,
+      announcement: error == null
+          ? null
+          : <String>[?labelText, error].join('. '),
       child: CarbonFieldFrame(
         label: widget.label,
         helperText: helper,

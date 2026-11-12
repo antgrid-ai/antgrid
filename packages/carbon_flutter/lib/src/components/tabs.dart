@@ -519,14 +519,14 @@ class _Tab extends StatelessWidget {
             : colors.textSecondary;
         final Color iconColor = enabled ? textColor : colors.iconDisabled;
         const transparent = Color(0x00000000);
-        final Border border;
+        final BoxBorder border;
         if (contained) {
-          border = Border(
+          border = BorderDirectional(
             top: BorderSide(
               color: selected && enabled ? colors.borderInteractive : transparent,
               width: CarbonBorders.selectedTab,
             ),
-            right: BorderSide(
+            end: BorderSide(
               color: theme.borderSubtle(level),
               width: CarbonBorders.hairline,
             ),

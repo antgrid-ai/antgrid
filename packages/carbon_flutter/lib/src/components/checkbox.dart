@@ -44,7 +44,10 @@ class CarbonCheckbox extends StatelessWidget {
   /// checked, indeterminate.
   final bool tristate;
 
-  /// A custom label. Its own semantics merge into the checkbox's node.
+  /// A custom label. Without [labelText] or [semanticLabel] its semantics merge
+  /// into the checkbox's node and name it. With either, that name wins and the
+  /// label keeps its own nodes, so interactive content in it (a link) stays
+  /// reachable instead of being folded into the checkbox.
   final Widget? label;
 
   /// A plain text label; also the accessible name.
@@ -145,7 +148,15 @@ class CarbonCheckbox extends StatelessWidget {
                 padding: EdgeInsets.symmetric(vertical: pad),
                 child: DefaultTextStyle.merge(
                   style: labelStyle,
-                  child: labelWidget!,
+                  // Its own boundary once the box has another name, so the
+                  // label's nodes stay out of the checkbox's node.
+                  child: label != null && name != null
+                      ? Semantics(
+                          container: true,
+                          explicitChildNodes: true,
+                          child: labelWidget!,
+                        )
+                      : labelWidget!,
                 ),
               ),
             ),
@@ -154,10 +165,14 @@ class CarbonCheckbox extends StatelessWidget {
       },
     );
 
-    // Explicit merge so a custom label widget joins the checkbox's own node.
-    final target = MergeSemantics(
-      child: Semantics(readOnly: readOnly ? true : null, child: row),
-    );
+    // A custom label with no other name is the only name the box has, so it
+    // joins the box's node. Once a name exists, merging would read the label
+    // twice or contradict the name, and would fold a link into the checkbox.
+    final labelNamesBox = label != null && name == null;
+    final semantic = Semantics(readOnly: readOnly ? true : null, child: row);
+    final target = labelNamesBox || label == null
+        ? MergeSemantics(child: semantic)
+        : semantic;
     // Always a Column, so the control keeps its element, focus node and
     // hover state when a message appears or clears.
     return Column(

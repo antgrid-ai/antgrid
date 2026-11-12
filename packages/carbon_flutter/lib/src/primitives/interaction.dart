@@ -311,6 +311,12 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   void _handleHighlightMode(FocusHighlightMode mode) {
     final traditional = _isTraditional(mode);
     if (!mounted || _highlightTraditional == traditional) return;
+    // Only a focused control shows the ring, and gaining focus rebuilds anyway,
+    // so an unfocused one just records the flag.
+    if (!_focused) {
+      _highlightTraditional = traditional;
+      return;
+    }
     setState(() => _highlightTraditional = traditional);
   }
 

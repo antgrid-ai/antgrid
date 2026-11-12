@@ -217,9 +217,14 @@ class CarbonButton extends StatelessWidget {
       },
     );
     // Sighted pointer and keyboard users get the name Carbon shows in a
-    // tooltip for every icon-only button.
+    // tooltip for every icon-only button; the button already carries the name
+    // as its label, so the tooltip stays out of semantics.
     return _iconOnly && name.isNotEmpty
-        ? CarbonTooltip(message: name, child: button)
+        ? CarbonTooltip(
+            message: name,
+            excludeFromSemantics: true,
+            child: button,
+          )
         : button;
   }
 

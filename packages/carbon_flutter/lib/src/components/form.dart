@@ -255,10 +255,16 @@ class CarbonFormFieldRegistrar extends StatefulWidget {
     required this.invalid,
     required this.focusNode,
     required this.child,
+    this.announcement,
   });
 
   final bool invalid;
   final FocusNode focusNode;
+
+  /// Spoken when [CarbonFormController.focusFirstInvalid] targets a field that
+  /// already has focus, where moving focus would announce nothing. Typically
+  /// the field's label and error.
+  final String? announcement;
   final Widget child;
 
   @override
@@ -286,6 +292,15 @@ class _CarbonFormFieldRegistrarState extends State<CarbonFormFieldRegistrar> {
       alignment: 0.1,
       duration: Duration.zero,
     );
+    final announcement = widget.announcement;
+    if (widget.focusNode.hasFocus && announcement != null) {
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        announcement,
+        Directionality.of(context),
+      );
+      return;
+    }
     widget.focusNode.requestFocus();
   }
 

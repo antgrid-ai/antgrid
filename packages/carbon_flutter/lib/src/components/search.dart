@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart'
     show
         AdaptiveTextSelectionToolbar,
+        InputBorder,
         InputDecoration,
         Material,
         MaterialType,
@@ -255,6 +256,10 @@ class _CarbonSearchState extends State<CarbonSearch> {
 
     final foreground = enabled ? colors.textPrimary : colors.textDisabled;
     final placeholder = widget.placeholder ?? messages.search;
+    final name = widget.semanticLabel ?? messages.search;
+    final hintStyle = type.control.copyWith(
+      color: enabled ? colors.textPlaceholder : colors.textDisabled,
+    );
 
     final textField = TextField(
       controller: _controller,
@@ -266,12 +271,25 @@ class _CarbonSearchState extends State<CarbonSearch> {
       style: type.control.copyWith(color: foreground),
       cursorColor: colors.textPrimary,
       cursorWidth: 1,
-      decoration: InputDecoration.collapsed(
-        hintText: placeholder,
-        hintStyle: type.control.copyWith(
-          color: enabled ? colors.textPlaceholder : colors.textDisabled,
-        ),
-      ),
+      decoration: placeholder == name
+          // The hint text is merged into the editable's label, so a
+          // placeholder equal to the name would be read twice.
+          ? InputDecoration(
+              isCollapsed: true,
+              border: InputBorder.none,
+              hint: ExcludeSemantics(
+                child: Text(
+                  placeholder,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: hintStyle,
+                ),
+              ),
+            )
+          : InputDecoration.collapsed(
+              hintText: placeholder,
+              hintStyle: hintStyle,
+            ),
       onChanged: widget.onChanged,
       onSubmitted: widget.onSubmitted,
       contextMenuBuilder: (context, state) => _ToolbarPresence(
@@ -283,7 +301,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
     );
 
     final editable = Semantics(
-      label: widget.semanticLabel ?? messages.search,
+      label: name,
       hint: error,
       validationResult: error != null
           ? SemanticsValidationResult.invalid
@@ -333,6 +351,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
         actions: <Widget>[
           if (_editable && _hasText)
             CarbonFieldAction(
+              key: const ValueKey<String>('clear'),
               icon: const CarbonIcon(CarbonIcons.close),
               semanticLabel: messages.clearSearch,
               onPressed: _clear,
@@ -358,6 +377,8 @@ class _CarbonSearchState extends State<CarbonSearch> {
               enabled: enabled,
               readOnly: readOnly,
               excludeTextSemantics: true,
+              // The error replaces the count's live region.
+              announceError: true,
               child: box,
             ),
             if (countText != null) ...<Widget>[

@@ -198,6 +198,17 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
       _open(keyboard: activationKeyIsDown());
       return;
     }
+    final keyboard = HardwareKeyboard.instance;
+    if (_typeahead.active &&
+        keyboard.isLogicalKeyPressed(LogicalKeyboardKey.space) &&
+        !keyboard.isLogicalKeyPressed(LogicalKeyboardKey.enter) &&
+        !keyboard.isLogicalKeyPressed(LogicalKeyboardKey.numpadEnter)) {
+      // Space mid-search extends the prefix ("new york") like a native select
+      // instead of committing the row the search has reached.
+      final match = _typeahead.match(widget.options, _active, ' ');
+      if (match >= 0) _move(match);
+      return;
+    }
     if (activationKeyIsDown() && _active >= 0) {
       _commit(_active);
     } else {

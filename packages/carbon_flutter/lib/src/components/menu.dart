@@ -1021,9 +1021,11 @@ class _MenuRow extends StatelessWidget {
                     ),
                     if (flat.shortcut != null) ...<Widget>[
                       const SizedBox(width: CarbonSpacing.spacing06),
-                      Text(
-                        flat.shortcut!,
-                        style: style.copyWith(color: secondary),
+                      Flexible(
+                        child: Text(
+                          flat.shortcut!,
+                          style: style.copyWith(color: secondary),
+                        ),
                       ),
                     ],
                     if (isSubmenu) ...<Widget>[

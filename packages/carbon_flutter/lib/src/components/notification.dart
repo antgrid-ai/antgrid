@@ -609,7 +609,7 @@ class CarbonToastOverlay extends StatelessWidget {
                         children: [
                           for (final entry in shown)
                             Padding(
-                              key: ValueKey<int>(entry.id),
+                              key: ObjectKey(entry),
                               padding: const EdgeInsets.only(
                                 bottom: CarbonSpacing.spacing03,
                               ),

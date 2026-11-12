@@ -273,6 +273,8 @@ class CarbonTag extends StatelessWidget {
     main = LayoutBuilder(
       builder: (context, constraints) => CarbonTooltip(
         message: label,
+        // The tag node already carries the full label as its name.
+        excludeFromSemantics: true,
         enabled: _truncates(
           context,
           style,

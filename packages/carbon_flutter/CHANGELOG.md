@@ -26,6 +26,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - `CarbonInteraction` (focus, hover, press, keyboard activation, semantics),
   `CarbonFocusRing`, `CarbonFieldFrame` and `CarbonFieldBox`,
   `CarbonAnchoredPopup` with `CarbonPopupController`, and `CarbonOption`.
+- `CarbonFieldFrame.announceError` keeps an error as a polite live region
+  for fields whose status line already carries one (Search uses it).
 
 ### Components
 
@@ -35,7 +37,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   variants, clear and reveal actions, and a counter.
 - Form: `CarbonForm`, `CarbonFormSection`, `CarbonFormActions`,
   `CarbonFormController` (focus the first invalid field) and
-  `CarbonFormFieldRegistrar`.
+  `CarbonFormFieldRegistrar`, whose optional `announcement` is spoken when
+  the first invalid field already has focus.
 - Search: `CarbonSearch` with host-fed busy, error and result count.
 - Select: `CarbonSelect`.
 - Dropdown: `CarbonDropdown` and the searchable `CarbonComboBox`.
