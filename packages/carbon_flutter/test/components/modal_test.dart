@@ -613,9 +613,10 @@ void main() {
       expect(controller.text, 'hello');
       expect(field.hasPrimaryFocus, isTrue);
 
-      final compactSize = titleSize();
+      // Carbon's heading-03 is 20/28 at both densities.
+      expect(titleSize(), 20);
       await harness.setDensity(tester, CarbonDensity.touch);
-      expect(titleSize(), greaterThan(compactSize));
+      expect(titleSize(), 20);
       expect(controller.text, 'hello');
       expect(field.hasPrimaryFocus, isTrue);
       expect(surface(), dark.layer(1));

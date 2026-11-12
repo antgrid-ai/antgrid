@@ -1,7 +1,8 @@
+import 'dart:ui' show Tristate;
+
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:carbon_flutter/src/components/option_listbox.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -748,7 +749,7 @@ void main() {
       await harness.setDensity(tester, CarbonDensity.touch);
       expect(tester.getSize(find.byType(CarbonFieldBox)).height, 48);
       final row = tester.getRect(
-        find.ancestor(of: _row('Alpha'), matching: find.byType(ColoredBox)).first,
+        find.ancestor(of: _row('Alpha'), matching: find.byType(DecoratedBox)).first,
       );
       expect(row.height, 48);
     });
@@ -791,13 +792,13 @@ void main() {
       var data = node.getSemanticsData();
       expect(data.label, contains('Project'));
       expect(data.value, 'Alpha');
-      expect(data.hasFlag(SemanticsFlag.isTextField), isTrue);
-      expect(data.hasFlag(SemanticsFlag.isExpanded), isFalse);
+      expect(data.flagsCollection.isTextField, isTrue);
+      expect(data.flagsCollection.isExpanded, Tristate.isFalse);
       await tester.tap(_input);
       await _settle(tester);
       node = tester.getSemantics(find.byType(EditableText));
       data = node.getSemanticsData();
-      expect(data.hasFlag(SemanticsFlag.isExpanded), isTrue);
+      expect(data.flagsCollection.isExpanded, Tristate.isTrue);
       handle.dispose();
     });
 
@@ -811,7 +812,7 @@ void main() {
             find.ancestor(of: _row('Charlie'), matching: find.byType(Semantics)).first,
           )
           .getSemanticsData();
-      expect(charlie.hasFlag(SemanticsFlag.isSelected), isTrue);
+      expect(charlie.flagsCollection.isSelected, Tristate.isTrue);
       handle.dispose();
     });
 

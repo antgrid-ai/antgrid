@@ -44,8 +44,9 @@ enum CarbonActivationMode {
 /// tickers and removing them from focus.
 ///
 /// Keyboard contract:
-/// * The list is one tab stop. Tab enters on the tab that last held focus, or
-///   the selected one, and leaves past the list.
+/// * The list is one tab stop. Tab always enters on the selected tab (the
+///   first enabled one when nothing is selected) and leaves past the list;
+///   focus that was moved without selecting is not remembered once it leaves.
 /// * Left and Right move focus to the previous and next enabled tab, wrapping
 ///   at the ends; the two swap in right-to-left layouts. Home and End jump to
 ///   the first and last enabled tab.
@@ -95,8 +96,10 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
   final GlobalKey _viewportKey = GlobalKey();
 
   // Last tab that held focus while the list had it; the tab stop when manual
-  // focus differs from selection. Cleared when focus leaves the list.
+  // focus differs from selection. Cleared when focus leaves the list. The flag
+  // exists because null is a legal tab value and cannot double as "no stop".
   Object? _stop;
+  bool _hasStop = false;
   bool _overflow = false;
   bool _canBack = false;
   bool _canForward = false;
@@ -144,7 +147,12 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
         node.dispose();
       }
     });
-    if (stale.contains(_stop)) _stop = null;
+    if (_hasStop && stale.contains(_stop)) _clearStop();
+  }
+
+  void _clearStop() {
+    _stop = null;
+    _hasStop = false;
   }
 
   int _indexOf(Object? value) {
@@ -163,7 +171,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
 
   int _stopIndex(int selected) {
     final tabs = widget.tabs;
-    var i = _stop == null ? -1 : _indexOf(_stop);
+    var i = _hasStop ? _indexOf(_stop) : -1;
     if (i >= 0 && tabs[i].enabled) return i;
     i = selected;
     if (i >= 0 && tabs[i].enabled) return i;
@@ -221,13 +229,18 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
 
   void _handleTabFocus(Object? value, bool focused) {
     if (!focused) return;
-    if (_stop != value) setState(() => _stop = value);
+    if (!_hasStop || _stop != value) {
+      setState(() {
+        _stop = value;
+        _hasStop = true;
+      });
+    }
     _revealAfterFrame(value);
   }
 
   void _handleGroupFocus(bool focused) {
-    if (focused || _stop == null) return;
-    setState(() => _stop = null);
+    if (focused || !_hasStop) return;
+    setState(_clearStop);
   }
 
   void _revealAfterFrame(Object? value, {bool animate = true}) {
@@ -304,7 +317,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
       // The buttons narrow the viewport, which can push the tab that was in
       // view under them.
       if (overflowChanged) {
-        _revealAfterFrame(_stop ?? widget.value, animate: false);
+        _revealAfterFrame(_hasStop ? _stop : widget.value, animate: false);
       }
     }
 

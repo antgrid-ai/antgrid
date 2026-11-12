@@ -377,7 +377,9 @@ class CarbonContainedListSliver extends StatelessWidget {
 /// focusable and not announced as a button. [onSelectedChanged] makes the row
 /// a selection toggle that reports the opposite of [selected]; otherwise
 /// [onPressed] runs and [selected] only styles the row, which suits
-/// single-selection lists the host manages itself.
+/// single-selection lists the host manages itself. Pass [selected] on every
+/// row of such a list, false included, so each row announces its selected
+/// state; leave it null for rows that are not part of a selection.
 ///
 /// The row is at least 32 (compact) or 48 (touch) tall and grows with its
 /// text, which wraps. With [revealActionsOnHover] the actions of a compact row
@@ -392,7 +394,7 @@ class CarbonContainedListRow extends StatefulWidget {
     this.actions = const <Widget>[],
     this.onPressed,
     this.onSelectedChanged,
-    this.selected = false,
+    this.selected,
     this.revealActionsOnHover = false,
     this.focusNode,
   });
@@ -411,7 +413,7 @@ class CarbonContainedListRow extends StatefulWidget {
 
   final VoidCallback? onPressed;
   final ValueChanged<bool>? onSelectedChanged;
-  final bool selected;
+  final bool? selected;
   final bool revealActionsOnHover;
   final FocusNode? focusNode;
 
@@ -425,7 +427,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
 
   VoidCallback? get _activate {
     final toggle = widget.onSelectedChanged;
-    if (toggle != null) return () => toggle(!widget.selected);
+    if (toggle != null) return () => toggle(!(widget.selected ?? false));
     return widget.onPressed;
   }
 
@@ -447,8 +449,9 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
     final inset = scope?.inset ?? false;
     final activate = _activate;
     final interactive = activate != null;
-    final selected = widget.selected;
-    final selectable = widget.onSelectedChanged != null || selected;
+    final selected = widget.selected ?? false;
+    final selectable =
+        widget.onSelectedChanged != null || widget.selected != null;
     final secondary = widget.secondary;
 
     final Color fill;
@@ -512,7 +515,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       target = CarbonInteraction(
         onPressed: activate,
         focusNode: widget.focusNode,
-        button: !selectable,
+        button: widget.onSelectedChanged == null,
         label: secondary == null ? widget.title : '${widget.title}\n$secondary',
         selected: selectable ? selected : null,
         excludeChildSemantics: true,
@@ -571,7 +574,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               maintainAnimation: true,
               maintainSize: true,
               maintainSemantics: true,
-              maintainInteractivity: true,
+              maintainFocusability: true,
               child: Padding(
                 padding: const EdgeInsetsDirectional.only(
                   end: CarbonSpacing.spacing03,

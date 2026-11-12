@@ -387,4 +387,113 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('semantics and chrome', () {
+    testWidgets('a selectable tag without a handler still announces selected', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, _t(selected: true));
+      final node = tester
+          .getSemantics(find.bySemanticsLabel('Backend'))
+          .getSemanticsData();
+      expect(node.flagsCollection.isSelected, Tristate.isTrue);
+      handle.dispose();
+    });
+
+    testWidgets('a selectable tag is announced as a button', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, _t(selected: false, onSelectedChanged: (_) {}));
+      final node = tester
+          .getSemantics(find.bySemanticsLabel('Backend'))
+          .getSemanticsData();
+      expect(node.flagsCollection.isButton, isTrue);
+      expect(node.flagsCollection.isSelected, Tristate.isFalse);
+      handle.dispose();
+    });
+
+    BoxDecoration pill(WidgetTester tester) =>
+        tester
+                .widget<DecoratedBox>(
+                  find
+                      .descendant(
+                        of: find.byType(CarbonTag),
+                        matching: find.byType(DecoratedBox),
+                      )
+                      .first,
+                )
+                .decoration
+            as BoxDecoration;
+
+    testWidgets('an unselected selectable tag uses core tokens and a border', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _t(selected: false, onSelectedChanged: (_) {}));
+      final theme = CarbonThemeData();
+      final decoration = pill(tester);
+      expect(decoration.color, theme.layer(1));
+      expect(
+        (decoration.border! as Border).top.color,
+        theme.colors.borderInverse,
+      );
+    });
+
+    testWidgets('an operational tag keeps its role border', (tester) async {
+      await pumpCarbon(tester, _t(onPressed: () {}));
+      expect(
+        (pill(tester).border! as Border).top.color,
+        CarbonThemeData().colors.tagBlue.border,
+      );
+    });
+
+    testWidgets('a disabled tag is outlined with the disabled border', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _t(onPressed: () {}, disabled: true));
+      final theme = CarbonThemeData();
+      final decoration = pill(tester);
+      expect(decoration.color, theme.layer(1));
+      expect(
+        (decoration.border! as Border).top.color,
+        theme.colors.borderDisabled,
+      );
+    });
+
+    testWidgets('a short interactive tag keeps the touch width', (
+      tester,
+    ) async {
+      final harness = await pumpCarbon(
+        tester,
+        _t(label: '1', size: CarbonTagSize.small, onPressed: () {}),
+      );
+      await harness.setDensity(tester, CarbonDensity.touch);
+      expect(
+        tester.getSize(find.byType(CarbonInteraction)).width,
+        greaterThanOrEqualTo(48),
+      );
+    });
+
+    testWidgets('a truncated label is revealed on hover', (tester) async {
+      const full = 'A very long tag label that truncates';
+      await pumpCarbon(tester, _t(label: full, width: 120));
+      expect(find.text(full), findsOneWidget);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.byKey(_tag)));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+      expect(find.text(full), findsNWidgets(2));
+    });
+
+    testWidgets('a label that fits has no tooltip', (tester) async {
+      await pumpCarbon(tester, _t());
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.byKey(_tag)));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Backend'), findsOneWidget);
+    });
+  });
 }

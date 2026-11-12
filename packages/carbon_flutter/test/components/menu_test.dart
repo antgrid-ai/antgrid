@@ -386,15 +386,15 @@ void main() {
     await _open(tester);
     expect(
       tester.getSemantics(find.text('Word wrap')),
-      containsSemantics(label: 'Word wrap', hasCheckedState: true, isChecked: true),
+      isSemantics(label: 'Word wrap', hasCheckedState: true, isChecked: true),
     );
     expect(
       tester.getSemantics(find.text('Minimap')),
-      containsSemantics(label: 'Minimap', hasCheckedState: true, isChecked: false),
+      isSemantics(label: 'Minimap', hasCheckedState: true, isChecked: false),
     );
     expect(
       tester.getSemantics(find.text('Beta')),
-      containsSemantics(label: 'Beta', hasCheckedState: true, isChecked: false),
+      isSemantics(label: 'Beta', hasCheckedState: true, isChecked: false),
     );
     expect(find.text('Mode'), findsOneWidget);
 
@@ -438,22 +438,22 @@ void main() {
     expect(find.bySemanticsLabel('Menu'), findsOneWidget);
     expect(
       tester.getSemantics(find.text('Cut')),
-      containsSemantics(label: 'Cut', hint: 'Ctrl+X', hasEnabledState: true, isEnabled: true),
+      isSemantics(label: 'Cut', hint: 'Ctrl+X', hasEnabledState: true, isEnabled: true),
     );
     expect(
       tester.getSemantics(find.text('Paste')),
-      containsSemantics(label: 'Paste', hasEnabledState: true, isEnabled: false),
+      isSemantics(label: 'Paste', hasEnabledState: true, isEnabled: false),
     );
     expect(
       tester.getSemantics(find.text('More')),
-      containsSemantics(label: 'More', hasExpandedState: true, isExpanded: false),
+      isSemantics(label: 'More', hasExpandedState: true, isExpanded: false),
     );
     await tester.tap(find.text('More'));
     await tester.pump();
     await tester.pump();
     expect(
       tester.getSemantics(find.text('More')),
-      containsSemantics(label: 'More', hasExpandedState: true, isExpanded: true),
+      isSemantics(label: 'More', hasExpandedState: true, isExpanded: true),
     );
     handle.dispose();
   });

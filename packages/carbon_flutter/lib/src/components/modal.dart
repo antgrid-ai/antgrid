@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -163,24 +164,39 @@ Widget _enter(BuildContext context, Animation<double> animation, Widget child) {
   );
 }
 
+// One tree shape for every presentation so that crossing a breakpoint, or a
+// host toggling [CarbonModalFrame.fullScreen], updates the dialog in place
+// instead of remounting it and discarding what the user typed.
+Widget _place(
+  BuildContext context,
+  Animation<double> animation,
+  Widget modal, {
+  required bool fullScreen,
+}) {
+  final insets = _safeInsets(context);
+  return Padding(
+    padding: fullScreen
+        ? insets
+        : insets.add(const EdgeInsets.all(CarbonSpacing.spacing05)),
+    child: Center(
+      child: _enter(
+        context,
+        animation,
+        CarbonModalFrame(fullScreen: fullScreen, child: modal),
+      ),
+    ),
+  );
+}
+
 class _CenteredPresentation extends CarbonModalPresentation {
   const _CenteredPresentation();
 
   @override
-  Widget build(BuildContext context, Animation<double> animation, Widget modal) {
-    return Padding(
-      padding: _safeInsets(context).add(
-        const EdgeInsets.all(CarbonSpacing.spacing05),
-      ),
-      child: Center(
-        child: _enter(
-          context,
-          animation,
-          CarbonModalFrame(fullScreen: false, child: modal),
-        ),
-      ),
-    );
-  }
+  Widget build(
+    BuildContext context,
+    Animation<double> animation,
+    Widget modal,
+  ) => _place(context, animation, modal, fullScreen: false);
 
   @override
   bool operator ==(Object other) => other is _CenteredPresentation;
@@ -193,16 +209,11 @@ class _FullScreenPresentation extends CarbonModalPresentation {
   const _FullScreenPresentation();
 
   @override
-  Widget build(BuildContext context, Animation<double> animation, Widget modal) {
-    return Padding(
-      padding: _safeInsets(context),
-      child: _enter(
-        context,
-        animation,
-        CarbonModalFrame(fullScreen: true, child: modal),
-      ),
-    );
-  }
+  Widget build(
+    BuildContext context,
+    Animation<double> animation,
+    Widget modal,
+  ) => _place(context, animation, modal, fullScreen: true);
 
   @override
   bool operator ==(Object other) => other is _FullScreenPresentation;
@@ -217,12 +228,16 @@ class _AdaptivePresentation extends CarbonModalPresentation {
   final double compactBelow;
 
   @override
-  Widget build(BuildContext context, Animation<double> animation, Widget modal) {
-    final compact = MediaQuery.sizeOf(context).width < compactBelow;
-    return compact
-        ? const _FullScreenPresentation().build(context, animation, modal)
-        : const _CenteredPresentation().build(context, animation, modal);
-  }
+  Widget build(
+    BuildContext context,
+    Animation<double> animation,
+    Widget modal,
+  ) => _place(
+    context,
+    animation,
+    modal,
+    fullScreen: MediaQuery.sizeOf(context).width < compactBelow,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -353,7 +368,9 @@ class CarbonModal extends StatelessWidget {
                   header: true,
                   child: Text(
                     title,
-                    style: type.headingLarge.copyWith(color: colors.textPrimary),
+                    style: (theme.isTouch ? type.headingLarge : type.title).copyWith(
+                      color: colors.textPrimary,
+                    ),
                   ),
                 ),
               ],
@@ -417,24 +434,17 @@ class CarbonModal extends StatelessWidget {
           final width = fullScreen
               ? constraints.maxWidth
               : math.min(size.width, constraints.maxWidth);
-          final content = Column(
-            mainAxisSize: fullScreen ? MainAxisSize.max : MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              header,
-              if (!boundedHeight)
-                bodyView
-              else if (fullScreen)
-                Expanded(child: bodyView)
-              else
-                Flexible(child: bodyView),
-              ?footer,
-            ],
-          );
           return SizedBox(
             width: width,
             height: fullScreen && boundedHeight ? constraints.maxHeight : null,
-            child: CarbonLayerSurface(child: content),
+            child: CarbonLayerSurface(
+              child: _ModalLayout(
+                fullScreen: fullScreen,
+                header: header,
+                body: bodyView,
+                footer: footer,
+              ),
+            ),
           );
         },
       ),
@@ -442,13 +452,164 @@ class CarbonModal extends StatelessWidget {
   }
 }
 
+enum _ModalSlot { header, body, footer }
+
+/// Stacks header, scrolling body and footer. When the height cannot hold all
+/// three, the body gives way first, then the header is clipped from its
+/// bottom edge; the footer keeps its height so the actions stay reachable.
+class _ModalLayout
+    extends SlottedMultiChildRenderObjectWidget<_ModalSlot, RenderBox> {
+  const _ModalLayout({
+    required this.fullScreen,
+    required this.header,
+    required this.body,
+    required this.footer,
+  });
+
+  final bool fullScreen;
+  final Widget header;
+  final Widget body;
+  final Widget? footer;
+
+  @override
+  Iterable<_ModalSlot> get slots => _ModalSlot.values;
+
+  @override
+  Widget? childForSlot(_ModalSlot slot) => switch (slot) {
+    _ModalSlot.header => header,
+    _ModalSlot.body => body,
+    _ModalSlot.footer => footer,
+  };
+
+  @override
+  SlottedContainerRenderObjectMixin<_ModalSlot, RenderBox> createRenderObject(
+    BuildContext context,
+  ) => _RenderModalLayout(fullScreen: fullScreen);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderModalLayout renderObject,
+  ) {
+    renderObject.fullScreen = fullScreen;
+  }
+}
+
+class _RenderModalLayout extends RenderBox
+    with SlottedContainerRenderObjectMixin<_ModalSlot, RenderBox> {
+  _RenderModalLayout({required bool fullScreen}) : _fullScreen = fullScreen;
+
+  bool _fullScreen;
+
+  set fullScreen(bool value) {
+    if (_fullScreen == value) return;
+    _fullScreen = value;
+    markNeedsLayout();
+  }
+
+  RenderBox get _header => childForSlot(_ModalSlot.header)!;
+  RenderBox get _body => childForSlot(_ModalSlot.body)!;
+  RenderBox? get _footer => childForSlot(_ModalSlot.footer);
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! BoxParentData) child.parentData = BoxParentData();
+  }
+
+  double _headerExtent = 0;
+  double _footerExtent = 0;
+
+  @override
+  void performLayout() {
+    final width = constraints.maxWidth;
+    final bounded = constraints.hasBoundedHeight;
+    final maxHeight = constraints.maxHeight;
+    final natural = BoxConstraints(minWidth: width, maxWidth: width);
+
+    final footer = _footer;
+    footer?.layout(natural, parentUsesSize: true);
+    _header.layout(natural, parentUsesSize: true);
+    final footerHeight = footer?.size.height ?? 0.0;
+    _footerExtent = bounded ? math.min(footerHeight, maxHeight) : footerHeight;
+    _headerExtent = bounded
+        ? math.min(_header.size.height, maxHeight - _footerExtent)
+        : _header.size.height;
+
+    final room = bounded
+        ? maxHeight - _headerExtent - _footerExtent
+        : double.infinity;
+    _body.layout(
+      BoxConstraints(
+        minWidth: width,
+        maxWidth: width,
+        minHeight: bounded && _fullScreen ? room : 0,
+        maxHeight: room,
+      ),
+      parentUsesSize: true,
+    );
+
+    final bodyHeight = _body.size.height;
+    (_header.parentData! as BoxParentData).offset = Offset.zero;
+    (_body.parentData! as BoxParentData).offset = Offset(0, _headerExtent);
+    if (footer != null) {
+      (footer.parentData! as BoxParentData).offset = Offset(
+        0,
+        _headerExtent + bodyHeight,
+      );
+    }
+    size = constraints.constrain(
+      Size(width, _headerExtent + bodyHeight + _footerExtent),
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    for (final child in children) {
+      final at = offset + (child.parentData! as BoxParentData).offset;
+      final extent = _extentOf(child);
+      if (extent < child.size.height) {
+        context.pushClipRect(
+          needsCompositing,
+          at,
+          Offset.zero & Size(size.width, extent),
+          (context, offset) => context.paintChild(child, offset),
+        );
+      } else {
+        context.paintChild(child, at);
+      }
+    }
+  }
+
+  double _extentOf(RenderBox child) {
+    if (child == _header) return _headerExtent;
+    if (child == _footer) return _footerExtent;
+    return child.size.height;
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    for (final child in children.toList().reversed) {
+      final offset = (child.parentData! as BoxParentData).offset;
+      if (position.dy - offset.dy >= _extentOf(child)) continue;
+      final hit = result.addWithPaintOffset(
+        offset: offset,
+        position: position,
+        hitTest: (result, transformed) =>
+            child.hitTest(result, position: transformed),
+      );
+      if (hit) return true;
+    }
+    return false;
+  }
+}
+
 /// Presents [builder]'s content as a modal route and completes with the value
 /// passed to `Navigator.pop`.
 ///
-/// Theme, density, localizations and direction stay live: the route follows
-/// the presenting context's [CarbonTheme] through a [CarbonScopeRelay], so
-/// switching them while the modal is open updates it in place and keeps text
-/// already typed.
+/// The theme and density stay live: the route follows the presenting context's
+/// [CarbonTheme] through a [CarbonScopeRelay], so switching them while the
+/// modal is open updates it in place and keeps text already typed.
+/// Localizations and text direction are those in effect when it was shown.
 ///
 /// Dismissal: a tap on the scrim closes only when [barrierDismissible]; Escape,
 /// system back and the barrier are all subject to [canDismiss], evaluated at
@@ -492,7 +653,7 @@ class _CarbonModalRoute<T> extends RawDialogRoute<T> {
     required WidgetBuilder builder,
     required CarbonScopeRelay relay,
     required CarbonModalPresentation presentation,
-    required bool barrierDismissible,
+    required super.barrierDismissible,
     required this.canDismiss,
     required String barrierLabel,
     required bool reducedMotion,
@@ -500,7 +661,6 @@ class _CarbonModalRoute<T> extends RawDialogRoute<T> {
     super.settings,
   }) : _restoreFocus = restoreFocus,
        super(
-         barrierDismissible: barrierDismissible,
          barrierLabel: barrierLabel,
          barrierColor: const Color(0x00000000),
          transitionDuration: reducedMotion
@@ -541,8 +701,16 @@ class _CarbonModalRoute<T> extends RawDialogRoute<T> {
     SchedulerBinding.instance.addPostFrameCallback((_) {
       final context = node.context;
       if (context == null || !context.mounted || !node.canRequestFocus) return;
-      node.requestFocus();
+      // Something the caller focused after the modal returned wins; only an
+      // empty focus (or a bare scope) means nobody has claimed it yet.
+      final current = FocusManager.instance.primaryFocus;
+      final claimed =
+          current != null &&
+          current is! FocusScopeNode &&
+          (current.context?.mounted ?? false);
+      if (!claimed) node.requestFocus();
     });
+    SchedulerBinding.instance.ensureVisualUpdate();
   }
 }
 

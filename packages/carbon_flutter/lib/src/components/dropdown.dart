@@ -43,7 +43,7 @@ class CarbonDropdown<T> extends StatelessWidget {
     this.showOptional = false,
     this.enabled = true,
     this.readOnly = false,
-    this.unavailableLabel = 'Unavailable',
+    this.unavailableLabel,
     this.loading = false,
     this.listErrorText,
     this.emptyText,
@@ -63,7 +63,10 @@ class CarbonDropdown<T> extends StatelessWidget {
   final bool showOptional;
   final bool enabled;
   final bool readOnly;
-  final String unavailableLabel;
+
+  /// Shown in place of a [value] that none of [options] carries. Defaults to
+  /// the localized `unavailableValue`.
+  final String? unavailableLabel;
 
   /// The host is fetching options; the open list shows a loading row.
   final bool loading;
@@ -130,9 +133,14 @@ class CarbonDropdown<T> extends StatelessWidget {
 ///
 /// Supplied [controller] and [focusNode] stay owned by the caller. The field
 /// writes to the controller only when a value is committed, when the user's
-/// edit is discarded, and when [value] changes while the user is not editing;
-/// typed text and the highlight survive theme and density changes. Replacing
-/// the controller carries the current text to the new one. The whole field
+/// edit is discarded, and when [value] changes while the user is not editing,
+/// and it does so after the frame so the caller's own listeners are never
+/// notified mid-build. Text a supplied controller already holds when the field
+/// mounts counts as the user's draft and is kept. Changes the caller makes to
+/// the controller while the field is unfocused are not typing: they fire no
+/// [onInputChanged] and do not mark the text as edited. Typed text and the
+/// highlight survive theme and density changes. Replacing the controller
+/// carries the current text to the new one. The whole field
 /// toggles the list when tapped outside the text area, which is how touch
 /// users reach the chevron.
 class CarbonComboBox<T> extends StatefulWidget {
@@ -150,7 +158,7 @@ class CarbonComboBox<T> extends StatefulWidget {
     this.showOptional = false,
     this.enabled = true,
     this.readOnly = false,
-    this.unavailableLabel = 'Unavailable',
+    this.unavailableLabel,
     this.controller,
     this.focusNode,
     this.autofocus = false,
@@ -178,7 +186,10 @@ class CarbonComboBox<T> extends StatefulWidget {
   final bool showOptional;
   final bool enabled;
   final bool readOnly;
-  final String unavailableLabel;
+
+  /// Shown in place of a [value] that none of [options] carries. Defaults to
+  /// the localized `unavailableValue`.
+  final String? unavailableLabel;
   final TextEditingController? controller;
   final FocusNode? focusNode;
   final bool autofocus;
@@ -241,6 +252,22 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     return index >= 0 ? widget.options[index].label : '';
   }
 
+  static List<CarbonOption<V>> _filterOptions<V>(
+    List<CarbonOption<V>> options,
+    String query,
+    CarbonOptionFilter<V>? filter,
+  ) {
+    if (query.isEmpty) return options;
+    final match =
+        filter ??
+        (CarbonOption<V> o, String q) =>
+            o.label.toLowerCase().contains(q.toLowerCase());
+    return [
+      for (final option in options)
+        if (match(option, query)) option,
+    ];
+  }
+
   List<CarbonOption<T>> get _visible {
     final query = _userEdited ? _controller.text : '';
     if (query.isEmpty) return widget.options;
@@ -249,17 +276,10 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
         _filteredWith == widget.filter) {
       return _filtered;
     }
-    final match =
-        widget.filter ??
-        (CarbonOption<T> o, String q) =>
-            o.label.toLowerCase().contains(q.toLowerCase());
     _filteredSource = widget.options;
     _filteredQuery = query;
     _filteredWith = widget.filter;
-    return _filtered = [
-      for (final option in widget.options)
-        if (match(option, query)) option,
-    ];
+    return _filtered = _filterOptions(widget.options, query, widget.filter);
   }
 
   @override
@@ -268,18 +288,42 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     _popup.addListener(_handlePopup);
     _controller.addListener(_handleText);
     _focus.addListener(_handleFocus);
-    _setText(_committedLabel());
+    final held = _controller.text;
+    _lastText = held;
+    if (widget.controller != null &&
+        held.isNotEmpty &&
+        held != _committedLabel()) {
+      // Text the host put in its own controller is a draft, not something to
+      // overwrite with the committed label.
+      _userEdited = true;
+    } else {
+      _showCommitted();
+    }
   }
 
   @override
   void didUpdateWidget(CarbonComboBox<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Resolved against the old options before anything below changes what is
+    // visible, so the highlight can follow its option to its new position.
+    CarbonOption<T>? previousActive;
+    if (_active >= 0) {
+      final oldVisible = _filterOptions(
+        oldWidget.options,
+        _userEdited ? _controller.text : '',
+        oldWidget.filter,
+      );
+      if (_active < oldVisible.length) previousActive = oldVisible[_active];
+    }
     if (widget.controller != oldWidget.controller) {
       final previous = oldWidget.controller ?? _ownedController!;
       previous.removeListener(_handleText);
       final text = previous.text;
       _controller.addListener(_handleText);
-      if (_controller.text != text) _setText(text);
+      if (_controller.text != text) {
+        _lastText = _controller.text;
+        _writeText(text);
+      }
     }
     if (widget.focusNode != oldWidget.focusNode) {
       final previous = oldWidget.focusNode ?? _ownedFocus!;
@@ -291,11 +335,24 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
         });
       }
     }
-    if (!_userEdited) {
-      final label = _committedLabel();
-      if (_controller.text != label) _setText(label);
-    }
+    if (!_userEdited) _showCommitted();
     final visible = _visible;
+    if (!identical(widget.options, oldWidget.options) ||
+        widget.filter != oldWidget.filter) {
+      var moved = -1;
+      if (previousActive != null) {
+        moved = CarbonOption.indexOfValue(visible, previousActive.value);
+      }
+      if (moved >= 0 && visible[moved].enabled) {
+        _active = moved;
+      } else if (_userEdited && !widget.allowCustomValue) {
+        // A host-filtered answer arrives after the keystroke that asked for
+        // it, so the first match is picked once there is one.
+        _active = firstEnabledIndex(visible);
+      } else {
+        _active = -1;
+      }
+    }
     if (_active >= visible.length ||
         (_active >= 0 && !visible[_active].enabled)) {
       _active = -1;
@@ -313,6 +370,32 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     _ownedController?.dispose();
     _ownedFocus?.dispose();
     super.dispose();
+  }
+
+  // A supplied controller belongs to the host, whose listeners may call
+  // setState; writing it while the framework is building would throw.
+  void _writeText(String text) {
+    if (widget.controller == null) {
+      _setText(text);
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _controller.text != text) _setText(text);
+    });
+  }
+
+  void _showCommitted() {
+    final label = _committedLabel();
+    if (_controller.text == label) return;
+    if (widget.controller == null) {
+      _setText(label);
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _userEdited) return;
+      final current = _committedLabel();
+      if (_controller.text != current) _setText(current);
+    });
   }
 
   // Every write the component makes goes through here so the text listener
@@ -353,6 +436,9 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     final text = _controller.text;
     if (text == _lastText) return;
     _lastText = text;
+    // Only a focused field has a user typing into it; anything else is the
+    // host driving its own controller.
+    if (!_focus.hasFocus) return;
     widget.onInputChanged?.call(text);
     if (!mounted) return;
     setState(() {
@@ -381,7 +467,15 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
   void _reveal() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      revealOptionIndex(_scroll, _active, _extent(context));
+      revealOptionIndex(
+        _scroll,
+        _active,
+        _extent(context),
+        leadingRows: optionStatusRows(
+          loading: widget.loading,
+          errorText: widget.listErrorText,
+        ),
+      );
     });
   }
 
@@ -440,6 +534,12 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     });
   }
 
+  void _expandFromSemantics() {
+    if (!_interactive) return;
+    _focus.requestFocus();
+    _open(keyboard: false);
+  }
+
   void _handleTap() {
     if (_interactive) _open(keyboard: false);
   }
@@ -486,6 +586,14 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
 
     if (key == LogicalKeyboardKey.arrowDown ||
         key == LogicalKeyboardKey.arrowUp) {
+      // Shift, Ctrl and Meta with an arrow select or move the caret in the
+      // embedded text field; they are not list navigation.
+      final keyboard = HardwareKeyboard.instance;
+      if (keyboard.isShiftPressed ||
+          keyboard.isControlPressed ||
+          keyboard.isMetaPressed) {
+        return KeyEventResult.ignored;
+      }
       final down = key == LogicalKeyboardKey.arrowDown;
       if (!open) {
         _open(keyboard: true);
@@ -547,7 +655,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
         widget.value != null &&
         CarbonOption.indexOfValue(widget.options, widget.value) < 0;
     final hint = unavailable
-        ? widget.unavailableLabel
+        ? (widget.unavailableLabel ?? messages.unavailableValue)
         : (widget.placeholder ?? messages.selectPlaceholder);
 
     final field = Material(
@@ -578,6 +686,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
     );
 
     final extent = _extent(context);
+    final anchorLevel = CarbonLayer.of(context);
 
     Widget box = CarbonFieldBox(
       focused: _focus.hasFocus,
@@ -611,6 +720,10 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
         readOnly: widget.readOnly,
         child: Semantics(
           expanded: interactive ? open : null,
+          // A TextField tap from assistive technology only requests the
+          // keyboard, so expanding the list needs its own action.
+          onExpand: interactive && !open ? _expandFromSemantics : null,
+          onCollapse: interactive && open ? _popup.close : null,
           child: Focus(
             onKeyEvent: _handleKey,
             canRequestFocus: false,
@@ -627,6 +740,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
                   activeIndex: _active,
                   keyboardActive: _keyboard,
                   extent: _extent(context),
+                  level: anchorLevel,
                   controller: _scroll,
                   loading: widget.loading,
                   errorText: widget.listErrorText,

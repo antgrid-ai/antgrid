@@ -36,6 +36,13 @@ double optionRowExtent(BuildContext context, {required bool hasDescription}) {
       .ceilToDouble();
 }
 
+/// How many status rows (loading or error) the list draws above its options.
+///
+/// They sit first because a list longer than the viewport would otherwise
+/// build the status row off-screen and never show or announce it.
+int optionStatusRows({required bool loading, required String? errorText}) =>
+    loading || errorText != null ? 1 : 0;
+
 /// Whether any option carries a description line.
 bool optionsHaveDescription<T>(List<CarbonOption<T>> options) {
   for (final option in options) {
@@ -67,10 +74,17 @@ int lastEnabledIndex<T>(List<CarbonOption<T>> options) =>
     nextEnabledIndex(options, -1, -1);
 
 /// Scrolls just enough to bring row [index] fully into view.
-void revealOptionIndex(ScrollController controller, int index, double extent) {
+///
+/// [leadingRows] counts the non-option rows drawn above the options.
+void revealOptionIndex(
+  ScrollController controller,
+  int index,
+  double extent, {
+  int leadingRows = 0,
+}) {
   if (index < 0 || !controller.hasClients) return;
   final position = controller.position;
-  final top = index * extent;
+  final top = (index + leadingRows) * extent;
   final bottom = top + extent;
   if (top < position.pixels) {
     position.jumpTo(top.clamp(0, position.maxScrollExtent));
@@ -149,10 +163,16 @@ class CarbonOptionListbox<T> extends StatelessWidget {
     required this.onHover,
     required this.controller,
     required this.extent,
+    this.level,
     this.loading = false,
     this.errorText,
     this.emptyText,
   });
+
+  /// The layer of the field the list drops from. Falls back to one below the
+  /// popup's own layer, which is wrong once the anchor is already on the
+  /// deepest layer and the popup's raise was clamped.
+  final int? level;
 
   final List<CarbonOption<T>> options;
   final T? selectedValue;
@@ -174,9 +194,7 @@ class CarbonOptionListbox<T> extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
     final messages = CarbonLocalizations.of(context);
-    // The popup is raised one layer above its anchor; the surface matches the
-    // anchor's own field fill.
-    final level = math.max(1, CarbonLayer.of(context) - 1);
+    final level = this.level ?? math.max(1, CarbonLayer.of(context) - 1);
 
     Widget? status;
     if (loading) {
@@ -201,7 +219,8 @@ class CarbonOptionListbox<T> extends StatelessWidget {
       );
     }
 
-    final count = options.length + (status == null ? 0 : 1);
+    final leading = status == null ? 0 : 1;
+    final count = options.length + leading;
     final rows = math.min(count, kOptionListMaxRows);
     final border = theme.borderSubtle(level);
 
@@ -221,16 +240,18 @@ class CarbonOptionListbox<T> extends StatelessWidget {
             itemExtent: extent,
             itemCount: count,
             itemBuilder: (context, i) {
-              if (i >= options.length) return status!;
+              if (i < leading) return status!;
+              final index = i - leading;
               return _OptionRow<T>(
-                option: options[i],
+                option: options[index],
                 level: level,
                 selected: selectedValue != null &&
-                    options[i].value == selectedValue,
-                active: i == activeIndex,
+                    options[index].value == selectedValue,
+                active: index == activeIndex,
                 keyboardActive: keyboardActive,
-                onSelect: () => onSelect(i),
-                onHover: () => onHover(i),
+                divider: i > 0,
+                onSelect: () => onSelect(index),
+                onHover: () => onHover(index),
               );
             },
           ),
@@ -288,13 +309,14 @@ class _StatusRow extends StatelessWidget {
   }
 }
 
-class _OptionRow<T> extends StatelessWidget {
+class _OptionRow<T> extends StatefulWidget {
   const _OptionRow({
     required this.option,
     required this.level,
     required this.selected,
     required this.active,
     required this.keyboardActive,
+    required this.divider,
     required this.onSelect,
     required this.onHover,
   });
@@ -304,24 +326,49 @@ class _OptionRow<T> extends StatelessWidget {
   final bool selected;
   final bool active;
   final bool keyboardActive;
+  final bool divider;
   final VoidCallback onSelect;
   final VoidCallback onHover;
 
   @override
+  State<_OptionRow<T>> createState() => _OptionRowState<T>();
+}
+
+class _OptionRowState<T> extends State<_OptionRow<T>> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed != value) setState(() => _pressed = value);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final option = widget.option;
+    final level = widget.level;
+    final selected = widget.selected;
+    final active = widget.active;
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
     final enabled = option.enabled;
     final highlighted = active && enabled;
+    final pressed = _pressed && enabled;
 
-    final Color? fill = selected && highlighted
+    final Color? fill = pressed
+        ? theme.layerActive(level)
+        : selected && highlighted
         ? theme.layerSelectedHover(level)
         : selected
         ? theme.layerSelected(level)
         : highlighted
         ? theme.layerHover(level)
         : null;
-    final textColor = enabled ? colors.textPrimary : colors.textDisabled;
+    // Carbon dims resting options and brightens the one under the pointer or
+    // the committed one.
+    final textColor = !enabled
+        ? colors.textDisabled
+        : (highlighted || selected || pressed)
+        ? colors.textPrimary
+        : colors.textSecondary;
     final description = option.description;
 
     final label = description == null
@@ -333,20 +380,36 @@ class _OptionRow<T> extends StatelessWidget {
       button: true,
       enabled: enabled,
       selected: selected,
+      // The highlight is the active descendant; focus itself stays on the
+      // field, so assistive technology only learns the highlight from here.
+      focused: highlighted && widget.keyboardActive ? true : null,
       inMutuallyExclusiveGroup: true,
       label: label,
-      onTap: enabled ? onSelect : null,
+      onTap: enabled ? widget.onSelect : null,
       child: ExcludeSemantics(
         child: MouseRegion(
           cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-          onHover: enabled && !active ? (_) => onHover() : null,
+          onHover: enabled && !active ? (_) => widget.onHover() : null,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: enabled ? onSelect : null,
+            onTap: enabled ? widget.onSelect : null,
+            onTapDown: enabled ? (_) => _setPressed(true) : null,
+            onTapUp: (_) => _setPressed(false),
+            onTapCancel: () => _setPressed(false),
             child: CarbonFocusRing(
-              visible: highlighted && keyboardActive,
-              child: ColoredBox(
-                color: fill ?? const Color(0x00000000),
+              visible: highlighted && widget.keyboardActive,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: fill,
+                  border: widget.divider
+                      ? Border(
+                          top: BorderSide(
+                            color: theme.borderSubtle(level),
+                            width: CarbonBorders.hairline,
+                          ),
+                        )
+                      : null,
+                ),
                 child: Padding(
                   padding: EdgeInsets.symmetric(
                     horizontal: theme.controlPaddingX,

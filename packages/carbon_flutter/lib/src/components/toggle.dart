@@ -52,8 +52,7 @@ class CarbonToggle extends StatelessWidget {
   /// Accessible name when no label is shown.
   final String? semanticLabel;
 
-  /// State words beside the switch. Defaults to English until the library's
-  /// localized strings carry them.
+  /// State words beside the switch; default to the localized "On" and "Off".
   final String? onText;
   final String? offText;
 
@@ -81,7 +80,7 @@ class CarbonToggle extends StatelessWidget {
     final loc = CarbonLocalizations.of(context);
     final enabled = onChanged != null;
     final name = labelText ?? semanticLabel;
-    final stateWord = value ? (onText ?? 'On') : (offText ?? 'Off');
+    final stateWord = value ? (onText ?? loc.on) : (offText ?? loc.off);
     final inert = readOnly || busy;
 
     final Widget? labelWidget = label != null
@@ -121,7 +120,10 @@ class CarbonToggle extends StatelessWidget {
           busy: busy,
         );
         return ConstrainedBox(
-          constraints: BoxConstraints(minHeight: theme.minTarget),
+          constraints: BoxConstraints(
+            minWidth: theme.minTarget,
+            minHeight: theme.minTarget,
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -138,7 +140,7 @@ class CarbonToggle extends StatelessWidget {
                 Flexible(
                   child: Text(
                     stateWord,
-                    style: theme.typography.body.copyWith(
+                    style: theme.typography.control.copyWith(
                       color: enabled ? colors.textPrimary : colors.textDisabled,
                     ),
                   ),
@@ -150,22 +152,30 @@ class CarbonToggle extends StatelessWidget {
       },
     );
 
-    final target = MergeSemantics(child: control);
-    if (labelWidget == null) return target;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ExcludeSemantics(
-          child: Padding(
-            padding: const EdgeInsetsDirectional.only(
-              bottom: CarbonSpacing.spacing02,
+    final target = Semantics(readOnly: readOnly ? true : null, child: control);
+    // A custom label widget is the only name the switch has unless the host
+    // gave a text or semantic label, so it joins the switch's node then.
+    final labelNamesSwitch = label != null && name == null;
+    // One Column shape whether or not a label is shown keeps the control's
+    // focus node and state across a label appearing.
+    return MergeSemantics(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (labelWidget != null)
+            ExcludeSemantics(
+              excluding: !labelNamesSwitch,
+              child: Padding(
+                padding: const EdgeInsetsDirectional.only(
+                  bottom: CarbonSpacing.spacing02,
+                ),
+                child: labelWidget,
+              ),
             ),
-            child: labelWidget,
-          ),
-        ),
-        target,
-      ],
+          target,
+        ],
+      ),
     );
   }
 }
@@ -197,12 +207,12 @@ class _ToggleTrack extends StatelessWidget {
     final Color handleColor;
     Border? border;
     if (!enabled) {
-      trackColor = colors.borderDisabled;
-      handleColor = colors.iconOnColor;
+      trackColor = colors.buttonDisabled;
+      handleColor = colors.iconOnColorDisabled;
     } else if (readOnly) {
       trackColor = const Color(0x00000000);
       handleColor = colors.iconPrimary;
-      border = Border.all(color: colors.iconPrimary);
+      border = Border.all(color: colors.iconDisabled);
     } else {
       trackColor = value ? colors.supportSuccess : colors.toggleOff;
       handleColor = colors.iconOnColor;
@@ -222,11 +232,11 @@ class _ToggleTrack extends StatelessWidget {
         color: colors.interactive,
         trackColor: const Color(0x00000000),
       );
-    } else if (value && !small && !readOnly) {
+    } else if (value && small && !readOnly) {
       glyph = CarbonIcon(
         CarbonIcons.checkmark,
         size: glyphSize,
-        color: colors.supportSuccess,
+        color: enabled ? colors.supportSuccess : colors.buttonDisabled,
       );
     } else if (value && readOnly) {
       glyph = CarbonIcon(

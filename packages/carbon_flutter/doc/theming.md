@@ -99,7 +99,28 @@ Theme helpers resolve the token for a level and clamp out-of-range values:
 
 ## Overlays and routes
 
-Content in an `OverlayPortal` inherits from its anchor. Content in a Navigator
-route does not; wrap it with `CarbonScopeRelay.of(context).wrap(child)`, which
-follows the live theme (so an open modal updates without remounting) and
-captures localizations and text direction at open time.
+Content in an `OverlayPortal` inherits from its anchor, so menus, listboxes and
+tooltips follow the trigger's theme, density and layer with no extra work.
+
+Content in a Navigator route does not inherit from the code that pushed it.
+`showCarbonModal` handles this for modals: it wraps the route in
+`CarbonScopeRelay.of(context)`, captured from the context you pass. For any
+other route, wrap its content yourself:
+
+```dart
+final relay = CarbonScopeRelay.of(context);
+Navigator.of(context).push(
+  PageRouteBuilder<void>(
+    pageBuilder: (_, _, _) => relay.wrap(const DetailsPane()),
+  ),
+);
+```
+
+The relay follows the live theme and density, so an open modal updates in
+place without remounting and keeps typed text and focus. Localizations and
+text direction are captured when the route opens and do not follow later
+changes.
+
+Text scale and reduced motion come from the `MediaQuery` above the Navigator,
+not from the relay. A `MediaQuery` override placed inside a page does not
+reach a modal opened from it.

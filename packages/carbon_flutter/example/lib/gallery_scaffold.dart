@@ -39,9 +39,19 @@ class _GalleryShellState extends State<GalleryShell> {
 
   @override
   Widget build(BuildContext context) {
-    return CarbonTheme(
-      data: _chromeTheme,
-      child: ColoredBox(
+    // The chrome opts out of the previewed text scale, direction and motion
+    // (applied above the Navigator) so it stays operable at 200% or RTL.
+    final media = MediaQuery.of(context);
+    return MediaQuery(
+      data: media.copyWith(
+        textScaler: TextScaler.noScaling,
+        disableAnimations: false,
+      ),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: CarbonTheme(
+          data: _chromeTheme,
+          child: ColoredBox(
         color: _chromeTheme.colors.background,
         child: LayoutBuilder(
           builder: (context, constraints) {
@@ -78,16 +88,26 @@ class _GalleryShellState extends State<GalleryShell> {
             );
           },
         ),
+          ),
+        ),
       ),
     );
   }
 
-  Widget _pageButton(GalleryEntry entry) => GalleryButton(
-    key: ValueKey('page-${entry.id}'),
-    label: entry.title,
-    selected: entry.id == _selectedId,
-    onPressed: () => setState(() => _selectedId = entry.id),
-  );
+  Widget _pageButton(GalleryEntry entry, {bool expand = false}) {
+    final selected = entry.id == _selectedId;
+    return Semantics(
+      selected: selected,
+      child: CarbonButton(
+        key: ValueKey('page-${entry.id}'),
+        label: entry.title,
+        kind: selected ? CarbonButtonKind.primary : CarbonButtonKind.ghost,
+        size: CarbonButtonSize.small,
+        expand: expand,
+        onPressed: () => setState(() => _selectedId = entry.id),
+      ),
+    );
+  }
 
   Widget _buildSideList() {
     final type = _chromeTheme.typography;
@@ -124,7 +144,7 @@ class _GalleryShellState extends State<GalleryShell> {
           padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing01),
           child: Align(
             alignment: AlignmentDirectional.centerStart,
-            child: _pageButton(entry),
+            child: _pageButton(entry, expand: true),
           ),
         ),
     ];
@@ -159,12 +179,18 @@ class _GalleryShellState extends State<GalleryShell> {
           ),
           child: Align(
             alignment: AlignmentDirectional.centerStart,
-            child: GalleryButton(
-              key: const ValueKey('settings-toggle'),
-              label: 'Settings',
+            child: Semantics(
               expanded: _settingsOpen,
-              selected: _settingsOpen,
-              onPressed: () => setState(() => _settingsOpen = !_settingsOpen),
+              child: CarbonButton(
+                key: const ValueKey('settings-toggle'),
+                label: 'Settings',
+                kind: _settingsOpen
+                    ? CarbonButtonKind.primary
+                    : CarbonButtonKind.tertiary,
+                size: CarbonButtonSize.small,
+                onPressed: () =>
+                    setState(() => _settingsOpen = !_settingsOpen),
+              ),
             ),
           ),
         ),
@@ -269,7 +295,6 @@ class _GalleryShellState extends State<GalleryShell> {
                 s.width.pixels ?? constraints.maxWidth,
                 constraints.maxWidth,
               );
-              final media = MediaQuery.of(context);
               // Structure is identical for every setting so changing one
               // updates the page in place and its live state survives.
               return Align(
@@ -277,21 +302,12 @@ class _GalleryShellState extends State<GalleryShell> {
                 child: SizedBox(
                   width: width,
                   height: constraints.maxHeight,
-                  child: MediaQuery(
-                    data: media.copyWith(
-                      size: Size(width, media.size.height),
-                      textScaler: TextScaler.linear(s.textScale),
-                      disableAnimations: s.reducedMotion,
-                    ),
-                    child: Directionality(
-                      textDirection: s.direction,
-                      child: CarbonTheme(
-                        data: s.theme,
-                        child: _PageViewport(
-                          key: ValueKey(entry.id),
-                          child: Builder(builder: entry.builder),
-                        ),
-                      ),
+                  child: s.apply(
+                    context,
+                    width: width,
+                    _PageViewport(
+                      key: ValueKey(entry.id),
+                      child: Builder(builder: entry.builder),
                     ),
                   ),
                 ),

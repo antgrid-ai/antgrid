@@ -140,7 +140,7 @@ void main() {
       await tester.tap(find.text('Accept'));
       await tester.pump();
       expect(log, [true]);
-      await tester.tap(find.byType(CarbonCheckbox));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
       expect(log, [true, false]);
     });
@@ -171,9 +171,9 @@ void main() {
     testWidgets('non-tristate cycles true and false only', (tester) async {
       final log = <bool?>[];
       await pumpCarbon(tester, _Host(log: log, initial: null));
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
       expect(log, [true, false]);
     });
@@ -184,7 +184,7 @@ void main() {
       final log = <bool?>[];
       await pumpCarbon(tester, _Host(log: log, tristate: true));
       for (var i = 0; i < 4; i++) {
-        await tester.tap(find.byKey(_cb));
+        await tester.tap(find.byType(CarbonInteraction));
         await tester.pump();
       }
       expect(log, [true, null, false, true]);
@@ -201,7 +201,7 @@ void main() {
         tester,
         _Host(log: log, enabled: false, focusNode: node),
       );
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       node.requestFocus();
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
@@ -225,7 +225,7 @@ void main() {
       await tester.pump();
       expect(node.hasFocus, isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
       expect(log, isEmpty);
       _expectState(tester, checked: true);
@@ -240,11 +240,11 @@ void main() {
       expect(_node(tester).label, 'Accept');
       _expectState(tester, checked: false);
 
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
       _expectState(tester, checked: true);
 
-      await tester.tap(find.byKey(_cb));
+      await tester.tap(find.byType(CarbonInteraction));
       await tester.pump();
       _expectState(tester, mixed: true);
       handle.dispose();
@@ -427,4 +427,151 @@ void main() {
       handle.dispose();
     });
   });
+
+  group('validation and identity', () {
+    testWidgets('focus survives the error message appearing and clearing', (
+      tester,
+    ) async {
+      final log = <bool?>[];
+      await pumpCarbon(tester, _Validated(log: log));
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pump();
+      expect(log, [true, false]);
+    });
+
+    testWidgets('group keeps focus on the same item when items are removed', (
+      tester,
+    ) async {
+      Widget group(List<String> values, List<Set<String>> log) => _aligned(
+        CarbonCheckboxGroup<String>(
+          legend: 'Notify me about',
+          items: [
+            for (final v in values) CarbonCheckboxItem(value: v, label: v),
+          ],
+          selected: const {},
+          onChanged: log.add,
+        ),
+      );
+      final log = <Set<String>>[];
+      await pumpCarbon(tester, group(['a', 'b', 'c'], log));
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await pumpCarbon(tester, group(['b', 'c'], log));
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pump();
+      expect(log.single, {'b'});
+    });
+
+    testWidgets('group keeps selected values that are not among its items', (
+      tester,
+    ) async {
+      final log = <Set<String>>[];
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonCheckboxGroup<String>(
+            legend: 'Notify me about',
+            items: const [
+              CarbonCheckboxItem(value: 'a', label: 'Builds'),
+              CarbonCheckboxItem(value: 'b', label: 'Deploys'),
+            ],
+            selected: const {'x', 'a'},
+            onChanged: log.add,
+          ),
+        ),
+      );
+      await tester.tap(find.text('Deploys'));
+      await tester.pump();
+      expect(log.single, {'x', 'a', 'b'});
+    });
+  });
+
+  group('states and anatomy', () {
+    testWidgets('read-only is announced as read-only', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, const _Host(readOnly: true, initial: true));
+      expect(_node(tester).flagsCollection.isReadOnly, isTrue);
+      await pumpCarbon(tester, const _Host(initial: true));
+      expect(_node(tester).flagsCollection.isReadOnly, isFalse);
+      handle.dispose();
+    });
+
+    testWidgets('disabled checked box is filled with the disabled icon color', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, const _Host(initial: true, enabled: false));
+      final box = tester.widget<DecoratedBox>(
+        find
+            .descendant(
+              of: find.byType(CarbonCheckbox),
+              matching: find.byType(DecoratedBox),
+            )
+            .first,
+      );
+      expect(
+        (box.decoration as BoxDecoration).color,
+        CarbonThemeData().colors.iconDisabled,
+      );
+    });
+
+    testWidgets('indicator lines up with the first line of a wrapped label', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        const _Host(
+          labelText:
+              'I have read and accept the terms and conditions of this '
+              'rather long agreement that wraps onto several lines',
+        ),
+        textScale: 2,
+        size: const Size(240, 800),
+      );
+      final box = tester.getRect(
+        find
+            .descendant(
+              of: find.byType(CarbonCheckbox),
+              matching: find.byType(DecoratedBox),
+            )
+            .first,
+      );
+      final text = tester.getRect(find.byType(Text));
+      final lines = (text.height / 36).round();
+      expect(lines, greaterThan(2));
+      expect(box.center.dy, lessThan(text.top + text.height / lines * 1.5));
+    });
+  });
+}
+
+/// A checkbox whose error clears once it is checked, the usual validation
+/// pattern.
+class _Validated extends StatefulWidget {
+  const _Validated({required this.log});
+
+  final List<bool?> log;
+
+  @override
+  State<_Validated> createState() => _ValidatedState();
+}
+
+class _ValidatedState extends State<_Validated> {
+  bool _value = false;
+
+  @override
+  Widget build(BuildContext context) => _aligned(
+    CarbonCheckbox(
+      value: _value,
+      labelText: 'Accept',
+      errorText: _value ? null : 'Required',
+      onChanged: (v) {
+        widget.log.add(v);
+        setState(() => _value = v ?? false);
+      },
+    ),
+  );
 }

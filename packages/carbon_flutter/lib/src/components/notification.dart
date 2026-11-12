@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/widgets.dart';
 
@@ -40,8 +39,11 @@ class CarbonNotificationAction {
 /// The kind is always conveyed by a filled icon labelled with the localized
 /// kind name, never by color alone. Announcement: when the notification first
 /// appears, info and success are a polite live region and warning and error
-/// are announced assertively, once; rebuilding with new text does not
-/// announce again ([announce] false for content already on screen at load).
+/// are announced assertively, once; a notification that changes from info or
+/// success to warning or error announces then, and rebuilding an error or
+/// warning with new text does not announce again. A polite live region is
+/// re-read by the platform whenever its text changes ([announce] false for
+/// content already on screen at load).
 ///
 /// Critical information must also remain available elsewhere; a notification
 /// that the host removes is gone for assistive technology as well.
@@ -174,12 +176,27 @@ class _NotificationCardState extends State<_NotificationCard> {
   @override
   void initState() {
     super.initState();
-    if (widget.announce && _assertive) {
-      // Needs the view and localizations, which are only readable after the
-      // first dependency pass.
-      WidgetsBinding.instance.addPostFrameCallback((_) => _announce());
+    if (widget.announce && _assertive) _scheduleAnnouncement();
+  }
+
+  @override
+  void didUpdateWidget(_NotificationCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasAssertive =
+        oldWidget.kind == CarbonNotificationKind.error ||
+        oldWidget.kind == CarbonNotificationKind.warning;
+    // The live region of a polite kind disappears in the same rebuild, so the
+    // switch to an urgent kind has to be spoken explicitly.
+    if (widget.announce && _assertive && !wasAssertive) {
+      _announced = false;
+      _scheduleAnnouncement();
     }
   }
+
+  // Needs the view and localizations, which are only readable after the first
+  // dependency pass.
+  void _scheduleAnnouncement() =>
+      WidgetsBinding.instance.addPostFrameCallback((_) => _announce());
 
   void _announce() {
     if (!mounted || _announced) return;
@@ -446,6 +463,17 @@ class _ToastEntry {
 class CarbonToastController extends ChangeNotifier {
   final List<_ToastEntry> _entries = <_ToastEntry>[];
   int _nextId = 0;
+  bool _disposed = false;
+
+  // A handle outlives the screen that showed it, so a late dismiss after the
+  // owner disposed the controller must be a no-op rather than a notify on a
+  // disposed ChangeNotifier.
+  @override
+  void dispose() {
+    _disposed = true;
+    _entries.clear();
+    super.dispose();
+  }
 
   /// How many toasts are showing.
   int get length => _entries.length;
@@ -462,7 +490,8 @@ class CarbonToastController extends ChangeNotifier {
   /// that is wanted.
   ///
   /// [autoDismiss] is opt-in. The timer pauses while the pointer is over the
-  /// toast or focus is inside it, and restarts when they leave. Auto-dismissal
+  /// toast or focus is inside it, and restarts when they leave. It does not run
+  /// at all while the platform reports screen-reader navigation. Auto-dismissal
   /// is unsuitable for critical information and for anything that needs an
   /// action: users with cognitive, motor or screen-reader needs may not get
   /// to it in time. Leave it null for those and keep the information
@@ -496,13 +525,14 @@ class CarbonToastController extends ChangeNotifier {
   }
 
   void dismiss(int id) {
+    if (_disposed) return;
     final before = _entries.length;
     _entries.removeWhere((e) => e.id == id);
     if (_entries.length != before) notifyListeners();
   }
 
   void dismissAll() {
-    if (_entries.isEmpty) return;
+    if (_disposed || _entries.isEmpty) return;
     _entries.clear();
     notifyListeners();
   }
@@ -514,7 +544,8 @@ class CarbonToastController extends ChangeNotifier {
 /// `Directionality`. It occupies no layout space and only the toasts
 /// themselves receive pointer events, so the UI underneath stays usable. It
 /// keeps clear of the safe area. Toasts come after [child] in focus order and
-/// are never focused automatically.
+/// are never focused automatically. A stack taller than the screen scrolls, so
+/// every toast and its close button stays reachable at large text.
 class CarbonToastOverlay extends StatelessWidget {
   const CarbonToastOverlay({
     super.key,
@@ -523,6 +554,7 @@ class CarbonToastOverlay extends StatelessWidget {
     this.alignment = AlignmentDirectional.topEnd,
     this.maxWidth = 320,
     this.maxVisible = 4,
+    this.hiddenLabel,
   });
 
   final CarbonToastController controller;
@@ -533,8 +565,13 @@ class CarbonToastOverlay extends StatelessWidget {
   final double maxWidth;
 
   /// Toasts beyond this many wait out of sight, oldest shown first, so a burst
-  /// cannot cover the screen.
+  /// cannot cover the screen. A line after the stack counts them, as a live
+  /// region, so a waiting toast is never silently lost.
   final int maxVisible;
+
+  /// Text of that counting line for [count] waiting toasts; defaults to
+  /// "`count` more".
+  final String Function(int count)? hiddenLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -561,22 +598,30 @@ class CarbonToastOverlay extends StatelessWidget {
                   alignment: alignment,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(maxWidth: maxWidth),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (final entry in shown)
-                          Padding(
-                            key: ValueKey<int>(entry.id),
-                            padding: const EdgeInsets.only(
-                              bottom: CarbonSpacing.spacing03,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final entry in shown)
+                            Padding(
+                              key: ValueKey<int>(entry.id),
+                              padding: const EdgeInsets.only(
+                                bottom: CarbonSpacing.spacing03,
+                              ),
+                              child: _ToastItem(
+                                entry: entry,
+                                controller: controller,
+                              ),
                             ),
-                            child: _ToastItem(
-                              entry: entry,
-                              controller: controller,
+                          if (entries.length > shown.length)
+                            _HiddenCount(
+                              label: (hiddenLabel ?? _defaultHiddenLabel)(
+                                entries.length - shown.length,
+                              ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -585,6 +630,41 @@ class CarbonToastOverlay extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+String _defaultHiddenLabel(int count) => '$count more';
+
+class _HiddenCount extends StatelessWidget {
+  const _HiddenCount({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: Align(
+        alignment: AlignmentDirectional.centerEnd,
+        child: DecoratedBox(
+          decoration: BoxDecoration(color: theme.colors.backgroundInverse),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: CarbonSpacing.spacing04,
+              vertical: CarbonSpacing.spacing02,
+            ),
+            child: Text(
+              label,
+              style: theme.typography.helper.copyWith(
+                color: theme.colors.textInverse,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -603,6 +683,7 @@ class _ToastItemState extends State<_ToastItem> {
   Timer? _timer;
   bool _hovered = false;
   bool _focused = false;
+  bool _screenReader = false;
   late Duration _remaining = widget.entry.autoDismiss ?? Duration.zero;
 
   bool get _timed => widget.entry.autoDismiss != null;
@@ -611,6 +692,15 @@ class _ToastItemState extends State<_ToastItem> {
   void initState() {
     super.initState();
     if (_timed) _start();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Accessibility focus is neither hover nor input focus, so the platform
+    // flag is the only signal that someone is navigating by screen reader.
+    _screenReader = MediaQuery.maybeAccessibleNavigationOf(context) ?? false;
+    _syncTimer();
   }
 
   @override
@@ -644,7 +734,7 @@ class _ToastItemState extends State<_ToastItem> {
 
   void _syncTimer() {
     if (!_timed) return;
-    if (_hovered || _focused) {
+    if (_hovered || _focused || _screenReader) {
       _pause();
     } else if (_timer == null) {
       _start();

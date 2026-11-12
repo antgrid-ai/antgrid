@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart'
     show
+        AdaptiveTextSelectionToolbar,
         InputDecoration,
         Material,
         MaterialType,
@@ -108,6 +109,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
   FocusNode? _ownedFocus;
   bool _focused = false;
   late bool _hasText;
+  bool _toolbarShown = false;
 
   TextEditingController get _controller =>
       widget.controller ?? _ownedController!;
@@ -214,6 +216,13 @@ class _CarbonSearchState extends State<CarbonSearch> {
     if (event.logicalKey != LogicalKeyboardKey.escape) {
       return KeyEventResult.ignored;
     }
+    // An open selection toolbar owns the first Escape, as in any text field.
+    if (_toolbarShown) {
+      _focus.context
+          ?.findAncestorStateOfType<EditableTextState>()
+          ?.hideToolbar();
+      return KeyEventResult.handled;
+    }
     final value = _controller.value;
     final composing = value.composing.isValid && !value.composing.isCollapsed;
     if (!_editable || value.text.isEmpty || composing) {
@@ -265,6 +274,12 @@ class _CarbonSearchState extends State<CarbonSearch> {
       ),
       onChanged: widget.onChanged,
       onSubmitted: widget.onSubmitted,
+      contextMenuBuilder: (context, state) => _ToolbarPresence(
+        onChanged: (shown) => _toolbarShown = shown,
+        child: AdaptiveTextSelectionToolbar.editableText(
+          editableTextState: state,
+        ),
+      ),
     );
 
     final editable = Semantics(
@@ -294,7 +309,10 @@ class _CarbonSearchState extends State<CarbonSearch> {
               semanticLabel: messages.loading,
             ),
           )
-        : const CarbonIcon(CarbonIcons.search);
+        : CarbonIcon(
+            CarbonIcons.search,
+            color: enabled ? colors.iconSecondary : colors.iconDisabled,
+          );
 
     final height = math.max(
       widget.size?.height ?? theme.controlHeight,
@@ -360,4 +378,34 @@ class _CarbonSearchState extends State<CarbonSearch> {
       ),
     );
   }
+}
+
+/// Reports whether the selection toolbar is mounted, so the first Escape can
+/// close it instead of clearing the query. EditableText exposes that state
+/// only to tests.
+class _ToolbarPresence extends StatefulWidget {
+  const _ToolbarPresence({required this.onChanged, required this.child});
+
+  final ValueChanged<bool> onChanged;
+  final Widget child;
+
+  @override
+  State<_ToolbarPresence> createState() => _ToolbarPresenceState();
+}
+
+class _ToolbarPresenceState extends State<_ToolbarPresence> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onChanged(true);
+  }
+
+  @override
+  void dispose() {
+    widget.onChanged(false);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

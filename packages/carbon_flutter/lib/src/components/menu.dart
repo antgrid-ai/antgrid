@@ -2,7 +2,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -32,8 +31,8 @@ enum CarbonMenuItemKind {
   /// An ordinary command.
   standard,
 
-  /// A destructive command. It fills with the danger role on hover and
-  /// keyboard focus, as Carbon does.
+  /// A destructive command. It reads as an ordinary row until hover or
+  /// keyboard focus fills it with the danger role, as Carbon does.
   danger,
 }
 
@@ -233,7 +232,7 @@ class _Flat {
     this.children = const <CarbonMenuEntry>[],
   });
 
-  const _Flat.header(String this.label)
+  const _Flat.header(this.label)
     : kind = _FlatKind.header,
       icon = null,
       shortcut = null,
@@ -291,6 +290,8 @@ class _MenuHost {
   final CarbonPopupController root;
   final Object tapGroup;
   bool closeOnToggle = true;
+  double minWidth = 160;
+  double maxWidth = 320;
 
   void closeAll() => root.close();
 
@@ -321,8 +322,9 @@ class _MenuHost {
 /// RTL) opens a submenu and focuses its first item, the back arrow or Escape
 /// closes the submenu and returns focus to its parent item, Escape on the
 /// root closes the menu and restores focus to the trigger, Tab closes the
-/// menu and lets focus continue from the trigger, and typing letters jumps to
-/// a matching item.
+/// menu and moves on to the control after the trigger (Shift+Tab, the one
+/// before it), and typing letters jumps to a matching item; repeating a
+/// letter cycles through the items it starts.
 ///
 /// Activating an item closes the whole tree first, then calls its callback.
 /// Submenus belong to their menu: they close with it. Checkable items close
@@ -345,6 +347,7 @@ class CarbonMenu extends StatefulWidget {
     this.restoreFocus,
     this.onDismissed,
     this.semanticLabel,
+    this.semanticIdentifier,
   });
 
   final CarbonPopupController controller;
@@ -368,6 +371,10 @@ class CarbonMenu extends StatefulWidget {
 
   /// Overrides the localized "Menu" name announced for the menu.
   final String? semanticLabel;
+
+  /// An identifier for the menu's semantics node, so a trigger can name it in
+  /// its controlled nodes.
+  final String? semanticIdentifier;
 
   @override
   State<CarbonMenu> createState() => _CarbonMenuState();
@@ -394,6 +401,8 @@ class _CarbonMenuState extends State<CarbonMenu> {
   @override
   Widget build(BuildContext context) {
     _host.closeOnToggle = widget.closeOnToggle;
+    _host.minWidth = widget.minWidth;
+    _host.maxWidth = widget.maxWidth;
     final host = _host;
     // Outside taps are judged here rather than by the popup because a submenu
     // is a second popup: a tap inside it is outside the root popup's own
@@ -417,6 +426,7 @@ class _CarbonMenuState extends State<CarbonMenu> {
             entries: widget.entries,
             host: host,
             semanticLabel: widget.semanticLabel,
+            semanticIdentifier: widget.semanticIdentifier,
           ),
         ),
         child: widget.child,
@@ -430,12 +440,14 @@ class _MenuPanel extends StatefulWidget {
     required this.entries,
     required this.host,
     this.semanticLabel,
+    this.semanticIdentifier,
     this.closeSelf,
   });
 
   final List<CarbonMenuEntry> entries;
   final _MenuHost host;
   final String? semanticLabel;
+  final String? semanticIdentifier;
 
   /// Closes this panel alone; set on submenus.
   final VoidCallback? closeSelf;
@@ -445,12 +457,16 @@ class _MenuPanel extends StatefulWidget {
 }
 
 class _MenuPanelState extends State<_MenuPanel> {
-  final Map<int, FocusNode> _nodes = <int, FocusNode>{};
-  final Map<int, CarbonPopupController> _subs =
-      <int, CarbonPopupController>{};
+  // Keyed by row identity, not position, so focus and open submenus stay with
+  // their item when the host's entries change while the menu is open.
+  final Map<String, FocusNode> _nodes = <String, FocusNode>{};
+  final Map<String, CarbonPopupController> _subs =
+      <String, CarbonPopupController>{};
+  final Set<String> _flipped = <String>{};
   final ScrollController _scroll = ScrollController();
   final GlobalKey _viewportKey = GlobalKey();
   List<_Flat> _flat = const <_Flat>[];
+  List<String> _ids = const <String>[];
   String _typed = '';
   Duration _lastTyped = Duration.zero;
 
@@ -462,7 +478,7 @@ class _MenuPanelState extends State<_MenuPanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final first = _flat.indexWhere((e) => e.focusable);
-      if (first >= 0) _nodes[first]?.requestFocus();
+      if (first >= 0) _nodes[_ids[first]]?.requestFocus();
     });
   }
 
@@ -478,35 +494,51 @@ class _MenuPanelState extends State<_MenuPanel> {
     super.dispose();
   }
 
-  FocusNode _node(int index) =>
-      _nodes.putIfAbsent(index, () => FocusNode(debugLabel: 'CarbonMenu item $index'));
+  FocusNode _node(int index) => _nodes.putIfAbsent(
+    _ids[index],
+    () => FocusNode(debugLabel: 'CarbonMenu item ${_ids[index]}'),
+  );
 
   CarbonPopupController _sub(int index) =>
-      _subs.putIfAbsent(index, CarbonPopupController.new);
+      _subs.putIfAbsent(_ids[index], CarbonPopupController.new);
 
-  // Nodes beyond the current row count are disposed after the frame, once the
-  // rows that held them have been rebuilt without them.
-  void _trim(int count) {
-    final staleNodes = _nodes.keys.where((i) => i >= count).toList();
-    final staleSubs = _subs.keys.where((i) => i >= count).toList();
-    if (staleNodes.isEmpty && staleSubs.isEmpty) return;
+  // Rows that left the list are disposed after the frame, once the widgets
+  // that held their nodes have been rebuilt without them.
+  void _trim() {
+    final live = _ids.toSet();
+    final stale = <String>{
+      ..._nodes.keys.where((id) => !live.contains(id)),
+      ..._subs.keys.where((id) => !live.contains(id)),
+    };
+    if (stale.isEmpty) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final limit = _flat.length;
-      for (final i in staleNodes) {
-        if (i >= limit) _nodes.remove(i)?.dispose();
-      }
-      for (final i in staleSubs) {
-        if (i >= limit) _subs.remove(i)?.dispose();
+      final current = _ids.toSet();
+      for (final id in stale) {
+        if (current.contains(id)) continue;
+        _nodes.remove(id)?.dispose();
+        _subs.remove(id)?.dispose();
+        _flipped.remove(id);
       }
     });
   }
 
+  // A label plus its occurrence among same-labelled rows of the same kind.
+  static List<String> _identify(List<_Flat> flat) {
+    final seen = <String, int>{};
+    return <String>[
+      for (final row in flat)
+        () {
+          final base = '${row.kind.name}|${row.label}';
+          final n = seen.update(base, (v) => v + 1, ifAbsent: () => 0);
+          return '$base#$n';
+        }(),
+    ];
+  }
+
   int get _focusedIndex {
-    for (final entry in _nodes.entries) {
-      if (entry.key < _flat.length && entry.value.hasPrimaryFocus) {
-        return entry.key;
-      }
+    for (var i = 0; i < _flat.length; i++) {
+      if (_nodes[_ids[i]]?.hasPrimaryFocus ?? false) return i;
     }
     return -1;
   }
@@ -517,14 +549,15 @@ class _MenuPanelState extends State<_MenuPanel> {
   ];
 
   void _closeSubmenus({int? except}) {
+    final keep = except == null ? null : _ids[except];
     for (final entry in _subs.entries) {
-      if (entry.key != except) entry.value.close();
+      if (entry.key != keep) entry.value.close();
     }
   }
 
   void _focusRow(int index) {
     _closeSubmenus();
-    final node = _nodes[index];
+    final node = _nodes[_ids[index]];
     if (node == null) return;
     node.requestFocus();
     _reveal(node);
@@ -576,12 +609,32 @@ class _MenuPanelState extends State<_MenuPanel> {
       return;
     }
     _closeSubmenus(except: index);
+    if (_opensTowardLeadingEdge(index)) {
+      _flipped.add(_ids[index]);
+    } else {
+      _flipped.remove(_ids[index]);
+    }
     controller.open();
   }
 
+  // The popup primitive only clamps horizontally, so a submenu without room on
+  // the trailing side would land on top of its parent. The submenu's width is
+  // unknown until it is laid out; the parent's is the best proxy for it.
+  bool _opensTowardLeadingEdge(int index) {
+    final box = _nodes[_ids[index]]?.context?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return false;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    final screen = MediaQuery.sizeOf(context).width;
+    final rtl = Directionality.of(context) == TextDirection.rtl;
+    final trailing = rtl ? rect.left : screen - rect.right;
+    final leading = rtl ? screen - rect.right : rect.left;
+    final needed = math.max(widget.host.minWidth, rect.width);
+    return trailing < needed && leading > trailing;
+  }
+
   int get _openSubmenuIndex {
-    for (final entry in _subs.entries) {
-      if (entry.value.isOpen) return entry.key;
+    for (var i = 0; i < _flat.length; i++) {
+      if (_subs[_ids[i]]?.isOpen ?? false) return i;
     }
     return -1;
   }
@@ -625,15 +678,29 @@ class _MenuPanelState extends State<_MenuPanel> {
       if (open >= 0) {
         // Focus is on the parent row here; a submenu holding focus has already
         // handled Escape itself.
-        _subs[open]!.close();
-        _nodes[open]?.requestFocus();
+        _subs[_ids[open]]!.close();
+        _nodes[_ids[open]]?.requestFocus();
         return KeyEventResult.handled;
       }
       return KeyEventResult.ignored;
     }
     if (key == LogicalKeyboardKey.tab) {
+      if (!isDown) return KeyEventResult.handled;
+      final backwards = HardwareKeyboard.instance.isShiftPressed;
       widget.host.closeAll();
-      return KeyEventResult.ignored;
+      FocusManager.instance.applyFocusChangesIfNeeded();
+      // Traversal has to wait for the overlay to unmount: while its rows are
+      // still in the tree the next stop after the trigger is usually one of
+      // them.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final focus = FocusManager.instance.primaryFocus;
+        if (backwards) {
+          focus?.previousFocus();
+        } else {
+          focus?.nextFocus();
+        }
+      });
+      return KeyEventResult.handled;
     }
     return _typeahead(event);
   }
@@ -654,11 +721,14 @@ class _MenuPanelState extends State<_MenuPanel> {
     final order = _focusable;
     if (order.isEmpty) return KeyEventResult.handled;
     final current = order.indexOf(_focusedIndex);
-    // A repeated single letter cycles through matches instead of sticking.
-    final start = _typed.length == 1 ? current + 1 : math.max(current, 0);
+    // The same letter repeated, typed or held, cycles through its matches
+    // instead of growing a prefix nothing matches.
+    final repeated = _typed.split('').every((c) => c == _typed[0]);
+    final prefix = repeated ? _typed[0] : _typed;
+    final start = repeated ? current + 1 : math.max(current, 0);
     for (var step = 0; step < order.length; step++) {
       final index = order[(start + step) % order.length];
-      if (_flat[index].label.toLowerCase().startsWith(_typed)) {
+      if (_flat[index].label.toLowerCase().startsWith(prefix)) {
         _focusRow(index);
         break;
       }
@@ -672,7 +742,8 @@ class _MenuPanelState extends State<_MenuPanel> {
     final loc = CarbonLocalizations.of(context);
     final level = CarbonLayer.of(context);
     _flat = _flatten(widget.entries);
-    _trim(_flat.length);
+    _ids = _identify(_flat);
+    _trim();
     final hasCheck = _flat.any((e) => e.checked != null);
     final hasIcon = _flat.any((e) => e.icon != null);
 
@@ -686,6 +757,7 @@ class _MenuPanelState extends State<_MenuPanel> {
         explicitChildNodes: true,
         role: SemanticsRole.menu,
         label: widget.semanticLabel ?? loc.menu,
+        identifier: widget.semanticIdentifier,
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: theme.layer(level),
@@ -754,7 +826,7 @@ class _MenuPanelState extends State<_MenuPanel> {
         );
       case _FlatKind.item:
         return _MenuRow(
-          key: ValueKey<int>(index),
+          key: ValueKey<String>(_ids[index]),
           flat: flat,
           node: _node(index),
           hasCheck: hasCheck,
@@ -765,39 +837,50 @@ class _MenuPanelState extends State<_MenuPanel> {
       case _FlatKind.submenu:
         final controller = _sub(index);
         final node = _node(index);
+        final id = _ids[index];
         return ListenableBuilder(
-          key: ValueKey<int>(index),
+          key: ValueKey<String>(_ids[index]),
           listenable: controller,
-          builder: (context, _) => _MenuRow(
-            flat: flat,
-            node: node,
-            hasCheck: hasCheck,
-            hasIcon: hasIcon,
-            submenuOpen: controller.isOpen,
-            onPressed: flat.enabled
-                ? () => _openSubmenu(index, toggle: true)
-                : null,
-            onFocused: () => _reveal(node),
-            submenuAnchor: CarbonAnchoredPopup(
-              controller: controller,
-              gap: -1,
-              raiseLayer: false,
-              dismissOnOutsideTap: false,
-              dismissOnBack: false,
-              restoreFocus: node,
-              popupBuilder: (context, available) => TapRegion(
-                groupId: widget.host.tapGroup,
-                child: _MenuPanel(
-                  entries: flat.children,
-                  host: widget.host,
-                  closeSelf: controller.close,
+          builder: (context, _) {
+            final flipped = _flipped.contains(id);
+            return _MenuRow(
+              flat: flat,
+              node: node,
+              hasCheck: hasCheck,
+              hasIcon: hasIcon,
+              submenuOpen: controller.isOpen,
+              submenuFlipped: flipped,
+              onPressed: flat.enabled
+                  ? () => _openSubmenu(index, toggle: true)
+                  : null,
+              onFocused: () => _reveal(node),
+              submenuAnchor: CarbonAnchoredPopup(
+                controller: controller,
+                gap: -1,
+                minWidth: widget.host.minWidth,
+                maxWidth: widget.host.maxWidth,
+                alignment: flipped
+                    ? CarbonPopupAlignment.end
+                    : CarbonPopupAlignment.start,
+                raiseLayer: false,
+                dismissOnOutsideTap: false,
+                dismissOnBack: false,
+                restoreFocus: node,
+                popupBuilder: (context, available) => TapRegion(
+                  groupId: widget.host.tapGroup,
+                  child: _MenuPanel(
+                    entries: flat.children,
+                    host: widget.host,
+                    closeSelf: controller.close,
+                  ),
                 ),
+                // A 1px box on the row's trailing edge (leading when flipped):
+                // the popup opens beside the row, level with its top, rather
+                // than below it.
+                child: const SizedBox(width: 1, height: 1),
               ),
-              // A 1px box on the row's trailing edge: the popup opens beside
-              // the row, level with its top, rather than below it.
-              child: const SizedBox(width: 1, height: 1),
-            ),
-          ),
+            );
+          },
         );
     }
   }
@@ -813,6 +896,7 @@ class _MenuRow extends StatelessWidget {
     required this.onPressed,
     required this.onFocused,
     this.submenuOpen = false,
+    this.submenuFlipped = false,
     this.submenuAnchor,
   });
 
@@ -823,6 +907,7 @@ class _MenuRow extends StatelessWidget {
   final VoidCallback? onPressed;
   final VoidCallback onFocused;
   final bool submenuOpen;
+  final bool submenuFlipped;
   final Widget? submenuAnchor;
 
   @override
@@ -867,13 +952,14 @@ class _MenuRow extends StatelessWidget {
         } else {
           background = const Color(0x00000000);
         }
+        final emphasised = state.hovered || submenuOpen;
         final Color foreground = !enabled
             ? colors.textDisabled
             : filledDanger
             ? colors.textOnColor
-            : danger
-            ? colors.textError
-            : colors.textPrimary;
+            : emphasised
+            ? colors.textPrimary
+            : colors.textSecondary;
         final Color secondary = !enabled
             ? colors.textDisabled
             : filledDanger
@@ -883,9 +969,9 @@ class _MenuRow extends StatelessWidget {
             ? colors.iconDisabled
             : filledDanger
             ? colors.iconOnColor
-            : danger
-            ? colors.textError
-            : colors.iconPrimary;
+            : emphasised
+            ? colors.iconPrimary
+            : colors.iconSecondary;
         final style = theme.typography.control;
         final iconSize = theme.iconSize;
 
@@ -959,7 +1045,14 @@ class _MenuRow extends StatelessWidget {
       fit: StackFit.passthrough,
       children: <Widget>[
         interaction,
-        PositionedDirectional(end: 0, top: 0, width: 1, height: 1, child: anchor),
+        PositionedDirectional(
+          start: submenuFlipped ? 0 : null,
+          end: submenuFlipped ? null : 0,
+          top: 0,
+          width: 1,
+          height: 1,
+          child: anchor,
+        ),
       ],
     );
   }
@@ -971,7 +1064,8 @@ class _MenuRow extends StatelessWidget {
 /// Right-click is read from the raw pointer, so it works even over a child
 /// that handles its own taps. Long press is recognized for touch and stylus
 /// only, and competes with child gesture recognizers in the usual way: a child
-/// with its own long-press handler wins.
+/// with its own long-press handler wins. While focus is inside [child], the
+/// Menu key or Shift+F10 opens the menu beside the focused widget.
 class CarbonContextMenu extends StatefulWidget {
   const CarbonContextMenu({
     super.key,
@@ -1024,6 +1118,24 @@ class _CarbonContextMenuState extends State<CarbonContextMenu> {
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
+  // Keyboard users have no pointer position, so the menu opens at the bottom
+  // start of whatever holds focus inside the region.
+  void _openAtFocus() {
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached) return;
+    var local = Offset.zero;
+    final focusBox = FocusManager.instance.primaryFocus?.context
+        ?.findRenderObject();
+    if (focusBox is RenderBox && focusBox.attached && focusBox.hasSize) {
+      final rtl = Directionality.of(context) == TextDirection.rtl;
+      final corner = rtl
+          ? focusBox.size.bottomRight(Offset.zero)
+          : focusBox.size.bottomLeft(Offset.zero);
+      local = box.globalToLocal(focusBox.localToGlobal(corner));
+    }
+    _openAt(local);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Listener(
@@ -1053,7 +1165,15 @@ class _CarbonContextMenuState extends State<CarbonContextMenu> {
           fit: StackFit.passthrough,
           clipBehavior: Clip.none,
           children: <Widget>[
-            widget.child,
+            CallbackShortcuts(
+              bindings: <ShortcutActivator, VoidCallback>{
+                const SingleActivator(LogicalKeyboardKey.contextMenu):
+                    _openAtFocus,
+                const SingleActivator(LogicalKeyboardKey.f10, shift: true):
+                    _openAtFocus,
+              },
+              child: widget.child,
+            ),
             Positioned(
               left: _position.dx,
               top: _position.dy,

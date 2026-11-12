@@ -34,7 +34,7 @@ enum CarbonInlineLoadingStatus {
 /// spinner's animation is not announced. On [CarbonInlineLoadingStatus.error]
 /// an explicit retry button appears when [onRetry] is given. Retrying is always
 /// a user action.
-class CarbonInlineLoading extends StatelessWidget {
+class CarbonInlineLoading extends StatefulWidget {
   const CarbonInlineLoading({
     super.key,
     required this.status,
@@ -60,10 +60,46 @@ class CarbonInlineLoading extends StatelessWidget {
   /// "Error" by default).
   final String? statusLabel;
 
+  @override
+  State<CarbonInlineLoading> createState() => _CarbonInlineLoadingState();
+}
+
+class _CarbonInlineLoadingState extends State<CarbonInlineLoading> {
   static const double _indicator = 16;
+
+  final FocusNode _retryNode = FocusNode(debugLabel: 'CarbonInlineLoading retry');
+
+  // Programmatic-only landing spot for focus when the retry button goes away.
+  final FocusNode _anchor = FocusNode(
+    debugLabel: 'CarbonInlineLoading',
+    skipTraversal: true,
+  );
+
+  bool _showRetry(CarbonInlineLoading w) =>
+      w.status == CarbonInlineLoadingStatus.error && w.onRetry != null;
+
+  @override
+  void didUpdateWidget(CarbonInlineLoading oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The activated retry button unmounts when the host leaves the error state;
+    // keep focus here rather than dropping it to the root scope.
+    if (_showRetry(oldWidget) && !_showRetry(widget) && _retryNode.hasFocus) {
+      _anchor.requestFocus();
+    }
+  }
+
+  @override
+  void dispose() {
+    _retryNode.dispose();
+    _anchor.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final status = widget.status;
+    final description = widget.description;
+    final statusLabel = widget.statusLabel;
     final theme = CarbonTheme.of(context);
     final loc = CarbonLocalizations.of(context);
     final colors = theme.colors;
@@ -87,9 +123,12 @@ class CarbonInlineLoading extends StatelessWidget {
     final text = description;
     // Center the 16px box on the first text line, so a wrapped description
     // keeps its indicator at the top.
-    final lineHeight = MediaQuery.textScalerOf(
-      context,
-    ).scale((style.fontSize ?? 14) * (style.height ?? 1.3));
+    // Flutter scales the font size first and applies the line-height multiple
+    // to the result, which differs from scaling the product under a nonlinear
+    // text scaler.
+    final lineHeight =
+        MediaQuery.textScalerOf(context).scale(style.fontSize ?? 14) *
+        (style.height ?? 1.3);
     final box = SizedBox(
       width: _indicator,
       height: math.max(_indicator, lineHeight),
@@ -115,30 +154,41 @@ class CarbonInlineLoading extends StatelessWidget {
       ],
     );
 
+    // The status word is part of the label because assistive technology
+    // re-announces a live region only when its label changes.
+    final spoken = switch ((text, status0)) {
+      (final String t, final String w) => '$t, $w',
+      (final String t, null) => t,
+      (null, final String w) => w,
+      _ => null,
+    };
     final announced = Semantics(
       container: true,
       liveRegion: status != CarbonInlineLoadingStatus.inactive,
-      label: text,
-      value: status0,
+      label: spoken,
       child: ExcludeSemantics(child: row),
     );
 
-    final showRetry =
-        status == CarbonInlineLoadingStatus.error && onRetry != null;
-    if (!showRetry) return announced;
-    return Wrap(
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: CarbonSpacing.spacing03,
-      runSpacing: CarbonSpacing.spacing02,
-      children: [
-        announced,
-        CarbonButton(
-          label: retryLabel ?? loc.retry,
-          kind: CarbonButtonKind.ghost,
-          size: CarbonButtonSize.small,
-          onPressed: onRetry,
-        ),
-      ],
+    final showRetry = _showRetry(widget);
+    return Focus(
+      focusNode: _anchor,
+      includeSemantics: false,
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: CarbonSpacing.spacing03,
+        runSpacing: CarbonSpacing.spacing02,
+        children: [
+          announced,
+          if (showRetry)
+            CarbonButton(
+              label: widget.retryLabel ?? loc.retry,
+              kind: CarbonButtonKind.ghost,
+              size: CarbonButtonSize.small,
+              focusNode: _retryNode,
+              onPressed: widget.onRetry,
+            ),
+        ],
+      ),
     );
   }
 }

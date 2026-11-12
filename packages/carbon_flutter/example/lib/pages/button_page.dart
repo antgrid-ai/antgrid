@@ -229,7 +229,13 @@ class ButtonPage extends StatelessWidget {
               'Icon-only buttons need a semantic label. Busy is announced '
               'as the localized "Loading" value. Disabled and busy are '
               'never conveyed by color alone.',
-          carbonReference: 'Carbon v11 Button and Button set.',
+          carbonReference:
+              'Carbon v11 Button and Button set. Deviations: height follows '
+              'the 32/48 density instead of the 48px Carbon default; end '
+              'padding is a symmetric 16px, not the 64px reserved for the '
+              'icon; busy is added and has no Carbon equivalent; a button '
+              'set stacks when its labels do not fit; icon-only buttons '
+              'show their name in a tooltip.',
         ),
       ],
     );

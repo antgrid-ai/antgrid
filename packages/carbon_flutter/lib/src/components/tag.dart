@@ -7,6 +7,7 @@ import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
 import '../primitives/focus_ring.dart';
 import '../primitives/interaction.dart';
+import 'tooltip.dart';
 
 /// Semantic hue of a [CarbonTag]. The role carries category meaning only;
 /// state such as selected or disabled is shown by other cues as well.
@@ -108,6 +109,19 @@ class CarbonTag extends StatelessWidget {
       _selectable ? onSelectedChanged != null : onPressed != null;
   bool get _dismissible => onDismissed != null;
 
+  bool _truncates(BuildContext context, TextStyle style, double available) {
+    if (!available.isFinite) return false;
+    final painter = TextPainter(
+      text: TextSpan(text: label, style: style),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width > available + 0.5;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
@@ -119,22 +133,35 @@ class CarbonTag extends StatelessWidget {
         : size.height;
     final extra = (footprint - size.height) / 2;
 
-    final _TagPalette base = _palette(colors, color);
-    final _TagPalette palette = disabled
-        ? _TagPalette(
-            background: colors.layerSelectedDisabled,
-            foreground: colors.textDisabled,
-            hover: colors.layerSelectedDisabled,
-            border: null,
-          )
-        : (isSelected
-              ? _TagPalette(
-                  background: colors.backgroundInverse,
-                  foreground: colors.textInverse,
-                  hover: colors.backgroundInverseHover,
-                  border: null,
-                )
-              : base);
+    final layerLevel = CarbonLayer.of(context);
+    final operational = !_selectable && onPressed != null;
+    final _TagPalette palette;
+    if (disabled) {
+      palette = _TagPalette(
+        background: theme.layer(layerLevel),
+        foreground: colors.textDisabled,
+        hover: theme.layer(layerLevel),
+        border: colors.borderDisabled,
+      );
+    } else if (isSelected) {
+      palette = _TagPalette(
+        background: colors.backgroundInverse,
+        foreground: colors.textInverse,
+        hover: colors.backgroundInverseHover,
+        border: null,
+      );
+    } else if (_selectable) {
+      // Carbon's selectable tag is a core-token filter chip, not a coloured
+      // category, so it reads as switchable.
+      palette = _TagPalette(
+        background: theme.layer(layerLevel),
+        foreground: colors.textPrimary,
+        hover: theme.layerHover(layerLevel),
+        border: colors.borderInverse,
+      );
+    } else {
+      palette = _palette(colors, color, bordered: operational);
+    }
 
     final radius = BorderRadius.all(CarbonShape.pill);
     final style = theme.typography.label.copyWith(color: palette.foreground);
@@ -185,7 +212,13 @@ class CarbonTag extends StatelessWidget {
     Widget main;
     final mainBody = Padding(
       padding: EdgeInsets.symmetric(vertical: extra),
-      child: content(trailingPad: !_dismissible),
+      child: ConstrainedBox(
+        // Short labels would otherwise leave a target narrower than the floor.
+        constraints: BoxConstraints(
+          minWidth: _mainInteractive ? theme.minTarget : 0,
+        ),
+        child: content(trailingPad: !_dismissible),
+      ),
     );
     if (_mainInteractive) {
       final VoidCallback? press = disabled
@@ -196,7 +229,7 @@ class CarbonTag extends StatelessWidget {
       main = CarbonInteraction(
         onPressed: press,
         focusNode: focusNode,
-        button: !_selectable,
+        button: true,
         label: label,
         selected: _selectable ? isSelected : null,
         excludeChildSemantics: true,
@@ -228,9 +261,26 @@ class CarbonTag extends StatelessWidget {
       main = Semantics(
         container: true,
         label: label,
+        selected: _selectable ? isSelected : null,
         child: ExcludeSemantics(child: mainBody),
       );
     }
+    final fixedWidth =
+        padX +
+        (_dismissible ? 0 : padX) +
+        (isSelected || icon != null ? 16 + CarbonSpacing.spacing01 : 0);
+    final mainTarget = main;
+    main = LayoutBuilder(
+      builder: (context, constraints) => CarbonTooltip(
+        message: label,
+        enabled: _truncates(
+          context,
+          style,
+          constraints.maxWidth - fixedWidth,
+        ),
+        child: mainTarget,
+      ),
+    );
 
     final loc = CarbonLocalizations.of(context);
     Widget? remove;
@@ -313,12 +363,18 @@ class _TagPalette {
   final Color? border;
 }
 
-_TagPalette _palette(CarbonColors c, CarbonTagColor color) {
+// Only operational tags carry their role's border; read-only and dismissible
+// tags are borderless fills.
+_TagPalette _palette(
+  CarbonColors c,
+  CarbonTagColor color, {
+  required bool bordered,
+}) {
   _TagPalette from(CarbonTagColors t) => _TagPalette(
     background: t.background,
     foreground: t.foreground,
     hover: t.hover,
-    border: null,
+    border: bordered ? t.border : null,
   );
   return switch (color) {
     CarbonTagColor.red => from(c.tagRed),

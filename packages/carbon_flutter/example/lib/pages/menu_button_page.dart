@@ -195,6 +195,25 @@ class _MenuButtonPageState extends State<MenuButtonPage> {
           ),
         ),
         const SizedBox(height: CarbonSpacing.spacing06),
+        const GallerySection(
+          title: 'Which control',
+          description:
+              'Menu button when a labelled control opens several commands. '
+              'Overflow menu when the commands are secondary and the space '
+              'only fits an icon. Split button when one action is the common '
+              'case and the rest are alternatives. None of them holds a '
+              'value: use Select or Dropdown to choose one.',
+          children: [],
+        ),
+        const GallerySection(
+          title: 'Deviations from Carbon',
+          description:
+              'The open menu is at least 160 and at most 320 wide rather '
+              'than as wide as the trigger. Pressing the split button action '
+              'while its menu is open dismisses the menu. Disabling a '
+              'trigger closes its open menu.',
+          children: [],
+        ),
         const GalleryNote(
           useWhen:
               'A small set of related commands behind one control. Use '
@@ -209,7 +228,8 @@ class _MenuButtonPageState extends State<MenuButtonPage> {
               'trigger is named "Options" and the split trigger "Open menu" '
               'unless overridden; both targets are at least 32 compact and 48 '
               'touch.',
-          carbonReference: 'Carbon Menu buttons',
+          carbonReference:
+              'Carbon Menu buttons (carbondesignsystem.com/components/menu-buttons/usage)',
         ),
       ],
     );

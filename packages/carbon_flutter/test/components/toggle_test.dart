@@ -321,4 +321,84 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('accessible name and states', () {
+    testWidgets('a custom label widget names the switch', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonToggle(
+            value: true,
+            onChanged: (_) {},
+            label: const Text('Auto-save'),
+          ),
+        ),
+      );
+      final node = tester
+          .getSemantics(find.bySemanticsLabel('Auto-save'))
+          .getSemanticsData();
+      expect(node.flagsCollection.isToggled, Tristate.isTrue);
+      handle.dispose();
+    });
+
+    testWidgets('read-only is announced as read-only', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _toggle(value: true, readOnly: true, onChanged: (_) {}),
+      );
+      final node = tester
+          .getSemantics(find.bySemanticsLabel('Auto-save'))
+          .getSemanticsData();
+      expect(node.flagsCollection.isReadOnly, isTrue);
+      handle.dispose();
+    });
+
+    testWidgets('small toggle without state text keeps the touch width', (
+      tester,
+    ) async {
+      final harness = await pumpCarbon(
+        tester,
+        _toggle(
+          value: false,
+          small: true,
+          hideStateText: true,
+          onChanged: (_) {},
+        ),
+      );
+      await harness.setDensity(tester, CarbonDensity.touch);
+      final size = tester.getSize(find.byType(CarbonInteraction));
+      expect(size.width, greaterThanOrEqualTo(48));
+      expect(size.height, greaterThanOrEqualTo(48));
+    });
+  });
+
+  group('colors and glyph', () {
+    Finder icons() => find.descendant(
+      of: find.byType(CarbonToggle),
+      matching: find.byType(CarbonIcon),
+    );
+
+    testWidgets('disabled on toggle never shows a success check', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _toggle(value: true, small: true));
+      final colors = CarbonThemeData().colors;
+      expect(icons(), findsOneWidget);
+      for (final icon in tester.widgetList<CarbonIcon>(icons())) {
+        expect(icon.color, isNot(colors.supportSuccess));
+      }
+    });
+
+    testWidgets('the check mark sits in the small handle only', (tester) async {
+      await pumpCarbon(
+        tester,
+        _toggle(value: true, small: true, onChanged: (_) {}),
+      );
+      expect(icons(), findsOneWidget);
+      await pumpCarbon(tester, _toggle(value: true, onChanged: (_) {}));
+      expect(icons(), findsNothing);
+    });
+  });
 }

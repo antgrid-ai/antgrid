@@ -209,11 +209,11 @@ void main() {
       await pumpCarbon(tester, const _Host(tabs: _abc));
       expect(
         tester.getSemantics(_selectedSemantics('Alpha')),
-        containsSemantics(label: 'Alpha', isSelected: true, hasTapAction: true),
+        isSemantics(label: 'Alpha', isSelected: true, hasTapAction: true),
       );
       expect(
         tester.getSemantics(_selectedSemantics('Beta')),
-        containsSemantics(label: 'Beta', isSelected: false),
+        isSemantics(label: 'Beta', isSelected: false),
       );
       handle.dispose();
     });
@@ -225,7 +225,7 @@ void main() {
       await pumpCarbon(tester, const _Host(tabs: _abc, initial: 'zzz'));
       expect(
         tester.getSemantics(find.text('Alpha')),
-        containsSemantics(isSelected: false),
+        isSemantics(isSelected: false),
       );
       handle.dispose();
     });

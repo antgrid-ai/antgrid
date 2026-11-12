@@ -1,5 +1,4 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/services.dart' show TextInputType;
 import 'package:flutter/widgets.dart';
 
 import '../gallery_scaffold.dart';
@@ -29,6 +28,9 @@ class _TextInputPageState extends State<TextInputPage> {
   late final TextEditingController _multiline = TextEditingController(
     text: 'First line\nSecond line',
   );
+  late final TextEditingController _token = TextEditingController(
+    text: 'abc-123',
+  );
   late final TextEditingController _selected = TextEditingController(
     text: 'Select part of this text, then switch density',
   );
@@ -40,6 +42,7 @@ class _TextInputPageState extends State<TextInputPage> {
     _counted.dispose();
     _multiline.dispose();
     _selected.dispose();
+    _token.dispose();
     super.dispose();
   }
 
@@ -169,7 +172,7 @@ class _TextInputPageState extends State<TextInputPage> {
                   'read-only',
                   _cell(
                     CarbonTextInput(
-                      controller: TextEditingController(text: 'abc-123'),
+                      controller: _token,
                       label: 'Token',
                       readOnly: true,
                       helperText: 'Select and copy it',

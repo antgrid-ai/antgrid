@@ -30,6 +30,10 @@ enum CarbonTooltipAlignment {
 /// * Touch: a long press shows it until the user taps elsewhere. Touch users
 ///   get no hover, so never rely on the tooltip for anything they must read.
 ///
+/// A tooltip nested inside another active one yields to it, so an icon-only
+/// control that already names itself in a tooltip does not stack a second one
+/// when the host wraps it with a richer message.
+///
 /// Dismissal: Escape (without closing an enclosing dialog), pointer leave,
 /// blur, a pointer press on the child, a tap elsewhere, and the child
 /// scrolling out of view. The tooltip never takes focus and does not
@@ -56,6 +60,8 @@ class CarbonTooltip extends StatefulWidget {
     this.showDelay = const Duration(milliseconds: 200),
     this.hideGrace = const Duration(milliseconds: 100),
     this.enabled = true,
+    this.excludeFromSemantics = false,
+    this.mergeChildSemantics = true,
   });
 
   final String message;
@@ -75,8 +81,22 @@ class CarbonTooltip extends StatefulWidget {
   /// tooltip hides.
   final Duration hideGrace;
 
-  /// False renders only [child], with no tooltip semantics either.
+  /// False shows no tooltip and exposes no tooltip semantics; [child] keeps
+  /// its place in the tree either way, so its state and focus survive the
+  /// toggle.
   final bool enabled;
+
+  /// Leaves the message out of the semantics tree. For a trigger whose
+  /// accessible name already is the message, which a screen reader would
+  /// otherwise read twice.
+  final bool excludeFromSemantics;
+
+  /// True (default) merges the child's semantics into one node that carries the
+  /// tooltip, which is right for a single control. A child made of several
+  /// controls (a field with its own clear button, a row of buttons) needs false:
+  /// the tooltip then labels a group and every control inside stays a separate,
+  /// reachable node.
+  final bool mergeChildSemantics;
 
   @override
   State<CarbonTooltip> createState() => _CarbonTooltipState();
@@ -91,6 +111,12 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   bool _touch = false;
   bool _keyHandlerAttached = false;
   bool _opening = false;
+  bool _yielded = false;
+  bool _pointerDown = false;
+  Timer? _pointerTimer;
+
+  bool get _active =>
+      widget.enabled && widget.message.isNotEmpty && !_yielded;
 
   bool get _wanted => _hover || _focus || _touch;
 
@@ -104,6 +130,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   void dispose() {
     _showTimer?.cancel();
     _hideTimer?.cancel();
+    _pointerTimer?.cancel();
     _detachKeyHandler();
     _controller.removeListener(_syncKeyHandler);
     _controller.dispose();
@@ -111,9 +138,17 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final outer = context.dependOnInheritedWidgetOfExactType<_TooltipScope>();
+    _yielded = outer != null && outer.active;
+    if (!_active) _reset();
+  }
+
+  @override
   void didUpdateWidget(CarbonTooltip oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!widget.enabled && oldWidget.enabled) _reset();
+    if (!_active) _reset();
   }
 
   void _syncKeyHandler() {
@@ -156,7 +191,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   // Opening applies pending focus changes, which can call back into the focus
   // listener that is opening the tooltip.
   void _open() {
-    if (_opening) return;
+    if (_opening || !_active) return;
     _opening = true;
     try {
       _controller.open();
@@ -192,7 +227,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   }
 
   void _onHover(bool hovering) {
-    if (!widget.enabled) return;
+    if (!_active) return;
     _hover = hovering;
     if (hovering) {
       _requestShow(immediate: false);
@@ -202,10 +237,13 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   }
 
   void _onFocusChange(bool focused) {
-    if (!widget.enabled) return;
+    if (!_active) return;
     if (focused) {
-      if (FocusManager.instance.highlightMode !=
-          FocusHighlightMode.traditional) {
+      // A mouse press also puts the focus manager in traditional mode, so the
+      // pointer itself has to be ruled out.
+      if (_pointerDown ||
+          FocusManager.instance.highlightMode !=
+              FocusHighlightMode.traditional) {
         return;
       }
       _focus = true;
@@ -221,12 +259,21 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   }
 
   void _onLongPress() {
-    if (!widget.enabled) return;
+    if (!_active) return;
     _touch = true;
     _requestShow(immediate: true);
   }
 
+  // Focus a press hands to the child arrives after the pointer-up has been
+  // dispatched, in a microtask, so the flag outlives the event by one timer.
+  void _onPointerEnd() {
+    _pointerTimer?.cancel();
+    _pointerTimer = Timer(Duration.zero, () => _pointerDown = false);
+  }
+
   void _onPointerDown() {
+    _pointerTimer?.cancel();
+    _pointerDown = true;
     if (!_wanted && !_controller.isOpen) {
       _showTimer?.cancel();
       return;
@@ -242,7 +289,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.enabled || widget.message.isEmpty) return widget.child;
+    final active = _active;
     final theme = CarbonTheme.of(context);
     final caretHeight = widget.caret ? _kCaretHeight : 0.0;
 
@@ -275,13 +322,10 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
                 borderRadius: const BorderRadius.all(CarbonShape.tooltip),
               ),
               child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: CarbonSpacing.spacing05,
-                  vertical: CarbonSpacing.spacing03,
-                ),
+                padding: const EdgeInsets.all(CarbonSpacing.spacing05),
                 child: Text(
                   widget.message,
-                  style: theme.typography.helper.copyWith(
+                  style: theme.typography.body.copyWith(
                     color: theme.colors.textInverse,
                   ),
                 ),
@@ -290,31 +334,123 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
           ),
         ),
       ),
-      child: MergeSemantics(
-        child: Semantics(
-          tooltip: widget.message,
-          child: Listener(
+      child: _TooltipSemantics(
+        mode: !active || widget.excludeFromSemantics
+            ? _TooltipSemanticsMode.none
+            : widget.mergeChildSemantics
+            ? _TooltipSemanticsMode.merge
+            : _TooltipSemanticsMode.group,
+        message: widget.message,
+        child: Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: (_) => _onPointerDown(),
+          onPointerUp: (_) => _onPointerEnd(),
+          onPointerCancel: (_) => _onPointerEnd(),
           child: MouseRegion(
             onEnter: (_) => _onHover(true),
             onExit: (_) => _onHover(false),
             child: GestureDetector(
-              onLongPress: _onLongPress,
+              // The popup is visual only, so advertising the long press that
+              // opens it would hand assistive technology an action with no
+              // effect it can perceive.
+              excludeFromSemantics: true,
+              onLongPress: active ? _onLongPress : null,
               child: Focus(
                 canRequestFocus: false,
                 skipTraversal: true,
                 includeSemantics: false,
                 onFocusChange: _onFocusChange,
-                child: widget.child,
+                child: _TooltipScope(active: active, child: widget.child),
               ),
             ),
           ),
         ),
-        ),
       ),
     );
   }
+}
+
+enum _TooltipSemanticsMode { none, merge, group }
+
+/// Attaches the tooltip string to the semantics of its child. One render
+/// object serves every mode so that toggling the tooltip never changes the
+/// shape of the tree, which would remount the child.
+class _TooltipSemantics extends SingleChildRenderObjectWidget {
+  const _TooltipSemantics({
+    required this.mode,
+    required this.message,
+    required super.child,
+  });
+
+  final _TooltipSemanticsMode mode;
+  final String message;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderTooltipSemantics(mode, message, Directionality.of(context));
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderTooltipSemantics renderObject,
+  ) {
+    renderObject
+      ..mode = mode
+      ..message = message
+      ..textDirection = Directionality.of(context);
+  }
+}
+
+class _RenderTooltipSemantics extends RenderProxyBox {
+  _RenderTooltipSemantics(this._mode, this._message, this._textDirection);
+
+  _TooltipSemanticsMode _mode;
+  String _message;
+  TextDirection _textDirection;
+
+  set textDirection(TextDirection value) {
+    if (_textDirection == value) return;
+    _textDirection = value;
+    markNeedsSemanticsUpdate();
+  }
+
+  set mode(_TooltipSemanticsMode value) {
+    if (_mode == value) return;
+    _mode = value;
+    markNeedsSemanticsUpdate();
+  }
+
+  set message(String value) {
+    if (_message == value) return;
+    _message = value;
+    markNeedsSemanticsUpdate();
+  }
+
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+    if (_mode == _TooltipSemanticsMode.none) return;
+    config
+      ..isSemanticBoundary = true
+      ..textDirection = _textDirection
+      ..tooltip = _message;
+    if (_mode == _TooltipSemanticsMode.merge) {
+      config.isMergingSemanticsOfDescendants = true;
+    } else {
+      config.explicitChildNodes = true;
+    }
+  }
+}
+
+/// Lets a nested [CarbonTooltip] see that an enclosing one is showing, so only
+/// the outermost shows.
+class _TooltipScope extends InheritedWidget {
+  const _TooltipScope({required this.active, required super.child});
+
+  final bool active;
+
+  @override
+  bool updateShouldNotify(_TooltipScope old) => old.active != active;
 }
 
 const double _kCaretHeight = 6;

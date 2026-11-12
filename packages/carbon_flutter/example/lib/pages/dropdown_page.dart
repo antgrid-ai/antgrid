@@ -91,7 +91,12 @@ class _DropdownPageState extends State<DropdownPage> {
               onChanged: (v) => setState(() => _custom = v),
               allowCustomValue: true,
               onCustomValue: (text) => setState(() {
-                _extra.add(CarbonOption(value: text, label: text));
+                // Option values are identities, so a name that already
+                // exists selects that option instead of adding a twin.
+                final known = [..._branches, ..._extra].any(
+                  (o) => o.value == text || o.label == text,
+                );
+                if (!known) _extra.add(CarbonOption(value: text, label: text));
                 _custom = text;
               }),
             ),

@@ -1,7 +1,8 @@
+import 'dart:ui' show Tristate;
+
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:carbon_flutter/src/components/option_listbox.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,7 +28,6 @@ class _Host extends StatefulWidget {
     this.errorText,
     this.focusNode,
     this.onChanged,
-    this.label = 'Mode',
   });
 
   final String? initial;
@@ -37,7 +37,6 @@ class _Host extends StatefulWidget {
   final String? errorText;
   final FocusNode? focusNode;
   final ValueChanged<String>? onChanged;
-  final String label;
 
   @override
   State<_Host> createState() => _HostState();
@@ -53,7 +52,7 @@ class _HostState extends State<_Host> {
       width: 300,
       child: CarbonSelect<String>(
         key: _select,
-        label: widget.label,
+        label: 'Mode',
         options: widget.options,
         value: value,
         enabled: widget.enabled,
@@ -167,7 +166,7 @@ void main() {
       expect(tester.getSize(_row('Alpha')).height, lessThanOrEqualTo(32));
       final compactRow = tester.getRect(
         find
-            .ancestor(of: _row('Alpha'), matching: find.byType(ColoredBox))
+            .ancestor(of: _row('Alpha'), matching: find.byType(DecoratedBox))
             .first,
       );
       expect(compactRow.height, 32);
@@ -175,7 +174,7 @@ void main() {
       expect(tester.getSize(find.byType(CarbonFieldBox)).height, 48);
       final touchRow = tester.getRect(
         find
-            .ancestor(of: _row('Alpha'), matching: find.byType(ColoredBox))
+            .ancestor(of: _row('Alpha'), matching: find.byType(DecoratedBox))
             .first,
       );
       expect(touchRow.height, 48);
@@ -186,7 +185,7 @@ void main() {
       await _openByTap(tester);
       final row = tester.getRect(
         find
-            .ancestor(of: _row('Alpha'), matching: find.byType(ColoredBox))
+            .ancestor(of: _row('Alpha'), matching: find.byType(DecoratedBox))
             .first,
       );
       expect(row.height, greaterThan(32));
@@ -549,14 +548,13 @@ void main() {
       expect(data.label, contains('Mode'));
       expect(data.value, 'Charlie');
       expect(data.hint, contains('Pick a valid mode'));
-      expect(data.hasFlag(SemanticsFlag.isButton), isTrue);
-      expect(data.hasFlag(SemanticsFlag.hasExpandedState), isTrue);
-      expect(data.hasFlag(SemanticsFlag.isExpanded), isFalse);
+      expect(data.flagsCollection.isButton, isTrue);
+      expect(data.flagsCollection.isExpanded, Tristate.isFalse);
 
       await _openByTap(tester);
       node = tester.getSemantics(find.byKey(_select));
       data = node.getSemanticsData();
-      expect(data.hasFlag(SemanticsFlag.isExpanded), isTrue);
+      expect(data.flagsCollection.isExpanded, Tristate.isTrue);
       handle.dispose();
     });
 
@@ -569,16 +567,15 @@ void main() {
             find.ancestor(of: _row('Charlie'), matching: find.byType(Semantics)).first,
           )
           .getSemanticsData();
-      expect(charlie.hasFlag(SemanticsFlag.isSelected), isTrue);
-      expect(charlie.hasFlag(SemanticsFlag.hasEnabledState), isTrue);
-      expect(charlie.hasFlag(SemanticsFlag.isEnabled), isTrue);
+      expect(charlie.flagsCollection.isSelected, Tristate.isTrue);
+      expect(charlie.flagsCollection.isEnabled, Tristate.isTrue);
       final bravo = tester
           .getSemantics(
             find.ancestor(of: _row('Bravo'), matching: find.byType(Semantics)).first,
           )
           .getSemanticsData();
-      expect(bravo.hasFlag(SemanticsFlag.isEnabled), isFalse);
-      expect(bravo.hasFlag(SemanticsFlag.isSelected), isFalse);
+      expect(bravo.flagsCollection.isEnabled, Tristate.isFalse);
+      expect(bravo.flagsCollection.isSelected, Tristate.isFalse);
       handle.dispose();
     });
 
@@ -601,8 +598,8 @@ void main() {
       final data = tester
           .getSemantics(find.byKey(_select))
           .getSemanticsData();
-      expect(data.hasFlag(SemanticsFlag.isReadOnly), isTrue);
-      expect(data.hasFlag(SemanticsFlag.isRequired), isTrue);
+      expect(data.flagsCollection.isReadOnly, isTrue);
+      expect(data.flagsCollection.isRequired, Tristate.isTrue);
       handle.dispose();
     });
   });

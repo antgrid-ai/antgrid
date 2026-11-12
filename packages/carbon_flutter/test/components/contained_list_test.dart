@@ -350,7 +350,7 @@ void main() {
       );
       expect(
         tester.getSemantics(find.text('Row')),
-        containsSemantics(
+        isSemantics(
           label: 'Row\nDetail',
           isSelected: true,
           hasTapAction: true,

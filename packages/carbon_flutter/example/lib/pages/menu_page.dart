@@ -22,7 +22,8 @@ class MenuPage extends StatelessWidget {
           title: 'Actions',
           description:
               'Icons, shortcut hints, a disabled item and a danger item that '
-              'fills with the danger role on hover and focus.',
+              'reads as an ordinary row until hover or focus fills it with the '
+              'danger role.',
           children: [_ActionsDemo()],
         ),
         GallerySection(
@@ -42,13 +43,36 @@ class MenuPage extends StatelessWidget {
         GallerySection(
           title: 'Context menu',
           description:
-              'Right-click or long-press the area to open at the pointer.',
+              'Right-click or long-press the area to open at the pointer; with '
+              'focus inside it, the Menu key or Shift+F10 opens beside the '
+              'focused widget.',
           children: [_ContextDemo()],
         ),
         GallerySection(
           title: 'Long labels',
           description: 'Rows wrap and grow; they never clip.',
           children: [_LongDemo()],
+        ),
+        GallerySection(
+          title: 'Menu or Select',
+          description:
+              'Choose Menu when each row runs a command or flips a setting '
+              'and the control keeps no value of its own. Choose Select or '
+              'Dropdown when the rows are the options of a form field whose '
+              'chosen value the control shows.',
+          children: [],
+        ),
+        GallerySection(
+          title: 'Deviations from Carbon',
+          description:
+              'Submenus open by tap or key, never by hovering. Checkable '
+              'items close the menu unless closeOnToggle is false. A submenu '
+              'without room on its trailing side opens on the leading side '
+              'by comparing the space on each side with the parent row width, '
+              'not by measuring the submenu. The menu panel is a single '
+              'non-lazy column, so very long lists belong in a Select or '
+              'a searchable list instead.',
+          children: [],
         ),
         GalleryNote(
           useWhen:
@@ -58,11 +82,15 @@ class MenuPage extends StatelessWidget {
               'Up/Down move with wrap and skip disabled items; Home/End jump; '
               'Enter or Space activate; Right (Left in RTL) opens a submenu; '
               'Left (Right in RTL) or Escape closes it; Escape on the root '
-              'restores focus to the trigger; Tab closes; letters jump.',
+              'restores focus to the trigger; Tab closes the menu and moves '
+              'on from the trigger; letters jump, and repeating a letter '
+              'cycles through its matches.',
           accessibility:
               'Menu with menu items, checked and radio items, an expanded '
               'state on submenu items and a 32 / 48 minimum row height.',
-          carbonReference: 'Carbon Menu and Menu button',
+          carbonReference:
+              'Carbon Menu and Menu button (react Menu, MenuItem; '
+              'carbondesignsystem.com/components/menu/usage)',
         ),
       ],
     );

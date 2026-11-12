@@ -158,6 +158,14 @@ class _TagPageState extends State<TagPage> {
                 disabled: true,
               ),
             ),
+            const Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: CarbonTag(
+                label: 'Selected and disabled',
+                selected: true,
+                disabled: true,
+              ),
+            ),
           ],
         ),
         const GalleryNote(
@@ -168,7 +176,8 @@ class _TagPageState extends State<TagPage> {
               'Selectable and operational tags are one stop; the remove '
               'action is its own stop. Space or Enter activates.',
           accessibility:
-              'The full label is always announced, even when truncated. '
+              'The full label is always announced, and a truncated label shows in a '
+              'tooltip on hover or focus. '
               'Remove is named "Remove <label>". Selected tags show a check '
               'mark as well as the inverse fill.',
           carbonReference:

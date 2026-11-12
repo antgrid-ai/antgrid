@@ -37,7 +37,7 @@ class CarbonSelect<T> extends StatelessWidget {
     this.showOptional = false,
     this.enabled = true,
     this.readOnly = false,
-    this.unavailableLabel = 'Unavailable',
+    this.unavailableLabel,
     this.emptyText,
     this.focusNode,
     this.autofocus = false,
@@ -64,8 +64,9 @@ class CarbonSelect<T> extends StatelessWidget {
   final bool enabled;
   final bool readOnly;
 
-  /// Shown in place of a [value] that none of [options] carries.
-  final String unavailableLabel;
+  /// Shown in place of a [value] that none of [options] carries. Defaults to
+  /// the localized `unavailableValue`.
+  final String? unavailableLabel;
 
   /// Shown in the open list when [options] is empty. Defaults to the
   /// localized `noResults`.

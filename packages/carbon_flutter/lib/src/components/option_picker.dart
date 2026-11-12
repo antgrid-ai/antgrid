@@ -19,7 +19,8 @@ import 'option_listbox.dart';
 /// The host owns the committed [value]: choosing an option calls [onChanged]
 /// and the field keeps showing the old value until the host rebuilds with the
 /// new one. A [value] that is not among [options] is shown as
-/// [unavailableLabel] and is never replaced by the field.
+/// [unavailableLabel] (default: the localized `unavailableValue`) and is never
+/// replaced by the field.
 class CarbonOptionPicker<T> extends StatefulWidget {
   const CarbonOptionPicker({
     super.key,
@@ -35,7 +36,7 @@ class CarbonOptionPicker<T> extends StatefulWidget {
     this.showOptional = false,
     this.enabled = true,
     this.readOnly = false,
-    this.unavailableLabel = 'Unavailable',
+    this.unavailableLabel,
     this.focusNode,
     this.autofocus = false,
     this.loading = false,
@@ -55,7 +56,7 @@ class CarbonOptionPicker<T> extends StatefulWidget {
   final bool showOptional;
   final bool enabled;
   final bool readOnly;
-  final String unavailableLabel;
+  final String? unavailableLabel;
   final FocusNode? focusNode;
   final bool autofocus;
   final bool loading;
@@ -97,9 +98,26 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
   @override
   void didUpdateWidget(CarbonOptionPicker<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_active >= widget.options.length ||
-        (_active >= 0 && !widget.options[_active].enabled)) {
-      _active = -1;
+    if (!identical(widget.options, oldWidget.options) && _active >= 0) {
+      // The highlight follows its option, not its position, so a list that
+      // reloads or re-sorts under the user never moves it onto another row.
+      final previous = _active < oldWidget.options.length
+          ? oldWidget.options[_active]
+          : null;
+      final moved = previous == null
+          ? -1
+          : CarbonOption.indexOfValue(widget.options, previous.value);
+      _active = moved >= 0 && widget.options[moved].enabled ? moved : -1;
+    }
+    if (widget.focusNode != oldWidget.focusNode) {
+      final previous = oldWidget.focusNode ?? _ownedFocus;
+      if (previous != null && previous.hasFocus) {
+        // The old node is detached by this rebuild; without a hand-over the
+        // open list would be left with no keyboard owner.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _node.requestFocus();
+        });
+      }
     }
     if (!_interactive && _popup.isOpen) _popup.close();
   }
@@ -134,7 +152,15 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
   void _reveal() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      revealOptionIndex(_scroll, _active, _extent(context));
+      revealOptionIndex(
+        _scroll,
+        _active,
+        _extent(context),
+        leadingRows: optionStatusRows(
+          loading: widget.loading,
+          errorText: widget.listErrorText,
+        ),
+      );
     });
   }
 
@@ -263,7 +289,7 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
       text = widget.options[selected].label;
       muted = false;
     } else if (widget.value != null) {
-      text = widget.unavailableLabel;
+      text = widget.unavailableLabel ?? messages.unavailableValue;
       muted = true;
     } else {
       text = widget.placeholder ?? messages.selectPlaceholder;
@@ -272,10 +298,11 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
 
     final hint = <String>[
       if (widget.required) messages.requiredField,
-      if (message != null) message,
+      ?message,
     ].join(', ');
 
     final extent = _extent(context);
+    final anchorLevel = CarbonLayer.of(context);
 
     final trigger = Focus(
       onKeyEvent: _handleKey,
@@ -352,6 +379,7 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
               activeIndex: _active,
               keyboardActive: _keyboard,
               extent: _extent(context),
+              level: anchorLevel,
               controller: _scroll,
               loading: widget.loading,
               errorText: widget.listErrorText,

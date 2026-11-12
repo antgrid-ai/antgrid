@@ -33,8 +33,8 @@ class CarbonSpinner extends StatefulWidget {
   /// The arc color. Defaults to the `interactive` role.
   final Color? color;
 
-  /// The ring behind the arc. Defaults to the subtle border of the current
-  /// layer.
+  /// The ring behind the arc. Defaults to the current layer's accent for a
+  /// small spinner and to none for a large one, as Carbon draws them.
   final Color? trackColor;
 
   /// Whether the spinner animates. An inactive spinner is static.
@@ -50,6 +50,9 @@ class CarbonSpinner extends StatefulWidget {
 class _CarbonSpinnerState extends State<CarbonSpinner>
     with SingleTickerProviderStateMixin {
   static const Duration _period = Duration(milliseconds: 1400);
+
+  // Carbon draws the background ring only on the small indicator.
+  static const double _smallTrackMax = 32;
 
   late final AnimationController _controller = AnimationController(
     vsync: this,
@@ -95,7 +98,10 @@ class _CarbonSpinnerState extends State<CarbonSpinner>
           progress: _controller,
           color: widget.color ?? theme.colors.interactive,
           trackColor:
-              widget.trackColor ?? theme.borderSubtle(CarbonLayer.of(context)),
+              widget.trackColor ??
+              (widget.size <= _smallTrackMax
+                  ? theme.layerAccent(CarbonLayer.of(context))
+                  : const Color(0x00000000)),
           strokeWidth: math.max(2, widget.size * 0.1),
         ),
       ),
@@ -236,9 +242,11 @@ class CarbonLoading extends StatelessWidget {
 /// Covers [child] with a [CarbonLoading] scrim while [loading] is true.
 ///
 /// Only this widget's own box is covered: siblings and ancestors stay usable.
-/// While loading, [child] is also removed from focus traversal so the keyboard
-/// cannot reach controls the scrim hides.
-class CarbonLoadingOverlay extends StatelessWidget {
+/// While loading, [child] is removed from pointer input, focus traversal and
+/// the semantics tree, so neither the keyboard nor a screen reader can reach
+/// controls the scrim hides. A control that held focus when loading began gets
+/// it back when loading ends.
+class CarbonLoadingOverlay extends StatefulWidget {
   const CarbonLoadingOverlay({
     super.key,
     required this.loading,
@@ -255,17 +263,66 @@ class CarbonLoadingOverlay extends StatelessWidget {
   final String? semanticLabel;
 
   @override
+  State<CarbonLoadingOverlay> createState() => _CarbonLoadingOverlayState();
+}
+
+class _CarbonLoadingOverlayState extends State<CarbonLoadingOverlay> {
+  // Observes whether focus is inside the child; it never takes focus itself.
+  final FocusNode _inside = FocusNode(
+    debugLabel: 'CarbonLoadingOverlay',
+    skipTraversal: true,
+    canRequestFocus: false,
+  );
+  FocusNode? _restore;
+
+  @override
+  void dispose() {
+    _inside.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(CarbonLoadingOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.loading == oldWidget.loading) return;
+    if (widget.loading) {
+      // ExcludeFocus drops focus during this build, so remember it first.
+      final focused = FocusManager.instance.primaryFocus;
+      _restore = focused != null && _inside.hasFocus ? focused : null;
+    } else {
+      final node = _restore;
+      _restore = null;
+      if (node == null) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || widget.loading) return;
+        if (node.context != null && node.canRequestFocus) node.requestFocus();
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final loading = widget.loading;
     return Stack(
       children: [
-        ExcludeFocus(excluding: loading, child: child),
+        ExcludeSemantics(
+          excluding: loading,
+          child: ExcludeFocus(
+            excluding: loading,
+            child: Focus(
+              focusNode: _inside,
+              includeSemantics: false,
+              child: widget.child,
+            ),
+          ),
+        ),
         if (loading)
           Positioned.fill(
             child: CarbonLoading(
               overlay: true,
-              size: size,
-              message: message,
-              semanticLabel: semanticLabel,
+              size: widget.size,
+              message: widget.message,
+              semanticLabel: widget.semanticLabel,
             ),
           ),
       ],

@@ -34,8 +34,8 @@ enum CarbonContentSwitcherSize {
 /// 2px ring.
 ///
 /// Keyboard contract (same as [CarbonTabs]):
-/// * One tab stop; Tab enters on the segment that last held focus, or the
-///   selected one.
+/// * One tab stop; Tab always enters on the selected segment and focus that
+///   was moved without selecting is not remembered once it leaves.
 /// * Left and Right move to the previous and next enabled option, wrapping
 ///   (swapped in right-to-left layouts); Home and End jump to the ends.
 /// * With [CarbonActivationMode.automatic] moving focus selects; with
@@ -43,8 +43,8 @@ enum CarbonContentSwitcherSize {
 ///
 /// Set [iconOnly] to show only each option's [CarbonOption.icon]; the option's
 /// `label` then becomes its accessible name, so every option must carry both.
-/// A [value] that matches no option leaves nothing selected, and re-selecting
-/// the current option never reports a change.
+/// [value] must match an option, and re-selecting the current option never
+/// reports a change.
 class CarbonContentSwitcher<T> extends StatefulWidget {
   const CarbonContentSwitcher({
     super.key,
@@ -82,7 +82,10 @@ class CarbonContentSwitcher<T> extends StatefulWidget {
 
 class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
   final Map<Object?, FocusNode> _nodes = <Object?, FocusNode>{};
+  // The flag exists because null is a legal option value and cannot double as
+  // "no stop".
   Object? _stop;
+  bool _hasStop = false;
 
   @override
   void initState() {
@@ -111,6 +114,10 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
     );
     final values = <Object?>{for (final o in widget.options) o.value};
     assert(
+      values.contains(widget.value),
+      'CarbonContentSwitcher value must match one of the options.',
+    );
+    assert(
       values.length == widget.options.length,
       'CarbonContentSwitcher values must be distinct.',
     );
@@ -127,7 +134,12 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
         node.dispose();
       }
     });
-    if (stale.contains(_stop)) _stop = null;
+    if (_hasStop && stale.contains(_stop)) _clearStop();
+  }
+
+  void _clearStop() {
+    _stop = null;
+    _hasStop = false;
   }
 
   int _indexOf(Object? value) {
@@ -146,7 +158,7 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
 
   int _stopIndex(int selected) {
     final options = widget.options;
-    var i = _stop == null ? -1 : _indexOf(_stop);
+    var i = _hasStop ? _indexOf(_stop) : -1;
     if (i >= 0 && options[i].enabled) return i;
     i = selected;
     if (i >= 0 && options[i].enabled) return i;
@@ -200,12 +212,16 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
   }
 
   void _handleFocus(Object? value, bool focused) {
-    if (focused && _stop != value) setState(() => _stop = value);
+    if (!focused || (_hasStop && _stop == value)) return;
+    setState(() {
+      _stop = value;
+      _hasStop = true;
+    });
   }
 
   void _handleGroupFocus(bool focused) {
-    if (focused || _stop == null) return;
-    setState(() => _stop = null);
+    if (focused || !_hasStop) return;
+    setState(_clearStop);
   }
 
   @override
@@ -320,11 +336,13 @@ class _Segment extends StatelessWidget {
           fill = enabled ? colors.layerSelectedInverse : colors.layerSelectedDisabled;
           text = enabled ? colors.textInverse : colors.textDisabled;
         } else {
+          // Unselected segments are clear so the page shows through the
+          // outline, as in Carbon.
           fill = state.pressed
               ? theme.layerActive(level)
               : state.hovered
               ? theme.layerHover(level)
-              : theme.layer(level);
+              : const Color(0x00000000);
           text = !enabled
               ? colors.textDisabled
               : state.hovered

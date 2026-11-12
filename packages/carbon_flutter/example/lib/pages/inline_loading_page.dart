@@ -141,7 +141,11 @@ class _InlineLoadingPageState extends State<InlineLoadingPage> {
               'A polite live region announces each status change once '
               '(description plus Loading, Success or Error). The spinner '
               'frames are not announced. Status is never color alone.',
-          carbonReference: 'Carbon v11 Inline loading.',
+          carbonReference:
+              'Carbon v11 Inline loading. Deviations: the status word is '
+              'folded into the live-region label so a status change is '
+              'announced; an explicit Retry button is offered on error; '
+              'timing of the finished state belongs to the host.',
         ),
       ],
     );

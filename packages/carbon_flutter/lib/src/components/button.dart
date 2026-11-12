@@ -9,6 +9,7 @@ import '../foundations/tokens.dart';
 import '../primitives/focus_ring.dart';
 import '../primitives/interaction.dart';
 import 'loading.dart';
+import 'tooltip.dart';
 
 /// Carbon's button treatments.
 enum CarbonButtonKind {
@@ -144,7 +145,7 @@ class CarbonButton extends StatelessWidget {
     );
     final name = semanticLabel ?? label ?? '';
 
-    return CarbonInteraction(
+    final button = CarbonInteraction(
       onPressed: disabled ? null : (busy ? _ignore : onPressed),
       focusNode: focusNode,
       autofocus: autofocus,
@@ -205,6 +206,11 @@ class CarbonButton extends StatelessWidget {
         );
       },
     );
+    // Sighted pointer and keyboard users get the name Carbon shows in a
+    // tooltip for every icon-only button.
+    return _iconOnly && name.isNotEmpty
+        ? CarbonTooltip(message: name, child: button)
+        : button;
   }
 
   Widget _spinner(CarbonThemeData theme, _CarbonButtonStyle style) {
@@ -557,6 +563,43 @@ class _RenderButtonSet extends RenderBox
     return out;
   }
 
+  bool _stacks(List<double> natural, double maxWidth) {
+    if (!maxWidth.isFinite) return false;
+    final n = natural.length;
+    final gaps = _gap * (n - 1);
+    if (_alignment == CarbonButtonSetAlignment.fill) {
+      final share = (maxWidth - gaps) / n;
+      return natural.any((w) => w > share + 0.01);
+    }
+    return natural.fold<double>(0, (a, b) => a + b) + gaps > maxWidth + 0.01;
+  }
+
+  List<double> _widths(List<double> natural, double maxWidth, bool stacked) {
+    final n = natural.length;
+    if (stacked) return List.filled(n, maxWidth);
+    if (_alignment == CarbonButtonSetAlignment.fill && maxWidth.isFinite) {
+      return List.filled(n, (maxWidth - _gap * (n - 1)) / n);
+    }
+    return natural;
+  }
+
+  // Mirrors the stack-or-row decision in layout so an intrinsic-sized parent
+  // allots the height the set will actually use.
+  double _intrinsicHeight(double width, double Function(RenderBox, double) of) {
+    final kids = _kids;
+    if (kids.isEmpty) return 0;
+    final natural = [
+      for (final k in kids) k.getMaxIntrinsicWidth(double.infinity),
+    ];
+    final stacked = _stacks(natural, width);
+    final widths = _widths(natural, width, stacked);
+    final heights = [for (var i = 0; i < kids.length; i++) of(kids[i], widths[i])];
+    if (stacked) {
+      return heights.fold<double>(0, (a, b) => a + b) + _gap * (kids.length - 1);
+    }
+    return heights.fold<double>(0, math.max);
+  }
+
   _SetPlan _compute(BoxConstraints constraints, {required bool dry}) {
     final kids = _kids;
     if (kids.isEmpty) {
@@ -574,25 +617,8 @@ class _RenderButtonSet extends RenderBox
       for (final k in kids) k.getMaxIntrinsicWidth(double.infinity),
     ];
 
-    var stacked = false;
-    if (bounded) {
-      if (_alignment == CarbonButtonSetAlignment.fill) {
-        final share = (maxWidth - gaps) / n;
-        stacked = natural.any((w) => w > share + 0.01);
-      } else {
-        stacked = natural.fold<double>(0, (a, b) => a + b) + gaps >
-            maxWidth + 0.01;
-      }
-    }
-
-    final widths = <double>[];
-    if (stacked) {
-      widths.addAll(List.filled(n, maxWidth));
-    } else if (_alignment == CarbonButtonSetAlignment.fill && bounded) {
-      widths.addAll(List.filled(n, (maxWidth - gaps) / n));
-    } else {
-      widths.addAll(natural);
-    }
+    final stacked = _stacks(natural, maxWidth);
+    final widths = _widths(natural, maxWidth, stacked);
 
     final heights = <double>[];
     for (var i = 0; i < n; i++) {
@@ -684,22 +710,12 @@ class _RenderButtonSet extends RenderBox
   }
 
   @override
-  double computeMinIntrinsicHeight(double width) {
-    var h = 0.0;
-    for (final k in _kids) {
-      h = math.max(h, k.getMinIntrinsicHeight(width));
-    }
-    return h;
-  }
+  double computeMinIntrinsicHeight(double width) =>
+      _intrinsicHeight(width, (k, w) => k.getMinIntrinsicHeight(w));
 
   @override
-  double computeMaxIntrinsicHeight(double width) {
-    var h = 0.0;
-    for (final k in _kids) {
-      h = math.max(h, k.getMaxIntrinsicHeight(width));
-    }
-    return h;
-  }
+  double computeMaxIntrinsicHeight(double width) =>
+      _intrinsicHeight(width, (k, w) => k.getMaxIntrinsicHeight(w));
 
   @override
   double? computeDistanceToActualBaseline(TextBaseline baseline) =>

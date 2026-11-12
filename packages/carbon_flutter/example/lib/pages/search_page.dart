@@ -28,6 +28,14 @@ class _SearchPageState extends State<SearchPage> {
   late final TextEditingController _filled = TextEditingController(
     text: 'preview',
   );
+  late final TextEditingController _locked = TextEditingController(
+    text: 'locked',
+  );
+  late final Map<CarbonFieldSize, TextEditingController> _sized =
+      <CarbonFieldSize, TextEditingController>{
+        for (final size in CarbonFieldSize.values)
+          size: TextEditingController(text: size.name),
+      };
   bool _busy = false;
   String _submitted = '';
 
@@ -42,6 +50,10 @@ class _SearchPageState extends State<SearchPage> {
   void dispose() {
     _query.dispose();
     _filled.dispose();
+    _locked.dispose();
+    for (final controller in _sized.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -150,7 +162,7 @@ class _SearchPageState extends State<SearchPage> {
                   'read-only',
                   _cell(
                     CarbonSearch(
-                      controller: TextEditingController(text: 'locked'),
+                      controller: _locked,
                       readOnly: true,
                     ),
                   ),
@@ -173,7 +185,7 @@ class _SearchPageState extends State<SearchPage> {
                     _cell(
                       CarbonSearch(
                         size: size,
-                        controller: TextEditingController(text: size.name),
+                        controller: _sized[size],
                       ),
                     ),
                   ),

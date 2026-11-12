@@ -57,6 +57,25 @@ class GallerySettings {
 
   CarbonThemeData get theme => CarbonThemeData(scheme: scheme, density: density);
 
+  /// Applies every setting to [child]. Used above the Navigator so pushed
+  /// routes (modals, toasts) see the same text scale, direction, theme and
+  /// motion as the previewed page; [width] additionally narrows the
+  /// MediaQuery size for the preview viewport.
+  Widget apply(BuildContext context, Widget child, {double? width}) {
+    final media = MediaQuery.of(context);
+    return MediaQuery(
+      data: media.copyWith(
+        size: width == null ? media.size : Size(width, media.size.height),
+        textScaler: TextScaler.linear(textScale),
+        disableAnimations: reducedMotion,
+      ),
+      child: Directionality(
+        textDirection: direction,
+        child: CarbonTheme(data: theme, child: child),
+      ),
+    );
+  }
+
   @override
   bool operator ==(Object other) =>
       other is GallerySettings &&
@@ -107,6 +126,12 @@ class _GalleryAppState extends State<GalleryApp> {
             settings: settings,
             pageBuilder: (context, _, _) => builder(context),
           ),
+      builder: (context, navigator) => ValueListenableBuilder<GallerySettings>(
+        valueListenable: _settings,
+        child: navigator,
+        builder: (context, settings, navigator) =>
+            settings.apply(context, navigator!),
+      ),
       home: GalleryShell(settings: _settings),
     );
   }

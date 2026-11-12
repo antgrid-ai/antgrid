@@ -84,16 +84,13 @@ class CarbonCheckbox extends StatelessWidget {
     final message = errorText ?? helperText;
     final hasLabel = label != null || labelText != null;
     final name = labelText ?? semanticLabel;
-    final typography = theme.typography;
+    final labelStyle = theme.typography.control.copyWith(
+      color: enabled ? colors.textPrimary : colors.textDisabled,
+    );
 
     Widget? labelWidget = label;
     if (labelWidget == null && labelText != null) {
-      labelWidget = Text(
-        labelText!,
-        style: typography.body.copyWith(
-          color: enabled ? colors.textPrimary : colors.textDisabled,
-        ),
-      );
+      labelWidget = Text(labelText!, style: labelStyle);
     }
 
     final row = CarbonInteraction(
@@ -120,52 +117,56 @@ class CarbonCheckbox extends StatelessWidget {
             invalid: invalid,
           ),
         );
-        return ConstrainedBox(
-          constraints: BoxConstraints(minHeight: theme.minTarget),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (hasLabel)
-                box
-              else
-                SizedBox.square(
-                  dimension: theme.minTarget,
-                  child: Center(child: box),
+        if (!hasLabel) {
+          return SizedBox.square(
+            dimension: theme.minTarget,
+            child: Center(child: box),
+          );
+        }
+        // The indicator is centred on the label's first line, so a wrapped
+        // label never detaches it from the line it names.
+        final lineHeight = MediaQuery.textScalerOf(
+          context,
+        ).scale(labelStyle.fontSize! * (labelStyle.height ?? 1));
+        final pad = lineHeight + 2 * CarbonSpacing.spacing02 >= theme.minTarget
+            ? CarbonSpacing.spacing02
+            : (theme.minTarget - lineHeight) / 2;
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: lineHeight + 2 * pad,
+              child: Center(child: box),
+            ),
+            const SizedBox(width: CarbonSpacing.spacing03),
+            Flexible(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: pad),
+                child: DefaultTextStyle.merge(
+                  style: labelStyle,
+                  child: labelWidget!,
                 ),
-              if (hasLabel) ...[
-                const SizedBox(width: CarbonSpacing.spacing03),
-                Flexible(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: CarbonSpacing.spacing02,
-                    ),
-                    child: DefaultTextStyle.merge(
-                      style: typography.body.copyWith(
-                        color: enabled
-                            ? colors.textPrimary
-                            : colors.textDisabled,
-                      ),
-                      child: labelWidget!,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
+              ),
+            ),
+          ],
         );
       },
     );
 
     // Explicit merge so a custom label widget joins the checkbox's own node.
-    final target = MergeSemantics(child: row);
-    if (message == null) return target;
+    final target = MergeSemantics(
+      child: Semantics(readOnly: readOnly ? true : null, child: row),
+    );
+    // Always a Column, so the control keeps its element, focus node and
+    // hover state when a message appears or clears.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         target,
-        _FieldMessage(text: message, error: invalid, enabled: enabled),
+        if (message != null)
+          _FieldMessage(text: message, error: invalid, enabled: enabled),
       ],
     );
   }
@@ -239,18 +240,18 @@ class _CheckboxIndicator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = CarbonTheme.of(context).colors;
-    final filled = (checked || mixed) && enabled && !readOnly;
+    final filled = (checked || mixed) && !readOnly;
     final Color border;
-    if (!enabled) {
+    if (!enabled || readOnly) {
       border = colors.iconDisabled;
-    } else if (readOnly) {
-      border = colors.borderDisabled;
     } else if (invalid) {
       border = colors.supportError;
     } else {
       border = colors.iconPrimary;
     }
-    final Color fill = filled ? colors.iconPrimary : const Color(0x00000000);
+    final Color fill = filled
+        ? (enabled ? colors.iconPrimary : colors.iconDisabled)
+        : const Color(0x00000000);
     final Color glyph = filled
         ? colors.iconInverse
         : (enabled ? colors.iconPrimary : colors.iconDisabled);
@@ -299,7 +300,7 @@ class CarbonCheckboxItem<T> {
 /// error.
 ///
 /// The host owns [selected]; [onChanged] reports the full next selection,
-/// preserving the order of [items]. The group is announced with its legend as
+/// ordered by [items] and keeping any selected value not listed there. The group is announced with its legend as
 /// a named container so each checkbox is read in context.
 class CarbonCheckboxGroup<T> extends StatelessWidget {
   const CarbonCheckboxGroup({
@@ -355,13 +356,19 @@ class CarbonCheckboxGroup<T> extends StatelessWidget {
           ),
           for (final item in items)
             CarbonCheckbox(
+              key: ValueKey<T>(item.value),
               value: selected.contains(item.value),
               labelText: item.label,
               helperText: item.helperText,
               readOnly: readOnly,
               onChanged: enabled && item.enabled
                   ? (checked) {
+                      final known = {for (final i in items) i.value};
+                      // Values the host selected that this list does not show
+                      // are not the user's to drop.
                       final next = <T>{
+                        for (final value in selected)
+                          if (!known.contains(value)) value,
                         for (final other in items)
                           if (other.value == item.value
                               ? checked == true

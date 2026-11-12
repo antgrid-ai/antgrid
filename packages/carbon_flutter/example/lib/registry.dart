@@ -2,6 +2,11 @@ import 'package:flutter/widgets.dart';
 
 import 'pages/button_page.dart';
 import 'pages/checkbox_page.dart';
+import 'pages/compositions/settings_form_page.dart';
+import 'pages/compositions/action_toolbar_page.dart';
+import 'pages/compositions/row_actions_list_page.dart';
+import 'pages/compositions/searchable_picker_page.dart';
+import 'pages/compositions/confirmation_flow_page.dart';
 import 'pages/contained_list_page.dart';
 import 'pages/content_switcher_page.dart';
 import 'pages/dropdown_page.dart';
@@ -192,5 +197,35 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Contained list',
     group: 'Components',
     builder: (_) => const ContainedListPage(),
+  ),
+  GalleryEntry(
+    id: 'settings-form',
+    title: 'Settings form',
+    group: 'Compositions',
+    builder: (_) => const SettingsFormComposition(),
+  ),
+  GalleryEntry(
+    id: 'action-toolbar',
+    title: 'Action toolbar',
+    group: 'Compositions',
+    builder: (_) => const ActionToolbarComposition(),
+  ),
+  GalleryEntry(
+    id: 'row-actions-list',
+    title: 'List with row actions',
+    group: 'Compositions',
+    builder: (_) => const RowActionsListComposition(),
+  ),
+  GalleryEntry(
+    id: 'searchable-picker',
+    title: 'Searchable picker',
+    group: 'Compositions',
+    builder: (_) => const SearchablePickerComposition(),
+  ),
+  GalleryEntry(
+    id: 'confirmation-flow',
+    title: 'Confirmation flow',
+    group: 'Compositions',
+    builder: (_) => const ConfirmationFlowComposition(),
   ),
 ];

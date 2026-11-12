@@ -1,4 +1,5 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/rendering.dart' show SemanticsNode;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -21,6 +22,16 @@ Widget _il0(
     status: status,
     description: description,
     onRetry: onRetry,
+  ),
+);
+
+
+SemanticsNode _live(WidgetTester tester) => tester.getSemantics(
+  find.descendant(
+    of: find.byKey(_il),
+    matching: find.byWidgetPredicate(
+      (w) => w is Semantics && w.properties.liveRegion != null,
+    ),
   ),
 );
 
@@ -89,22 +100,22 @@ void main() {
     final handle = tester.ensureSemantics();
     await pumpCarbon(tester, _il0(CarbonInlineLoadingStatus.active));
     expect(
-      tester.getSemantics(find.byKey(_il)),
-      matchesSemantics(label: 'Saving', value: 'Loading', isLiveRegion: true),
+      _live(tester),
+      matchesSemantics(label: 'Saving, Loading', isLiveRegion: true),
     );
     await pumpCarbon(tester, _il0(CarbonInlineLoadingStatus.finished));
     expect(
-      tester.getSemantics(find.byKey(_il)),
-      matchesSemantics(label: 'Saving', value: 'Success', isLiveRegion: true),
+      _live(tester),
+      matchesSemantics(label: 'Saving, Success', isLiveRegion: true),
     );
     await pumpCarbon(tester, _il0(CarbonInlineLoadingStatus.error));
     expect(
-      tester.getSemantics(find.byKey(_il)),
-      matchesSemantics(label: 'Saving', value: 'Error', isLiveRegion: true),
+      _live(tester),
+      matchesSemantics(label: 'Saving, Error', isLiveRegion: true),
     );
     await pumpCarbon(tester, _il0(CarbonInlineLoadingStatus.inactive));
     expect(
-      tester.getSemantics(find.byKey(_il)),
+      _live(tester),
       matchesSemantics(label: 'Saving'),
     );
     handle.dispose();

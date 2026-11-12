@@ -18,7 +18,7 @@ class ModalPage extends StatelessWidget {
       title: 'Modal',
       summary:
           'Informational, confirmation and form dialogs presented as a route. '
-          'Theme, density and direction stay live while one is open, focus '
+          'Theme and density stay live while one is open, focus '
           'stays inside and returns to the trigger, and the host decides '
           'when a dialog may be dismissed.',
       children: [

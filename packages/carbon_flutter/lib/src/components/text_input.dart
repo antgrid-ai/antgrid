@@ -76,6 +76,8 @@ class CarbonFieldAction extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
     final level = CarbonLayer.of(context);
+    final inset = context
+        .dependOnInheritedWidgetOfExactType<_ActionInset>();
     return TextFieldTapRegion(
       child: CarbonInteraction(
         onPressed: onPressed,
@@ -90,11 +92,15 @@ class CarbonFieldAction extends StatelessWidget {
                 minWidth: theme.minTarget,
                 minHeight: theme.minTarget,
               ),
-              child: ColoredBox(
-                color: state.hovered
-                    ? theme.layerHover(level)
-                    : const Color(0x00000000),
-                child: Center(
+              // The fill stops short of the field's outline so a hovered action
+              // never hides the focus, error or warning indicator.
+              child: Padding(
+                padding: inset?.insets ?? EdgeInsets.zero,
+                child: ColoredBox(
+                  color: state.hovered
+                      ? theme.layerHover(level)
+                      : const Color(0x00000000),
+                  child: Center(
                   widthFactor: 1,
                   child: IconTheme.merge(
                     data: IconThemeData(
@@ -106,6 +112,7 @@ class CarbonFieldAction extends StatelessWidget {
                     child: icon,
                   ),
                 ),
+                ),
               ),
             ),
           );
@@ -113,6 +120,16 @@ class CarbonFieldAction extends StatelessWidget {
       ),
     );
   }
+}
+
+/// How far a [CarbonFieldAction]'s hover fill stays inside its field box.
+class _ActionInset extends InheritedWidget {
+  const _ActionInset({required this.insets, required super.child});
+
+  final EdgeInsetsGeometry insets;
+
+  @override
+  bool updateShouldNotify(_ActionInset old) => old.insets != insets;
 }
 
 /// A [CarbonFieldBox] with [CarbonFieldAction]s flush against the end edge.
@@ -161,38 +178,34 @@ class CarbonActionFieldBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
-    if (actions.isEmpty) {
-      return CarbonFieldBox(
-        leading: leading,
-        trailing: trailing,
-        focused: focused,
-        enabled: enabled,
-        readOnly: readOnly,
-        invalid: invalid,
-        warn: warn,
-        minHeight: minHeight,
-        crossAxisAlignment: crossAxisAlignment,
-        child: child,
-      );
-    }
+    // Always a Stack, even without actions: the clear action comes and goes
+    // while typing, and a changing tree shape would remount the editable and
+    // drop its input connection.
     // The box adds a gap before its trailing slot and the end padding after
     // it; the spacer covers whatever is left of the actions' width.
-    final reserve =
-        actions.length * theme.minTarget -
-        theme.controlPaddingX -
-        CarbonSpacing.spacing03;
+    final reserve = actions.isEmpty
+        ? 0.0
+        : actions.length * theme.minTarget -
+              theme.controlPaddingX -
+              CarbonSpacing.spacing03;
     final top = crossAxisAlignment == CrossAxisAlignment.start;
+    final outline = focused || invalid || warn
+        ? CarbonBorders.focus
+        : CarbonBorders.hairline;
+    final edge = focused || invalid || warn ? CarbonBorders.focus : 0.0;
     return Stack(
       children: <Widget>[
         CarbonFieldBox(
           leading: leading,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              ?trailing,
-              if (reserve > 0) SizedBox(width: reserve),
-            ],
-          ),
+          trailing: reserve > 0 || trailing != null
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    ?trailing,
+                    if (reserve > 0) SizedBox(width: reserve),
+                  ],
+                )
+              : null,
           focused: focused,
           enabled: enabled,
           readOnly: readOnly,
@@ -202,18 +215,29 @@ class CarbonActionFieldBox extends StatelessWidget {
           crossAxisAlignment: crossAxisAlignment,
           child: child,
         ),
-        PositionedDirectional(
-          end: 0,
-          top: 0,
-          bottom: top ? null : 0,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: top
-                ? CrossAxisAlignment.start
-                : CrossAxisAlignment.stretch,
-            children: actions,
+        if (actions.isNotEmpty)
+          PositionedDirectional(
+            end: 0,
+            top: 0,
+            bottom: top ? null : 0,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: top
+                  ? CrossAxisAlignment.start
+                  : CrossAxisAlignment.stretch,
+              children: <Widget>[
+                for (var i = 0; i < actions.length; i++)
+                  _ActionInset(
+                    insets: EdgeInsetsDirectional.only(
+                      top: edge,
+                      bottom: outline,
+                      end: i == actions.length - 1 ? edge : 0,
+                    ),
+                    child: actions[i],
+                  ),
+              ],
+            ),
           ),
-        ),
       ],
     );
   }
@@ -399,6 +423,8 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       _syncText();
     }
     if (oldWidget.maxLength != widget.maxLength) _syncText();
+    // A disabled field offers no way to hide the text again.
+    if (!widget.enabled) _revealed = false;
     if (!identical(oldWidget.focusNode, widget.focusNode)) {
       final oldFocus = oldWidget.focusNode ?? _ownedFocus!;
       oldFocus.removeListener(_handleFocus);
@@ -470,6 +496,12 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     );
     widget.onChanged?.call('');
     _focus.requestFocus();
+  }
+
+  int get _minLines {
+    final min = widget.minLines ?? 3;
+    final max = widget.maxLines;
+    return max != null && min > max ? max : min;
   }
 
   void _toggleReveal() => setState(() => _revealed = !_revealed);
@@ -546,7 +578,7 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
             required bool isFocused,
             required int? maxLength,
           }) => null,
-      minLines: multiline ? (widget.minLines ?? 3) : 1,
+      minLines: multiline ? _minLines : 1,
       maxLines: multiline ? widget.maxLines : 1,
       style: controlStyle,
       cursorColor: colors.textPrimary,

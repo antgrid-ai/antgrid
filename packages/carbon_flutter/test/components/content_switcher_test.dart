@@ -183,7 +183,7 @@ void main() {
       await pumpCarbon(tester, const _Host(options: _three));
       int selectedCount() => [
         for (final l in ['First', 'Second', 'Third'])
-          containsSemantics(isSelected: true).matches(
+          isSemantics(isSelected: true).matches(
             tester.getSemantics(find.text(l)),
             <dynamic, dynamic>{},
           ),
@@ -194,7 +194,7 @@ void main() {
       expect(selectedCount(), 1);
       expect(
         tester.getSemantics(find.text('Third')),
-        containsSemantics(isSelected: true),
+        isSemantics(isSelected: true),
       );
       await tester.tap(find.text('First'));
       await tester.pump();
@@ -227,11 +227,11 @@ void main() {
       await pumpCarbon(tester, const _Host(options: _withDisabled));
       expect(
         tester.getSemantics(find.text('First')),
-        containsSemantics(label: 'First', isSelected: true, hasTapAction: true),
+        isSemantics(label: 'First', isSelected: true, hasTapAction: true),
       );
       expect(
         tester.getSemantics(find.text('Second')),
-        containsSemantics(label: 'Second', isSelected: false, isEnabled: false),
+        isSemantics(label: 'Second', isSelected: false, isEnabled: false),
       );
       handle.dispose();
     });
@@ -417,11 +417,11 @@ void main() {
       await tester.pump();
       expect(
         tester.getSemantics(find.text('Second')),
-        containsSemantics(isSelected: false, isFocused: true),
+        isSemantics(isSelected: false, isFocused: true),
       );
       expect(
         tester.getSemantics(find.text('First')),
-        containsSemantics(isSelected: true),
+        isSemantics(isSelected: true),
       );
       handle.dispose();
     });

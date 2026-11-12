@@ -1,44 +1,81 @@
 # Coverage
 
-Each row lists what is supported, what is deferred, adaptations (see
-`deviations.md`), where it is tested and where the gallery shows it. Rows
-marked pending are not yet filled.
+Each row lists what is supported, what is deferred, adaptations (with the
+matching `deviations.md` ids), where it is tested and where the gallery shows
+it. Test paths are relative to the package root; gallery pages live under
+`example/lib/pages/`.
+
+## Verification status
+
+What has been exercised so far:
+
+- `flutter test` for the package (`test/`) and the gallery (`example/test/`),
+  run on a Windows host.
+- The gallery run as a Windows desktop app.
+
+What has not been exercised, so no claim below covers it:
+
+- iOS, Android, macOS, Linux and web builds. The gallery has project folders
+  for them, but none has been built or run.
+- Screen readers on any device. Semantics are checked only through
+  `flutter_test` semantics queries.
+- IME composition, autofill, soft keyboards and touch input on devices. These
+  rely on Flutter's `TextField` and are parameter-checked in tests only.
+- Visual regression (golden) tests and pixel comparison against Carbon web.
+- Profiling of scrolling, animation and overlays on named devices.
 
 ## Foundations
 
 | ID | Foundation | Supported variants | Deferred | Adaptations | Tests | Gallery |
 | --- | --- | --- | --- | --- | --- | --- |
-| F01 | Semantic tokens | All Carbon v11 roles in four themes; `copyWith` custom palettes | Component-specific tokens beyond semantic roles | none | `test/foundations/theme_data_test.dart` | pending |
-| F02 | Themes and layering | White, Gray 10, Gray 90, Gray 100; custom palettes; three layer levels; live theme relay into routes; contrast validation | Automatic system-appearance following (host decides) | Third-layer secondary text pairs outside default validation | `theme_data_test.dart`, `theme_widget_test.dart`, `contrast_test.dart` | pending |
-| F03 | Typography | Eight density-resolved roles; bundled Plex Sans and Mono; family substitution | Expressive type sets | Touch roles | `theme_data_test.dart` | pending |
-| F04 | Layout and composition | Spacing 01-13, sizes, borders, shapes, control metrics | Layout helpers beyond tokens | Density metrics | `theme_data_test.dart` | pending |
-| F05 | Icons and naming | Bundled glyphs as path data; decorative by default; labelled icons announced; RTL mirroring of directional glyphs; any widget accepted by controls | Full icon catalog | Path data | `test/foundations/icon_test.dart` | pending |
-| F06 | Interaction states | Interaction core in the primitives | n/a for foundations | Focus ring inset | pending | pending |
-| F07 | Focus and keyboard | Focus ring and interaction primitives | n/a for foundations | Focus ring inset | pending | pending |
-| F08 | Accessibility and localization | Semantics for icons; overridable strings by delegate or scope; RTL; contrast check API | Platform high-contrast theming | none | `localizations_test.dart`, `icon_test.dart`, `contrast_test.dart` | pending |
-| F09 | Overlays and scrolling | Anchored popup primitive; scope relay for routes | n/a for foundations | `OverlayPortal` popups | `theme_widget_test.dart` (relay); popup tests pending | pending |
-| F10 | Motion and feedback | Named durations and curves; reduced-motion resolution | Haptics | none | pending | pending |
+| F01 | Semantic tokens | All Carbon v11 roles in four themes; `copyWith` custom palettes | Component-specific tokens beyond semantic roles | none | `test/foundations/theme_data_test.dart` | `foundations/colors_page.dart` |
+| F02 | Themes and layering | White, Gray 10, Gray 90, Gray 100; custom palettes; three layer levels; live theme relay into routes; contrast validation | Automatic system-appearance following (host decides) | F-contrast, F-routes | `theme_data_test.dart`, `theme_widget_test.dart`, `contrast_test.dart` | `foundations/colors_page.dart`, `foundations/layers_page.dart`; theme setting on every page |
+| F03 | Typography | Eight density-resolved roles; bundled Plex Sans and Mono; family substitution | Expressive type sets | F-touch-type, F-fonts | `theme_data_test.dart` | `foundations/typography_page.dart` |
+| F04 | Layout and composition | Spacing 01-13, sizes, borders, shapes, control metrics | Layout helpers beyond tokens | F-density | `theme_data_test.dart` | `foundations/density_page.dart`; density and width settings on every page |
+| F05 | Icons and naming | Bundled glyphs as path data; decorative by default; labelled icons announced; RTL mirroring of directional glyphs; any widget accepted by controls | Full icon catalog | F-icons | `test/foundations/icon_test.dart` | `foundations/icons_page.dart` |
+| F06 | Interaction states | `CarbonInteraction` hover, press, focus, focus-visible and disabled states shared by every control; pointer cancel and drag-away never activate | none | F-focus-ring | `test/primitives/interaction_test.dart`; state tests in each component suite (for example hover and press colours in `button_test.dart`, `tag_test.dart`, `menu_behaviour_test.dart`) | State grids on the component pages |
+| F07 | Focus and keyboard | Enter and Space activation, keyboard-only focus ring, roving tab stops (tabs, content switcher), popup Escape and focus restoration, menu and listbox keyboard models | none | F-focus-ring | `interaction_test.dart`, `test/primitives/popup_test.dart`, `tabs_focus_test.dart`, `content_switcher_focus_test.dart`, `menu_behaviour_test.dart`, `select_test.dart`, `modal_state_test.dart` | Keyboard note on every component page |
+| F08 | Accessibility and localization | Semantics for icons and controls; overridable strings by delegate or scope; RTL; text scaling to 200%; contrast check API | Platform high-contrast theming; device screen-reader walkthroughs (unverified) | S-roles | `localizations_test.dart`, `icon_test.dart`, `contrast_test.dart`; semantics, RTL and 200% text tests in each component suite | Direction and text-scale settings on every page; accessibility note on every component page |
+| F09 | Overlays and scrolling | Anchored popup primitive (flip, clamp, safe area, keyboard inset, outside tap, Escape, back, anchor scroll-out and unmount); scope relay for routes; menus, listboxes, tooltips, modals and toasts built on them | Center-aligned popups | F-popups, F-routes | `popup_test.dart`, `theme_widget_test.dart` (relay), `menu_test.dart`, `select_test.dart`, `dropdown_test.dart`, `modal_test.dart`, `modal_state_test.dart`, `tooltip_test.dart`, `notification_state_test.dart` | `menu_page.dart`, `select_page.dart`, `dropdown_page.dart`, `modal_page.dart`, `tooltip_page.dart`, `notification_page.dart` |
+| F10 | Motion and feedback | Named durations and curves; reduced-motion resolution; spinners on a widget ticker muted by `TickerMode`; hidden tab panes muted | Haptics | none | `loading_test.dart` (ticker, `TickerMode`, reduced motion), `button_test.dart` (busy spinner under reduced motion), `toggle_test.dart`, `modal_test.dart` (reduced motion), `tabs_test.dart` (pane ticker muting) | Reduced-motion setting on every page; `loading_page.dart` |
 
 ## Components
 
 | ID | Family | Supported variants | Deferred | Adaptations | Tests | Gallery |
 | --- | --- | --- | --- | --- | --- | --- |
-| C01 | Button (`CarbonButton`) | pending | pending | pending | pending | pending |
-| C02 | Text input (`CarbonTextInput`) | pending | pending | pending | pending | pending |
-| C03 | Form (`CarbonForm`, `CarbonFormSection`) | pending | pending | pending | pending | pending |
-| C04 | Search (`CarbonSearch`) | pending | pending | pending | pending | pending |
-| C05 | Select (`CarbonSelect`) | pending | pending | pending | pending | pending |
-| C06 | Dropdown (`CarbonDropdown`) | pending | pending | pending | pending | pending |
-| C07 | Checkbox (`CarbonCheckbox`) | pending | pending | pending | pending | pending |
-| C08 | Toggle (`CarbonToggle`) | pending | pending | pending | pending | pending |
-| C09 | Tabs (`CarbonTabs`) | pending | pending | pending | pending | pending |
-| C10 | Content switcher (`CarbonContentSwitcher`) | pending | pending | pending | pending | pending |
-| C11 | Menu (`CarbonMenu`) | pending | pending | pending | pending | pending |
-| C12 | Menu button (`CarbonMenuButton`, `CarbonSplitButton`) | pending | pending | pending | pending | pending |
-| C13 | Modal (`CarbonModal`) | pending | pending | pending | pending | pending |
-| C14 | Tooltip (`CarbonTooltip`) | pending | pending | pending | pending | pending |
-| C15 | Notification (`CarbonNotification`, `CarbonToast`) | pending | pending | pending | pending | pending |
-| C16 | Loading (`CarbonLoading`) | pending | pending | pending | pending | pending |
-| C17 | Inline loading (`CarbonInlineLoading`) | pending | pending | pending | pending | pending |
-| C18 | Tag (`CarbonTag`) | pending | pending | pending | pending | pending |
-| C19 | Contained list (`CarbonContainedList`) | pending | pending | pending | pending | pending |
+| C01 | Button (`CarbonButton`, `CarbonButtonSet`) | Kinds primary, secondary, tertiary, ghost, danger, danger tertiary, danger ghost; text, text with trailing icon, icon-only (with a tooltip naming it); sizes small 32, medium 40, large 48, extra large 64 with a density default; disabled; busy (stable footprint, no double activation, keeps focus, announces Loading); `expand`; button set in a row with separators, stacking when labels do not fit | 2xl (80 px) size; disabled-reason tooltips | C01-size, C01-padding, C01-busy, C01-set-stack | `test/components/button_test.dart`, `button_set_intrinsics_test.dart` | `button_page.dart`; settings form and confirmation flow compositions |
+| C02 | Text input (`CarbonTextInput`) | Single-line, password (reveal action, password autofill hint) and multiline; label, placeholder, helper, error, warning; required and optional markers; prefix and suffix; clear action; max length with counter; keyboard type, input action, capitalization, formatters, autofill hints; read-only and disabled; supplied controller and focus node kept and swappable; text, selection and focus survive theme, density, text scale and direction changes | Fluid and inline variants; password strength; custom obscuring character; spellcheck options | C02-textarea, C02-counter, C02-actions | `text_input_test.dart`, `text_input_editing_test.dart` | `text_input_page.dart`; settings form composition |
+| C03 | Form (`CarbonForm`, `CarbonFormSection`, `CarbonFormActions`, `CarbonFormController`, `CarbonFormFieldRegistrar`) | Form spacing and scope, titled sections announced as headings, end-aligned action set, optional required note, `focusFirstInvalid` in visual and RTL order with scroll-into-view | Error summary region; focusing fields not yet built in a lazy list. Select, Dropdown, Combo box and Checkbox do not register themselves; wrap them in `CarbonFormFieldRegistrar` (the settings form composition does this) | C03-focus | `form_test.dart` | `form_page.dart`; settings form composition |
+| C04 | Search (`CarbonSearch`) | Leading icon, localized clear action, documented Escape behaviour, busy spinner, error text, result count live region, sizes, host-owned query, `onSubmitted` and `onCleared`, controller and focus ownership | Expandable search; keyboard navigation into results | C04-size, C04-escape, C04-status, S-roles | `search_test.dart`, `text_input_editing_test.dart` | `search_page.dart`; action toolbar composition |
+| C05 | Select (`CarbonSelect`) | Label, placeholder, helper, error, warning, required and optional; disabled; read-only (focusable, never opens); host-owned value shown as is, with a localized unavailable label and an empty text; listbox popup matching the field width; keyboard open, move, Home, End, typeahead, commit, Escape, Tab; disabled options skipped; lazy rows scrolling past six; theme and density switches while open | Inline and fluid variants; multiselect | C05-render, C05-list, C05-truncation, S-roles | `select_test.dart`, `select_regressions_test.dart` | `select_page.dart`; settings form and row-actions list compositions |
+| C06 | Dropdown (`CarbonDropdown`, `CarbonComboBox`) | Dropdown with loading, error and empty list states; combo box with local or host filtering, typing that never commits, Enter commits the highlight, opt-in free text (`allowCustomValue` with `onCustomValue`), second Escape restores the committed label, expand and collapse semantics actions, supplied controller and focus node, lazy lists of thousands of rows | Multiselect; inline and fluid variants; clear-selection button | C05-list, C05-truncation, C06-status, C06-combo, S-roles | `dropdown_test.dart`, `dropdown_regressions_test.dart`, `select_regressions_test.dart` (shared list) | `dropdown_page.dart`; searchable picker composition |
+| C07 | Checkbox (`CarbonCheckbox`, `CarbonCheckboxGroup`) | Checked, unchecked and opt-in indeterminate; string or widget label; helper and error text; disabled; read-only (focusable, announced read-only, inert); indicator and label share one target; group with legend, group helper and error, keyed items, and selected values outside the items kept | none | C07-target, C07-enter, S-roles | `checkbox_test.dart` | `checkbox_page.dart`; settings form composition |
+| C08 | Toggle (`CarbonToggle`) | On and off with a visible or accessible-only label; localized On and Off words beside the switch (overridable, can be hidden); default and small sizes; disabled; read-only; busy with spinner and blocked activation; handle motion skipped under reduced motion; host-owned value with no optimistic flip | none | C08-readonly, C08-busy | `toggle_test.dart` | `toggle_page.dart`; settings form, searchable picker and confirmation flow compositions |
+| C09 | Tabs (`CarbonTabs`, `CarbonTabPanels`) | Line and contained variants; icons; disabled tabs; automatic and manual activation; one roving tab stop; arrows mirrored in RTL with wrap; Home and End; overflow scrolling with localized scroll buttons; selected and focused tabs scrolled into view; long labels wrap; panels mounted lazily, hidden panes kept alive with tickers muted, focus excluded and semantics removed | Closable and draggable IDE tabs; vertical tabs | C09-weight, C09-size, C09-visuals, C09-scroll-buttons | `tabs_test.dart`, `tabs_focus_test.dart` | `tabs_page.dart` |
+| C10 | Content switcher (`CarbonContentSwitcher`) | Text, icon with text and icon-only; small, medium, large; touch 48; disabled options; roving focus with arrows in LTR and RTL, Home and End; automatic and manual activation; exactly one selected; selection distinct from hover and focus; equal-width segments that wrap at large text; `expand` | Scrolling mode for many options; visible tooltip on icon-only segments | C10-width, C10-visuals, C10-icon-only | `content_switcher_test.dart`, `content_switcher_focus_test.dart` | `content_switcher_page.dart`; action toolbar composition |
+| C11 | Menu (`CarbonMenu`, `CarbonContextMenu`) | Items with icon, shortcut hint, disabled and danger kinds; groups with headings; dividers; check items; radio groups; submenus to any depth opened by tap or key; full keyboard model including typeahead that cycles on a repeated letter and Tab moving on to the next control; outside tap, Escape and back dismissal with focus restoration; context menu by right click, touch long press, the Menu key or Shift+F10; rows 32 and 48 minimum, growing with text; live theme and density while open | Hover-to-open submenus; flipping by measured submenu width; a scrollbar on tall menus; binding shortcut hints; lazy rows (rows are built eagerly, so very long lists belong in a Select or Combo box) | C11-hover, C11-flip, C11-checkable | `menu_test.dart`, `menu_behaviour_test.dart` | `menu_page.dart` (with a Menu or Select decision section) |
+| C12 | Menu button (`CarbonMenuButton`, `CarbonOverflowMenu`, `CarbonSplitButton`) | Menu button (primary, tertiary, ghost) with flipping chevron and expanded semantics; overflow menu (vertical or horizontal, 32 and 48 footprint, localized name); split button whose action and trigger are separate targets that never activate each other and disable independently; triggers reference the open menu through `controlsNodes`; disabling a trigger closes its menu | Menu width tied to the trigger width; disabled-reason tooltips | C12-width, C12-close | `menu_button_test.dart`, `menu_button_behaviour_test.dart` | `menu_button_page.dart` (with a Which control decision section); action toolbar and row-actions list compositions |
+| C13 | Modal (`CarbonModal`, `showCarbonModal`) | Informational, confirmation (including danger) and form dialogs; xs, sm, md, lg widths; centered, full-screen, adaptive (full screen below 480) and host-supplied presentations; dismissal by barrier, Escape and back with a host veto; focus containment and restoration that does not steal focus the caller moved; busy actions; header and footer kept reachable while the body scrolls or shrinks; safe area and keyboard inset; live theme and density | Side-panel presentation (a host can supply one); keyboard-focusable body scroll region; live locale and direction changes while open | C13-route, C13-overflow, C13-scroll-focus, F-routes | `modal_test.dart`, `modal_state_test.dart` | `modal_page.dart`; confirmation flow composition. Modals launched from the gallery span the whole window, not the selected preview width |
+| C14 | Tooltip (`CarbonTooltip`) | Hover with delay and grace; keyboard focus (not pointer focus); touch long press; Escape without closing an enclosing modal; start and end alignment; above and below flip with clamping; caret; max width wrapping; `enabled`; supplementary semantics with merge, group or excluded modes; an inner tooltip yields to an active outer one | Center alignment; toggletip; definition tooltip; the 2 px icon-tooltip padding | C14-alignment, C14-delays, C14-touch, C14-nesting | `tooltip_test.dart`, `tooltip_state_test.dart` | `tooltip_page.dart` |
+| C15 | Notification (`CarbonNotification`, `CarbonToast`, `CarbonToastController`, `CarbonToastOverlay`) | Inline and toast; info, success, warning, error with labelled icons; low and high contrast; optional action independent of close; polite or assertive one-time announcements, including a change to warning or error; toast stack with safe area, scrolling at large text, a counted line for toasts past `maxVisible`; opt-in auto-dismiss that pauses on hover, focus and while a screen reader is on; handles safe after controller disposal | Callout and actionable notification variants; toast focus management. The counted line's default text (`'<n> more'`) is English and not yet in `CarbonLocalizations`; pass `hiddenLabel` to localize it | C15-contrast, C15-overflow, C15-timing | `notification_test.dart`, `notification_state_test.dart` | `notification_page.dart`; settings form and confirmation flow compositions |
+| C16 | Loading (`CarbonLoading`, `CarbonLoadingOverlay`, `CarbonSpinner`) | Small and large; optional message; one-time live-region announcement; static under reduced motion or when inactive; muted by `TickerMode`; region overlay that blocks only its own box, hides the covered child from focus and semantics, and restores the focus it removed | Determinate progress; full-viewport overlay | C16-anim, C16-message, C16-overlay | `loading_test.dart`, `loading_overlay_test.dart` | `loading_page.dart` |
+| C17 | Inline loading (`CarbonInlineLoading`) | Inactive, active, finished and error; fixed 16 px indicator box centred on the first line under nonlinear text scaling; wrapping description; status announced once per change; explicit retry on error that keeps focus inside when it goes away | Automatic success timing (host-owned by design) | C17-announce, C17-retry, C17-timing | `inline_loading_test.dart`, `inline_loading_a11y_test.dart` | `inline_loading_page.dart`; row-actions list composition |
+| C18 | Tag (`CarbonTag`) | Read-only, dismissible, selectable and operational; optional icon; every tag colour role plus high contrast and outline; small, medium, large; disabled; separate selection and remove targets; named remove action with a full touch target; truncated labels with the full label in semantics and in a tooltip | Agent-status model (application-owned by design) | C18-footprint, C18-dismiss, C18-check, C18-roles, C18-tooltip | `tag_test.dart` | `tag_page.dart` |
+| C19 | Contained list (`CarbonContainedList`, `CarbonContainedListSliver`, `CarbonContainedListRow`) | Header with label and action; rows with leading content, title, wrapping secondary text and trailing actions; multi selection (`onSelectedChanged`) and single selection (`onPressed` with `selected` on every row); row and actions independent; on-page and disclosed variants; inset rules; loading, error and empty slots with localized defaults; lazy builder and sliver forms; actions revealed on hover or focus in compact density | Drag reorder; expandable rows; built-in search and filter. Known limit: a text header action beside the label overflows at 320 px width and 200% text; use an icon-only action there | C19-visuals, C19-size, S-roles | `contained_list_test.dart`, `contained_list_actions_test.dart` | `contained_list_page.dart`; row-actions list composition |
+
+## Compositions
+
+`example/test/compositions_test.dart` lays out each composition at 320, 390,
+768 and 1280 px, at 1.0 and 2.0 text scale and in both densities, asserting no
+exception or overflow, and drives one interaction path through each.
+
+| Composition | Families | Page |
+| --- | --- | --- |
+| Settings form | C01, C02, C03, C05, C07, C08, C15 | `compositions/settings_form_page.dart` |
+| Action toolbar | C01, C04, C10, C12 | `compositions/action_toolbar_page.dart` |
+| List with row actions | C01, C05, C12, C17, C19 | `compositions/row_actions_list_page.dart` |
+| Searchable picker | C06, C08 | `compositions/searchable_picker_page.dart` |
+| Confirmation flow | C01, C08, C13, C15 | `compositions/confirmation_flow_page.dart` |
+
+`example/test/gallery_smoke_test.dart` opens every page under every theme,
+both densities, RTL, 200% text, reduced motion and the 320 px width.

@@ -99,6 +99,18 @@ class TabsPage extends StatelessWidget {
                 variant: CarbonTabsVariant.contained,
               ),
             ),
+            _Labelled(
+              'Selected and disabled',
+              _Demo(tabs: _withDisabled, initial: 'b'),
+            ),
+            _Labelled(
+              'Contained, selected and disabled',
+              _Demo(
+                tabs: _withDisabled,
+                initial: 'b',
+                variant: CarbonTabsVariant.contained,
+              ),
+            ),
           ],
         ),
         GallerySection(

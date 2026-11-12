@@ -57,7 +57,7 @@ void main() {
       );
       expect(
         tester.getSemantics(find.text('Actions')),
-        containsSemantics(
+        isSemantics(
           label: 'Actions',
           isButton: true,
           hasExpandedState: true,
@@ -69,7 +69,7 @@ void main() {
       expect(find.text('Rename'), findsOneWidget);
       expect(
         tester.getSemantics(find.text('Actions')),
-        containsSemantics(
+        isSemantics(
           label: 'Actions',
           hasExpandedState: true,
           isExpanded: true,
@@ -433,7 +433,7 @@ void main() {
       expect(find.text('Rename'), findsOneWidget);
       expect(
         tester.getSemantics(find.bySemanticsLabel('Open menu')),
-        containsSemantics(label: 'Open menu', hasExpandedState: true, isExpanded: true),
+        isSemantics(label: 'Open menu', hasExpandedState: true, isExpanded: true),
       );
       await tester.tap(find.text('Duplicate'));
       await _settle(tester);

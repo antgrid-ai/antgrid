@@ -100,6 +100,10 @@ class ContentSwitcherPage extends StatelessWidget {
             ),
             _Labelled('Disabled option', _Demo(options: _withDisabled)),
             _Labelled(
+              'Selected and disabled',
+              _Demo(options: _withDisabled, initial: 'week'),
+            ),
+            _Labelled(
               'Long labels wrap',
               _Demo(options: _long, expand: true),
             ),
@@ -165,6 +169,7 @@ class _Labelled extends StatelessWidget {
 class _Demo extends StatefulWidget {
   const _Demo({
     this.options = _views,
+    this.initial,
     this.size = CarbonContentSwitcherSize.medium,
     this.iconOnly = false,
     this.expand = false,
@@ -172,6 +177,7 @@ class _Demo extends StatefulWidget {
   });
 
   final List<CarbonOption<String>> options;
+  final String? initial;
   final CarbonContentSwitcherSize size;
   final bool iconOnly;
   final bool expand;
@@ -182,7 +188,7 @@ class _Demo extends StatefulWidget {
 }
 
 class _DemoState extends State<_Demo> {
-  late String _value = widget.options.first.value;
+  late String _value = widget.initial ?? widget.options.first.value;
 
   @override
   Widget build(BuildContext context) {

@@ -103,7 +103,12 @@ class _LoadingPageState extends State<LoadingPage> {
           accessibility:
               'A live region announces the message (or "Loading") once; '
               'the animation is silent. Reduced motion draws a static arc.',
-          carbonReference: 'Carbon v11 Loading.',
+          carbonReference:
+              'Carbon v11 Loading. Deviations: an optional visible message '
+              'under the spinner, which Carbon Loading lacks; the arc is '
+              'painted rather than an SVG dash animation; the overlay '
+              'covers its own region and also hides it from assistive '
+              'technology.',
         ),
       ],
     );
