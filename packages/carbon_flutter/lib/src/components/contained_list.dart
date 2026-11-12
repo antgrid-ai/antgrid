@@ -374,7 +374,8 @@ class CarbonContainedListSliver extends StatelessWidget {
 /// [onPressed] runs and [selected] only styles the row, which suits
 /// single-selection lists the host manages itself. Pass [selected] on every
 /// row of such a list, false included, so each row announces its selected
-/// state; leave it null for rows that are not part of a selection.
+/// state and keeps room for the check mark a selected row shows after its
+/// text; leave it null for rows that are not part of a selection.
 ///
 /// The row is at least 32 (compact) or [CarbonThemeData.touchTarget] (touch) tall and grows with its
 /// text, which wraps. With [revealActionsOnHover] the actions of a compact row
@@ -505,6 +506,23 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               ],
             ),
           ),
+          // As in Carbon's list box, the selected row carries a check mark
+          // after its text, so selection does not rest on the fill colour.
+          // Every row of a selection keeps the slot, so text never reflows
+          // when the selection moves.
+          if (selectable) ...<Widget>[
+            const SizedBox(width: CarbonSpacing.spacing03),
+            Padding(
+              padding: const EdgeInsets.only(top: CarbonSpacing.spacing01),
+              child: selected
+                  ? CarbonIcon(
+                      CarbonIcons.checkmark,
+                      size: theme.iconSize,
+                      color: disabled ? colors.iconDisabled : colors.iconPrimary,
+                    )
+                  : SizedBox.square(dimension: theme.iconSize),
+            ),
+          ],
         ],
       ),
     );
