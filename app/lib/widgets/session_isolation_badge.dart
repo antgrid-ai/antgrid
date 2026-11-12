@@ -119,4 +119,4 @@ class SessionIsolationBadge extends StatelessWidget {
 
 /// Matched to the row text beside it rather than to [AbTokens.iconButtonGlyph]:
 /// this glyph is a marker on a line of text, not a control.
-const double _glyphSize = AbTokens.fontSm;
+double get _glyphSize => AbTokens.fontSm;

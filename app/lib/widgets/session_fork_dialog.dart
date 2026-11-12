@@ -15,6 +15,7 @@ import '../design/widgets/ab_scrollbar.dart';
 import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_touch_sizing.dart';
+import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show agentsCheckingCopy, agentsUnlistedCopy;
 
 /// The two workspaces a fork can run in, spelled the way `session:fork` spells
@@ -279,11 +280,13 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
               const SizedBox(height: AbTokens.space6),
               // Left-aligned rather than stretched: [AbSegmented]'s own Row is
               // `mainAxisSize.min`, so the surrounding Column's stretch hands it
-              // tight constraints it cannot use — a border box wider than its
-              // cells at best, and a fractional overflow at worst.
+              // tight constraints it cannot use. Phones span the dialog instead,
+              // because their larger label text no longer fits the hugging
+              // width of a 346px dialog.
               Align(
                 alignment: Alignment.centerLeft,
                 child: AbSegmented<String>(
+                  expand: isMobilePlatform,
                   segments: const [
                     AbSegment(
                       value: forkWorkspaceCurrent,

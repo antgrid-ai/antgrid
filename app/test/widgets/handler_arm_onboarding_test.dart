@@ -425,6 +425,11 @@ void main() {
       bool armedOnce = false,
       List<Override> extraOverrides = const [],
     }) async {
+      // The sheet scrolls, but these tests tap its commit button where it is,
+      // and Apple-scale text makes the sheet taller than the default 600px.
+      tester.view.physicalSize = const Size(800, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
       useInMemoryPrefs();
       final store = await FirstRunStore.open();
       if (armedOnce) {

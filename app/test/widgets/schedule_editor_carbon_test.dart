@@ -206,23 +206,23 @@ void main() {
       tester,
     ) async {
       await pumpEditor(tester, Host(), size: const Size(400, 900));
-      expect(boxOf(tester, nameInput).height, 48);
+      expect(boxOf(tester, nameInput).height, 44);
       expect(
         tester.getSize(find.widgetWithText(CarbonButton, 'Save changes')).height,
-        48,
+        44,
       );
       expect(
         tester.getSize(find.widgetWithText(CarbonButton, 'Cancel')).height,
-        48,
+        44,
       );
-      expect(tester.getSize(find.byType(CarbonToggle)).height, 48);
+      expect(tester.getSize(find.byType(CarbonToggle)).height, 44);
       expect(
         tester.getSize(find.byType(CarbonContentSwitcher<String>).first).height,
-        48,
+        44,
       );
       expect(
         tester.getSize(find.byType(CarbonContainedListRow).first).height,
-        greaterThanOrEqualTo(48),
+        greaterThanOrEqualTo(44),
       );
     });
   });

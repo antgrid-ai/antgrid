@@ -335,7 +335,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
     final level = CarbonLayer.of(context);
     final loc = CarbonLocalizations.of(context);
     final contained = widget.variant == CarbonTabsVariant.contained;
-    final height = math.max(theme.isTouch ? 48.0 : 40.0, theme.minTarget);
+    final height = math.max(theme.isTouch ? theme.touchTarget : 40.0, theme.minTarget);
     _buttonExtent = theme.minTarget;
 
     final selected = _indexOf(widget.value);

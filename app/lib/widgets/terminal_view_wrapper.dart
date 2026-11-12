@@ -2038,7 +2038,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     // scaler never reaches them — pre-scale the size instead. `_hPad` is
     // deliberately font-independent and must not scale with this.
     final terminalFontSize =
-        MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
+        MediaQuery.textScalerOf(context).scale(AbTokens.terminalBaseFont) *
         effectiveZoom;
 
     // One local feeds both the measurement and the view, so the two are

@@ -10,7 +10,7 @@ import '../primitives/interaction.dart';
 import '../primitives/option.dart';
 import 'tabs.dart' show CarbonActivationMode;
 
-/// Carbon's content switcher heights. Touch density uses 48 for every size.
+/// Carbon's content switcher heights. Touch density uses [CarbonThemeData.touchTarget] for every size.
 enum CarbonContentSwitcherSize {
   /// 32 in compact density.
   small,
@@ -235,7 +235,7 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
       _nodes[options[i].value]?.skipTraversal = i != stop;
     }
     final height = theme.isTouch
-        ? 48.0
+        ? theme.touchTarget
         : switch (widget.size) {
             CarbonContentSwitcherSize.small => 32.0,
             CarbonContentSwitcherSize.medium => 40.0,

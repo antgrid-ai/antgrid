@@ -137,7 +137,7 @@ class _ActionInset extends InheritedWidget {
 /// The box's own trailing action slot keeps the field's vertical padding, so
 /// a full-size target would make the field taller than its density height.
 /// Here the actions are laid over the end edge at the field's full height and
-/// the content reserves matching room, so a 32 or 48 target fits without
+/// the content reserves matching room, so a 32 or touch-sized target fits without
 /// growing the field. Shared by text input and search; selects and dropdowns
 /// can use it for their own inline actions.
 class CarbonActionFieldBox extends StatelessWidget {
@@ -260,7 +260,7 @@ class CarbonActionFieldBox extends StatelessWidget {
 ///   rebuild.
 /// * [clearable] adds a clear action while there is text; password inputs
 ///   always get a show/hide action. Both are separate focus stops with
-///   targets of 32 (compact) or 48 (touch) logical pixels and localized
+///   targets of 32 (compact) or [CarbonThemeData.touchTarget] (touch) logical pixels and localized
 ///   names.
 /// * [readOnly] keeps focus, selection and copy. Disabled is inert.
 /// * Inside a [CarbonForm] the field registers itself, so the form's

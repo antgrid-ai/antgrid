@@ -37,12 +37,12 @@ enum CarbonButtonKind {
 
 /// Explicit heights for [CarbonButton], from Carbon's size scale.
 ///
-/// Touch density never renders a button below 48 logical pixels whatever size
+/// Touch density never renders a button below the touch target whatever size
 /// is requested, and enlarged text grows a button past these heights.
 enum CarbonButtonSize {
   /// Carbon's `xs`, for icon-only triggers in dense rows. Compact density
   /// only: it is the one size allowed under the 32 compact target, and touch
-  /// density still floors it to 48.
+  /// density still floors it to the touch target.
   extraSmall(CarbonSizes.xs),
   small(CarbonSizes.sm),
   medium(CarbonSizes.md),
@@ -65,7 +65,7 @@ void _ignore() {}
 ///   swallows activation so a pending action cannot be submitted twice. The
 ///   button keeps focus and announces the localized "Loading". The host owns
 ///   the busy flag; the button never sets it.
-/// * Height follows density (32 compact, 48 touch) unless [size] is given.
+/// * Height follows density (32 compact, [CarbonThemeData.touchTarget] touch) unless [size] is given.
 ///   Text scaling grows the button; labels wrap rather than clip.
 /// * [CarbonButton.iconOnly] has a square footprint and requires a
 ///   `semanticLabel`.

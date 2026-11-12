@@ -50,7 +50,7 @@ const double kPreviewDrawStrokeWidth = 3.0;
 
 /// Type size for a note mark. Large enough to survive being scaled into a
 /// full-resolution screenshot and read back by whoever opens the PNG.
-const double kPreviewDrawNoteFontSize = AbTokens.fontLg;
+double get kPreviewDrawNoteFontSize => AbTokens.fontLg;
 
 /// A note wraps rather than running edge to edge, so it reads as a card and
 /// not a banner across the screenshot.

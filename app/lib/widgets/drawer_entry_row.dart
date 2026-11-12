@@ -903,12 +903,9 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
       ),
     );
     // The cell keeps the footprint of every other glyph on the rail. Compact
-    // Carbon's extra-small trigger is exactly that box. Touch Carbon floors
-    // every target at 48, taller than a touch row's 44 of content, so the
-    // trigger is clipped to the cell: what paints is what takes the tap, and
-    // its pressed and focus states never cover a neighbouring row. On touch
-    // the cell is the row's whole content height, so the clipped trigger is a
-    // full-height target rather than a sliver of one.
+    // Carbon's extra-small trigger is exactly that box. Touch Carbon's target
+    // is 44, the touch row's whole content height, so the trigger fills the
+    // cell and what paints is what takes the tap.
     final touch = AbCarbonScope.platformDensity == CarbonDensity.touch;
     return SizedBox(
       key: const ValueKey('drawer-remove-cell'),
@@ -916,20 +913,7 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
       height: touch
           ? AbListRow.touchRowContentExtent(context, density: AbRowDensity.sm)
           : AbIconButton.boxExtent(context),
-      child: touch
-          ? ClipRect(
-              child: OverflowBox(
-                // No min: the cell may be taller than Carbon's 48 box at large
-                // text scales, and a tight min would stretch the trigger and
-                // its pressed/focus fill into a tall rectangle.
-                minWidth: 0,
-                minHeight: 0,
-                maxWidth: double.infinity,
-                maxHeight: double.infinity,
-                child: trigger,
-              ),
-            )
-          : Center(child: trigger),
+      child: Center(child: trigger),
     );
   }
 

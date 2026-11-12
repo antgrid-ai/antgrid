@@ -392,15 +392,18 @@ class _GroupLabel extends ConsumerWidget {
         ? false
         : ref.watch(accountAgentsProvider).isLoading;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
+      // On mobile the refresh button's 44pt target sets the header's height, so
+      // the vertical padding it would otherwise add is dropped.
+      padding: EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
-        AbTokens.space10,
+        isMobilePlatform ? 0 : AbTokens.space10,
         AbTokens.drawerGutter,
-        AbTokens.space6,
+        isMobilePlatform ? 0 : AbTokens.space6,
       ),
-      // A section header's height is its type + padding; the refresh button is
-      // inline chrome inside it, not a standalone touch affordance.
+      // On desktop a section header's height is its type + padding and the
+      // refresh button is inline chrome inside it.
       child: AbCompactTapTargets(
+        fullHeightTargets: isMobilePlatform,
         child: Row(
           children: [
             Text(

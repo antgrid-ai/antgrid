@@ -13,14 +13,32 @@ import 'ab_touch_sizing.dart';
 ///
 /// Without this, a 24px icon button inflating to 44px sets the row's height:
 /// a `sm` drawer row measured 40px on desktop and 60px on mobile.
+///
+/// [fullHeightTargets] is for a host whose own height floor already equals the
+/// touch extent (a `touchRow` list row): there a tap target may take its full
+/// height without growing the host, so a trailing glyph is a real 44pt target
+/// instead of a sliver of one.
 class AbCompactTapTargets extends InheritedWidget {
-  const AbCompactTapTargets({super.key, required super.child});
+  const AbCompactTapTargets({
+    super.key,
+    this.fullHeightTargets = false,
+    required super.child,
+  });
+
+  final bool fullHeightTargets;
 
   static bool of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<AbCompactTapTargets>() != null;
 
+  static bool fullHeightOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<AbCompactTapTargets>()
+          ?.fullHeightTargets ??
+      false;
+
   @override
-  bool updateShouldNotify(AbCompactTapTargets oldWidget) => false;
+  bool updateShouldNotify(AbCompactTapTargets oldWidget) =>
+      oldWidget.fullHeightTargets != fullHeightTargets;
 }
 
 /// Guarantees a [minSize]-square interactive area around [child] on mobile;
@@ -94,7 +112,11 @@ class AbTapTarget extends StatelessWidget {
       result = ConstrainedBox(
         constraints: BoxConstraints(
           minWidth: extent,
-          minHeight: AbCompactTapTargets.of(context) ? 0.0 : extent,
+          minHeight:
+              AbCompactTapTargets.of(context) &&
+                  !AbCompactTapTargets.fullHeightOf(context)
+              ? 0.0
+              : extent,
         ),
         // Factors force Center to shrink-wrap the child; without them Align
         // expands to fill any bounded parent, blowing up row layouts.

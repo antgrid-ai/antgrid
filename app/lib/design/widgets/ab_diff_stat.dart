@@ -13,12 +13,12 @@ class AbDiffStat extends StatelessWidget {
     super.key,
     required this.additions,
     required this.deletions,
-    this.fontSize = AbTokens.fontXxs,
+    this.fontSize,
   });
 
   final int additions;
   final int deletions;
-  final double fontSize;
+  final double? fontSize;
 
   /// Thousands separators: totals over a worktree run into five digits, and
   /// `+2728` is read as a different magnitude than `+2,728` at a glance.
@@ -42,7 +42,7 @@ class AbDiffStat extends StatelessWidget {
           Text(
             '+${formatCount(additions)}',
             style: AbTokens.monoStyle(
-              fontSize: fontSize,
+              fontSize: fontSize ?? AbTokens.fontXxs,
               fontWeight: FontWeight.w600,
               color: p.success,
             ),
@@ -53,7 +53,7 @@ class AbDiffStat extends StatelessWidget {
           Text(
             '-${formatCount(deletions)}',
             style: AbTokens.monoStyle(
-              fontSize: fontSize,
+              fontSize: fontSize ?? AbTokens.fontXxs,
               fontWeight: FontWeight.w600,
               color: p.error,
             ),

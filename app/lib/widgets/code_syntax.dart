@@ -32,9 +32,9 @@ import 'viewer_support.dart';
 /// Metrics every code surface renders at — the file viewer's editor and the
 /// diff viewer's hand-painted rows. Shared so a file and its own diff read at
 /// the same size; two sizes make one document look like two.
-const double kCodeFontSize = AbTokens.fontSm;
+double get kCodeFontSize => AbTokens.fontSm;
 const double kCodeFontHeight = 1.4;
-const double kCodeLineHeight = kCodeFontSize * kCodeFontHeight;
+double get kCodeLineHeight => kCodeFontSize * kCodeFontHeight;
 
 final _langModes = <String, ({String key, Mode mode})>{
   'dart': (key: 'dart', mode: langDart),

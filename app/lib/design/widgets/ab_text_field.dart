@@ -7,6 +7,7 @@ import '../ab_colors.dart';
 import 'ab_control_box.dart';
 import 'ab_icon.dart';
 import 'ab_icon_button.dart';
+import 'ab_touch_sizing.dart';
 
 /// Text input primitive for the Antgrid design system.
 ///
@@ -234,7 +235,11 @@ class _AbTextFieldState extends State<AbTextField> {
     final enabled = widget.enabled;
     final showClear =
         widget.showClearButton && enabled && _controller.text.isNotEmpty;
-    final effHeight = widget.height ?? AbTokens.rowHeightSm;
+    // The default box is a touch control too: on phones it takes the touch
+    // extent and grows with the text scale.
+    final effHeight =
+        widget.height ??
+        AbTouchSizing.fieldHeight(context, AbTokens.rowHeightSm);
     // A wrapping field has no single row to centre against: its own text sets
     // the box height, and the prefix and clear slots belong beside the FIRST
     // line rather than halfway down the paragraph.

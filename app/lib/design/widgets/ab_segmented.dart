@@ -195,13 +195,9 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         : p.textMuted;
 
     Widget cell = AnimatedContainer(
-      // The cell is the visible box, so it stops at a row height rather than
-      // the full touch target, which would dwarf its small-caps label.
       constraints: BoxConstraints(
         minWidth: AbTouchSizing.extentOf(context),
-        minHeight: AbTouchSizing.extentOf(context) == 0
-            ? 0
-            : AbTokens.rowHeightMd,
+        minHeight: AbTouchSizing.extentOf(context),
       ),
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,
@@ -224,13 +220,20 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
                   AbIcon(s.icon!, size: 11, color: fg),
                   const SizedBox(width: AbTokens.space6),
                 ],
-                Text(
-                  s.label.toUpperCase(),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXxs,
-                    fontWeight: FontWeight.w600,
-                    color: fg,
-                  ).copyWith(letterSpacing: 0.8),
+                // Flexible so a label that outgrows a narrow dialog (larger text
+                // on a phone) ellipsizes instead of overflowing the cell row.
+                Flexible(
+                  child: Text(
+                    s.label.toUpperCase(),
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      fontWeight: FontWeight.w600,
+                      color: fg,
+                    ).copyWith(letterSpacing: 0.8),
+                  ),
                 ),
               ],
             ),

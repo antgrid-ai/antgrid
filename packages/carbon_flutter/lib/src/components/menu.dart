@@ -331,7 +331,7 @@ class _MenuHost {
 /// the menu too unless [closeOnToggle] is false, in which case the host must
 /// rebuild with the new values.
 ///
-/// Touch density gives rows a 48px minimum; compact gives 32px. Rows grow with
+/// Touch density gives rows a [CarbonThemeData.touchTarget] minimum; compact gives 32px. Rows grow with
 /// text rather than clip.
 class CarbonMenu extends StatefulWidget {
   const CarbonMenu({

@@ -532,7 +532,7 @@ class _LoadingRow extends StatelessWidget {
         child: Stack(
           alignment: Alignment.center,
           children: [
-            const Text(' ', style: TextStyle(fontSize: AbTokens.fontXxs)),
+            Text(' ', style: TextStyle(fontSize: AbTokens.fontXxs)),
             AbLoadingDot(color: context.antgrid.textMuted),
           ],
         ),

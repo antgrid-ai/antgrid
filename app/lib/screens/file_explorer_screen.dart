@@ -524,7 +524,7 @@ class _FileExplorerBody extends ConsumerWidget {
                 tooltip: 'Back to file tree',
               ),
               const SizedBox(width: AbTokens.space4),
-              const Text(
+              Text(
                 'File Explorer',
                 style: TextStyle(
                   fontSize: AbTokens.fontBody,
@@ -588,7 +588,7 @@ class _FileFilterResults extends StatelessWidget {
                   size: AbTokens.fontSm,
                   color: context.antgrid.textMuted,
                 )
-              : const SizedBox(width: AbTokens.fontSm),
+              : SizedBox(width: AbTokens.fontSm),
           title: Text(
             entry.path,
             style: AbTokens.monoStyle(

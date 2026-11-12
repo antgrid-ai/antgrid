@@ -349,6 +349,7 @@ class _AbListRowState extends State<AbListRow> {
       // touch dimension. Declared unconditionally so an informational row
       // keeps the same height as its interactive neighbours in the same list.
       child: AbCompactTapTargets(
+        fullHeightTargets: _touchRow,
         child: switch (widget.contentFloor) {
           AbRowContentFloor.none => rowChild,
           AbRowContentFloor.touchRow when _touchRow => ConstrainedBox(

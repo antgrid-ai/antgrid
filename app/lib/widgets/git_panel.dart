@@ -345,7 +345,7 @@ class _GitBranchBar extends StatelessWidget {
           maxLines: 1,
           fontSize: AbTokens.fontSm,
           leading: syncBusy
-              ? const AbLoadingDot(size: AbTokens.fontXs)
+              ? AbLoadingDot(size: AbTokens.fontXs)
               : AbIcon(
                   AbIcons.upload,
                   size: AbTokens.iconButtonGlyph,
@@ -440,7 +440,7 @@ class _GitBranchBar extends StatelessWidget {
       fontSize: AbTokens.fontSm,
       fontWeight: FontWeight.w600,
       leading: git.committing
-          ? const AbLoadingDot(size: AbTokens.fontXs)
+          ? AbLoadingDot(size: AbTokens.fontXs)
           : AbIcon(
               AbIcons.gitCommit,
               size: AbTokens.iconButtonGlyph,
@@ -776,7 +776,7 @@ class _SplitCellState extends State<_SplitCell> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (widget.running)
-            const AbLoadingDot(size: AbTokens.fontXs)
+            AbLoadingDot(size: AbTokens.fontXs)
           else
             AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
           const SizedBox(width: AbTokens.space4),

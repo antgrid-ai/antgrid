@@ -498,7 +498,7 @@ void main() {
   });
 
   group('footprint', () {
-    testWidgets('touch @2.0: the trigger stays a 48 square in a taller cell', (
+    testWidgets('touch @2.0: the trigger stays a 44 square in a taller cell', (
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -509,8 +509,8 @@ void main() {
           find.byKey(const ValueKey('drawer-remove-cell')),
         );
         final trigger = tester.getRect(_actionsFor(_projectName));
-        expect(cell.height, greaterThan(48));
-        expect(trigger.size, const Size(48, 48));
+        expect(cell.height, greaterThan(44));
+        expect(trigger.size, const Size(44, 44));
         expect(trigger.center, cell.center);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -566,15 +566,18 @@ void main() {
               reason: 'the trigger is centred on its cell',
             );
             if (mobile) {
-              // Touch Carbon floors the trigger at 48, taller than the cell,
-              // so it is clipped to the cell: nothing paints over a
-              // neighbouring row.
-              expect(tester.getSize(trigger), const Size(48, 48));
-              final clip = find.ancestor(
-                of: trigger,
-                matching: find.byType(ClipRect),
+              // Touch Carbon's target is 44: the trigger is the whole cell,
+              // fully painted, with nothing clipping it.
+              expect(tester.getSize(trigger), const Size(44, 44));
+              expect(tester.getRect(trigger), cellRect);
+              expect(
+                find.descendant(of: cell, matching: find.byType(ClipRect)),
+                findsNothing,
               );
-              expect(tester.getRect(clip.first), cellRect);
+              expect(
+                find.descendant(of: cell, matching: find.byType(OverflowBox)),
+                findsNothing,
+              );
             } else {
               // Compact uses Carbon's extra-small trigger, which is the cell:
               // what paints is exactly what takes the click.

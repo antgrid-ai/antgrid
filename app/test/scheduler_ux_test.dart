@@ -1366,7 +1366,7 @@ void main() {
       await pumpScreen(tester, container, scale: 1.5);
       expect(
         tester.getSize(find.widgetWithText(AbButton, 'Local machine')).height,
-        greaterThanOrEqualTo(48),
+        greaterThanOrEqualTo(44),
       );
       expect(
         tester
@@ -1376,18 +1376,16 @@ void main() {
               ),
             )
             .height,
-        greaterThanOrEqualTo(48),
+        greaterThanOrEqualTo(44),
       );
       final tabs = find.descendant(
         of: find.byType(AbSegmented<bool>),
         matching: find.byType(GestureDetector),
       );
-      // A segment is its own visible box, so it stops at a row height; it
-      // spans half the screen, which keeps it an easy target.
       for (final tab in tabs.evaluate()) {
         expect(
           tester.getSize(find.byElementPredicate((e) => e == tab)).height,
-          greaterThanOrEqualTo(AbTokens.rowHeightMd),
+          greaterThanOrEqualTo(AbTokens.tapTargetMin),
         );
       }
       await tester.tap(
@@ -1399,7 +1397,7 @@ void main() {
       final menuRow = find
           .ancestor(of: find.text('Edit'), matching: find.byType(GestureDetector))
           .first;
-      expect(tester.getSize(menuRow).height, greaterThanOrEqualTo(48));
+      expect(tester.getSize(menuRow).height, greaterThanOrEqualTo(44));
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
       await editSchedule(tester);
@@ -1415,7 +1413,7 @@ void main() {
       );
       expect(
         tester.getSize(find.widgetWithText(CarbonButton, 'Cancel')).height,
-        greaterThanOrEqualTo(48),
+        greaterThanOrEqualTo(44),
       );
       expect(tester.takeException(), isNull);
     },

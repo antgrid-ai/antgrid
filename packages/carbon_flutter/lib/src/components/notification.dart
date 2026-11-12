@@ -348,7 +348,11 @@ class _NotificationCardState extends State<_NotificationCard> {
 
     final action = widget.action;
     final onClose = widget.onClose;
-    final closeSize = math.max(theme.minTarget, CarbonSizes.lg);
+    // Touch density takes its target from the theme, so a host that sets a
+    // smaller touch target gets a close button that honours it.
+    final closeSize = theme.isTouch
+        ? theme.minTarget
+        : math.max(theme.minTarget, CarbonSizes.lg);
 
     return Semantics(
       container: true,
@@ -407,7 +411,7 @@ class _NotificationCardState extends State<_NotificationCard> {
                   child: CarbonButton.iconOnly(
                     icon: const CarbonIcon(CarbonIcons.close),
                     semanticLabel: loc.dismissNotification,
-                    size: CarbonButtonSize.large,
+                    size: theme.isTouch ? null : CarbonButtonSize.large,
                     onPressed: onClose,
                   ),
                 ),

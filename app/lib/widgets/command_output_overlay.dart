@@ -15,6 +15,7 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/command_service.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -44,6 +45,16 @@ class CommandOutputOverlay extends ConsumerStatefulWidget {
 class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   bool _expanded = true;
   Timer? _autoHideTimer;
+
+  static const double _topBorder = 2;
+
+  // The header is also the expand/collapse tap target, so on mobile it is the
+  // 44pt touch minimum rather than Material's 48 less the border.
+  double get _headerHeight => isMobilePlatform ? AbTokens.tapTargetMin : 46;
+
+  // The border is drawn inside the container's height, so a collapsed bar that
+  // is only as tall as its header overflows by the border width.
+  double get _barHeight => _headerHeight + _topBorder;
   final ScrollController _scrollController = ScrollController();
   bool _scrollPending = false;
   bool _hasOutputSelection = false;
@@ -201,11 +212,11 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeInOut,
-        height: _expanded ? 280 : 48,
+        height: _expanded ? 280 : _barHeight,
         decoration: BoxDecoration(
           color: colorScheme.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-          border: Border(top: BorderSide(color: borderColor, width: 2)),
+          border: Border(top: BorderSide(color: borderColor, width: _topBorder)),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.3),
@@ -219,7 +230,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
             GestureDetector(
               onTap: _toggleExpanded,
               child: Container(
-                height: 48,
+                height: _headerHeight,
                 padding: const EdgeInsets.symmetric(
                   horizontal: AbTokens.space16,
                 ),

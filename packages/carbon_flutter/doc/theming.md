@@ -69,10 +69,10 @@ CarbonTheme(data: theme, density: CarbonDensity.touch, child: ...)
 
 | | Compact | Touch |
 | --- | --- | --- |
-| Control height | 32 | 48 |
-| Small control | 24 | 48 |
+| Control height | 32 | `touchTarget` (48) |
+| Small control | 24 | `touchTarget` (48) |
 | Large control | 48 | 64 |
-| Minimum target | 32 | 48 |
+| Minimum target | 32 | `touchTarget` (48) |
 | Icon size | 16 | 20 |
 | Control padding | 12 | 16 |
 | Control text | 14 | 16 |
@@ -81,7 +81,12 @@ CarbonTheme(data: theme, density: CarbonDensity.touch, child: ...)
 Selection rules: phones and tablets use touch regardless of width; a desktop
 with pointer and keyboard uses compact; a desktop host may choose touch for
 touch-first use. Heights are minimums at ordinary text scale and grow with
-enlarged text. Touch never shrinks below 48 px, including the small variant.
+enlarged text. Touch never shrinks below `CarbonThemeData.touchTarget`, including the small
+variant. That extent defaults to 48; a host following another platform
+guideline sets it once on the theme (for example `touchTarget: 44` for Apple's
+Human Interface Guidelines) and every touch control, icon-only target, tab,
+segment, menu row and close button follows it. The large control height and
+explicit larger sizes are unaffected.
 Hover feedback is independent of density.
 
 ## Layers

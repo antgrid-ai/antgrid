@@ -212,10 +212,10 @@ class _DiffViewerState extends State<DiffViewer> {
   /// Below this the header trades its written "View file" link for an icon.
   static const double _compactHeaderWidth = 360;
 
-  static final TextStyle _codeStyle = AbTokens.monoStyle(
-    fontSize: kCodeFontSize,
-    height: kCodeFontHeight,
-  );
+  // A getter: the code size is platform-resolved, and a cached style would
+  // keep whichever platform built it first.
+  static TextStyle get _codeStyle =>
+      AbTokens.monoStyle(fontSize: kCodeFontSize, height: kCodeFontHeight);
 
   final ScrollController _horizontal = ScrollController();
   final ScrollController _vertical = ScrollController();

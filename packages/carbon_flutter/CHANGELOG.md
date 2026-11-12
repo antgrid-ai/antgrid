@@ -12,6 +12,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   (IBM Plex Sans and Mono bundled), spacing, size, border and motion tokens,
   layer helpers, bundled Carbon icons as path data, and overridable
   localizations.
+- `CarbonThemeData.touchTarget` (default 48) sets the touch-density control
+  height, small control height and minimum target in one place, so a host can
+  follow a 44 pt guideline without per-component overrides.
 - `CarbonTheme`, `CarbonLayer`, `CarbonLayerSurface` and `CarbonScopeRelay`
   for scoping theme, density and layer context, including into Navigator
   routes.

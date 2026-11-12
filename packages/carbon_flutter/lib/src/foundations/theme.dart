@@ -13,7 +13,8 @@ enum CarbonDensity {
   /// Pointer and keyboard workflows: 32px controls, productive type.
   compact,
 
-  /// Finger interaction: 48px controls and targets, 16px control text.
+  /// Finger interaction: [CarbonThemeData.touchTarget] (48 by default)
+  /// controls and targets, 16px control text.
   touch,
 }
 
@@ -81,6 +82,7 @@ class CarbonThemeData {
     this.fonts = const CarbonFonts(),
     CarbonTypography? compactTypography,
     CarbonTypography? touchTypography,
+    this.touchTarget = 48,
   }) : colors = colors ?? scheme.colors,
        brightness = brightness ?? scheme.brightness,
        _compactTypography = compactTypography,
@@ -90,11 +92,13 @@ class CarbonThemeData {
   factory CarbonThemeData.forBrightness(
     Brightness brightness, {
     CarbonDensity density = CarbonDensity.compact,
+    double touchTarget = 48,
   }) => CarbonThemeData(
     scheme: brightness == Brightness.dark
         ? CarbonThemeScheme.gray100
         : CarbonThemeScheme.white,
     density: density,
+    touchTarget: touchTarget,
   );
 
   final CarbonThemeScheme scheme;
@@ -102,6 +106,12 @@ class CarbonThemeData {
   final CarbonColors colors;
   final Brightness brightness;
   final CarbonFonts fonts;
+
+  /// The extent of a finger target under [CarbonDensity.touch]. Carbon's
+  /// generic default is 48; a host following another platform guideline (44
+  /// on Apple platforms) sets it once here instead of per component. Ignored
+  /// under compact density, and [largeControlHeight] does not follow it.
+  final double touchTarget;
   final CarbonTypography? _compactTypography;
   final CarbonTypography? _touchTypography;
 
@@ -116,19 +126,19 @@ class CarbonThemeData {
 
   bool get isTouch => density == CarbonDensity.touch;
 
-  /// Default single-line control height: 32 compact, 48 touch. A minimum —
+  /// Default single-line control height: 32 compact, [touchTarget] touch. A minimum —
   /// enlarged text and multi-line content grow past it.
-  double get controlHeight => isTouch ? 48 : 32;
+  double get controlHeight => isTouch ? touchTarget : 32;
 
   /// The documented small variant for constrained chrome. Touch keeps its
-  /// 48px floor.
-  double get smallControlHeight => isTouch ? 48 : 24;
+  /// [touchTarget] floor.
+  double get smallControlHeight => isTouch ? touchTarget : 24;
 
   /// Large control height (Carbon `lg`), e.g. modal footer buttons.
   double get largeControlHeight => isTouch ? 64 : 48;
 
   /// Minimum interactive footprint for icon-only and indicator controls.
-  double get minTarget => isTouch ? 48 : 32;
+  double get minTarget => isTouch ? touchTarget : 32;
 
   /// Glyph size inside controls.
   double get iconSize => isTouch ? 20 : 16;
@@ -212,6 +222,7 @@ class CarbonThemeData {
     CarbonFonts? fonts,
     CarbonTypography? compactTypography,
     CarbonTypography? touchTypography,
+    double? touchTarget,
   }) {
     // A new scheme without explicit colors takes that scheme's palette;
     // otherwise the current (possibly custom) colors carry over.
@@ -225,6 +236,7 @@ class CarbonThemeData {
       fonts: fonts ?? this.fonts,
       compactTypography: compactTypography ?? _compactTypography,
       touchTypography: touchTypography ?? _touchTypography,
+      touchTarget: touchTarget ?? this.touchTarget,
     );
   }
 
@@ -237,7 +249,8 @@ class CarbonThemeData {
       other.brightness == brightness &&
       other.fonts == fonts &&
       other._compactTypography == _compactTypography &&
-      other._touchTypography == _touchTypography;
+      other._touchTypography == _touchTypography &&
+      other.touchTarget == touchTarget;
 
   @override
   int get hashCode => Object.hash(
@@ -248,6 +261,7 @@ class CarbonThemeData {
     fonts,
     _compactTypography,
     _touchTypography,
+    touchTarget,
   );
 }
 

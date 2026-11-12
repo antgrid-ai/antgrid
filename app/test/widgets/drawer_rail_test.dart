@@ -368,6 +368,97 @@ void main() {
     }
   });
 
+  group('rail targets', () {
+    for (final mobile in [true, false]) {
+      final platform = mobile ? TargetPlatform.android : TargetPlatform.windows;
+
+      testWidgets(
+        '${mobile ? 'mobile' : 'desktop'}: the + beside the trash '
+        '${mobile ? 'is a 44x44 target inside its row' : 'keeps the 24 box'}',
+        (tester) async {
+          await _onPlatform(platform, () async {
+            _useTallView(tester);
+            await _seed(stores);
+            await _pumpDrawer(tester, stores: stores);
+
+            await hoverRow(tester, find.text(_bareName));
+            final bare = _entryRow(_bareName);
+            final plus = _within(bare, find.byTooltip(_newSessionTip));
+            final trash = _within(bare, _actionsFor(_bareName));
+            expect(plus, findsOneWidget);
+            expect(trash, findsOneWidget);
+            final plusRect = tester.getRect(plus);
+            final trashRect = tester.getRect(trash);
+            final rowRect = tester.getRect(
+              find
+                  .descendant(of: bare, matching: find.byType(AbListRow))
+                  .first,
+            );
+            if (mobile) {
+              expect(plusRect.size, const Size(44, 44));
+              expect(trashRect.size, const Size(44, 44));
+              expect(plusRect.right, lessThanOrEqualTo(trashRect.left + 0.01));
+              expect(plusRect.top, greaterThanOrEqualTo(rowRect.top - 0.01));
+              expect(plusRect.bottom, lessThanOrEqualTo(rowRect.bottom + 0.01));
+            } else {
+              expect(
+                plusRect.height,
+                AbIconButton.boxExtent(tester.element(plus)),
+              );
+              expect(plusRect.height, lessThan(44));
+            }
+            await tester.pumpWidget(const SizedBox());
+          });
+        },
+      );
+
+      testWidgets(
+        '${mobile ? 'mobile' : 'desktop'}: the session kebab '
+        '${mobile ? 'is a 44x44 target on the rail' : 'keeps the 24 box'}',
+        (tester) async {
+          await _onPlatform(platform, () async {
+            _useTallView(tester);
+            await _seed(stores);
+            await _pumpDrawer(tester, stores: stores);
+
+            final rail = _railX(tester);
+            await hoverRow(tester, find.text(_sessionName));
+            final kebab = _within(
+              find.byType(SessionRow),
+              find.byTooltip(_kebabTip),
+            );
+            expect(kebab, findsOneWidget);
+            final kebabRect = tester.getRect(kebab);
+            final rowRect = tester.getRect(
+              find
+                  .descendant(
+                    of: find.byType(SessionRow),
+                    matching: find.byType(AbListRow),
+                  )
+                  .first,
+            );
+            if (mobile) {
+              expect(kebabRect.size, const Size(44, 44));
+              expect(kebabRect.top, greaterThanOrEqualTo(rowRect.top - 0.01));
+              expect(
+                kebabRect.bottom,
+                lessThanOrEqualTo(rowRect.bottom + 0.01),
+              );
+              expect(kebabRect.center.dx, closeTo(rail, _railEpsilon));
+            } else {
+              expect(
+                kebabRect.height,
+                AbIconButton.boxExtent(tester.element(kebab)),
+              );
+              expect(kebabRect.height, lessThan(44));
+            }
+            await tester.pumpWidget(const SizedBox());
+          });
+        },
+      );
+    }
+  });
+
   group('no vertical jitter', () {
     for (final scale in const [1.0, 1.3]) {
       for (final target in <({
@@ -530,6 +621,40 @@ void main() {
             'without a mouse',
       );
       expect(newSession, findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  testWidgets('the PROJECTS header refresh is a 44x44 target on mobile', (
+    tester,
+  ) async {
+    await _onPlatform(TargetPlatform.android, () async {
+      _useTallView(tester);
+      await _seed(stores);
+      await _pumpDrawer(tester, stores: stores);
+
+      expect(
+        tester.getSize(find.byTooltip('Refresh')),
+        const Size(AbTokens.tapTargetMin, AbTokens.tapTargetMin),
+      );
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  testWidgets('the PROJECTS header refresh keeps its compact target on desktop', (
+    tester,
+  ) async {
+    await _onPlatform(TargetPlatform.windows, () async {
+      _useTallView(tester);
+      await _seed(stores);
+      await _pumpDrawer(tester, stores: stores);
+
+      expect(
+        tester.getSize(find.byTooltip('Refresh')).height,
+        lessThan(AbTokens.tapTargetMin),
+      );
 
       await tester.pumpWidget(const SizedBox());
     });

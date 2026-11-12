@@ -381,7 +381,7 @@ class CarbonContainedListSliver extends StatelessWidget {
 /// row of such a list, false included, so each row announces its selected
 /// state; leave it null for rows that are not part of a selection.
 ///
-/// The row is at least 32 (compact) or 48 (touch) tall and grows with its
+/// The row is at least 32 (compact) or [CarbonThemeData.touchTarget] (touch) tall and grows with its
 /// text, which wraps. With [revealActionsOnHover] the actions of a compact row
 /// show only while the pointer is over the row or focus is inside it; touch
 /// density always shows them, because there is no hover to reveal them.

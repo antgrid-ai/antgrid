@@ -3,6 +3,8 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
+import '../utils/platform_utils.dart';
+
 /// Terminal-native design tokens for Antgrid.
 ///
 /// **Color constants below are deprecated** — they bake in the dark-Zinc
@@ -223,20 +225,54 @@ abstract final class AbTokens {
   ];
 
   // ── Typography scale ──
-  // VS Code body baseline (14px). All `fontSize:` values in app/lib/**
-  // must reference one of these tokens; raw literals are CI-enforced
-  // (see scripts/check_font_tokens.sh). The constants below are the
-  // ONLY exception.
-  static const double fontXxs = 10.0;
-  static const double fontXs = 11.0;
-  static const double fontSm = 12.0;
-  static const double fontMd = 13.0;
-  static const double fontBody = 14.0;
-  static const double fontLg = 16.0;
-  static const double fontXl = 18.0;
-  static const double fontDisplaySm = 24.0;
-  static const double fontDisplayMd = 32.0;
-  static const double fontDisplayLg = 40.0;
+  // Desktop keeps the VS Code body baseline (14px); phones and tablets follow
+  // Apple's text styles, so every step resolves per platform at read time and
+  // none of these can sit in a const context. All `fontSize:` values in
+  // app/lib/** must reference one of these tokens; raw literals are
+  // CI-enforced (see scripts/check_font_tokens.sh). The numeric literals in
+  // this file are the ONLY exception.
+  static double get fontXxs => isMobilePlatform ? 11.0 : 10.0;
+  static double get fontXs => isMobilePlatform ? 12.0 : 11.0;
+  static double get fontSm => isMobilePlatform ? 13.0 : 12.0;
+  static double get fontMd => isMobilePlatform ? 15.0 : 13.0;
+  static double get fontBody => isMobilePlatform ? 17.0 : 14.0;
+  static double get fontLg => isMobilePlatform ? 20.0 : 16.0;
+  static double get fontXl => isMobilePlatform ? 22.0 : 18.0;
+  static double get fontDisplaySm => isMobilePlatform ? 28.0 : 24.0;
+  static double get fontDisplayMd => isMobilePlatform ? 34.0 : 32.0;
+  static double get fontDisplayLg => 40.0;
+
+  /// The terminal's base cell size before the user's zoom and UI Size setting.
+  /// Not on the Apple scale: it is the terminal's own setting, so it stays at the
+  /// desktop body size on every platform.
+  static const double terminalBaseFont = 14.0;
+
+  // ── Apple text styles (size / line height) ──
+  // Fixed, not platform-resolved: a Carbon surface forced to touch density on
+  // a desktop must still read in Apple's scale, which the `font*` getters
+  // above would not give it.
+  static const double appleCaption2 = 11.0;
+  static const double appleCaption2Line = 13.0;
+  static const double appleCaption1 = 12.0;
+  static const double appleCaption1Line = 16.0;
+  static const double appleFootnote = 13.0;
+  static const double appleFootnoteLine = 18.0;
+  static const double appleSubheadline = 15.0;
+  static const double appleSubheadlineLine = 20.0;
+  static const double appleCallout = 16.0;
+  static const double appleCalloutLine = 21.0;
+  static const double appleBody = 17.0;
+  static const double appleBodyLine = 22.0;
+  static const double appleHeadline = 17.0;
+  static const double appleHeadlineLine = 22.0;
+  static const double appleTitle3 = 20.0;
+  static const double appleTitle3Line = 25.0;
+  static const double appleTitle2 = 22.0;
+  static const double appleTitle2Line = 28.0;
+  static const double appleTitle1 = 28.0;
+  static const double appleTitle1Line = 34.0;
+  static const double appleLargeTitle = 34.0;
+  static const double appleLargeTitleLine = 41.0;
 
   // ── Sizes ──
   /// Max content width for the agent transcript (body + composer). ~66ch at
@@ -336,11 +372,15 @@ abstract final class AbTokens {
   static const appleSignInInkOnLight = Color(0xFF000000);
   static const appleSignInInkOnDark = Color(0xFFFFFFFF);
 
-  // Minimum interactive-target edge: 44 splits Apple HIG's 44pt and Android's
-  // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers
-  // are precise and dense toolbars must stay compact.
+  // Minimum interactive-target edge: Apple HIG's 44pt, used on every touch
+  // platform. Enforced on mobile only, via AbTapTarget — desktop pointers are
+  // precise and dense toolbars must stay compact.
   static const tapTargetMin = 44.0;
-  static const touchControlMin = 48.0;
+
+  /// The touch-density control height. Equal to [tapTargetMin]; a separate name
+  /// because it answers "how tall is a control" where that answers "how big
+  /// must a target be", and the two are free to diverge.
+  static const touchControlMin = tapTargetMin;
 
   // Status dots.
   static const double dotSizeSm = 6.0;
@@ -386,7 +426,7 @@ abstract final class AbTokens {
 
   /// Text at or below this size is never bumped — heavier strokes merge at
   /// micro sizes. Default protects only fontXxs (10px).
-  static const double minBumpFontSize = fontXxs;
+  static double get minBumpFontSize => fontXxs;
 
   /// Fraction of a full 100-unit weight step applied when the low-DPI bump is
   /// active. 1.0 = full step (w400→w500); lower softens it.
@@ -439,21 +479,24 @@ abstract final class AbTokens {
   /// text legible under any theme preset. Pass an explicit `color` only
   /// when overriding (e.g. muted/secondary/accent tints).
   static TextStyle monoStyle({
-    double fontSize = fontBody,
+    double? fontSize,
     Color? color,
     FontWeight fontWeight = FontWeight.normal,
     double? letterSpacing,
     double? height,
-  }) => TextStyle(
-    fontFamily: fontMono,
-    fontFamilyFallback: fontMonoFallbacks,
-    fontSize: fontSize,
-    color: color,
-    fontWeight: _bump(fontWeight, fontSize),
-    fontVariations: _bumpVariations(fontWeight, fontSize),
-    letterSpacing: letterSpacing,
-    height: height,
-  );
+  }) {
+    final size = fontSize ?? fontBody;
+    return TextStyle(
+      fontFamily: fontMono,
+      fontFamilyFallback: fontMonoFallbacks,
+      fontSize: size,
+      color: color,
+      fontWeight: _bump(fontWeight, size),
+      fontVariations: _bumpVariations(fontWeight, size),
+      letterSpacing: letterSpacing,
+      height: height,
+    );
+  }
 
   /// Sans-family [TextStyle] helper — the Antgrid default for UI chrome
   /// (labels, headers, buttons, list-row titles, menus, breadcrumbs,
@@ -464,19 +507,22 @@ abstract final class AbTokens {
   /// `color` is nullable for the same reason as [monoStyle]: omit to
   /// inherit `colorScheme.onSurface` from the ambient [DefaultTextStyle].
   static TextStyle sansStyle({
-    double fontSize = fontBody,
+    double? fontSize,
     Color? color,
     FontWeight fontWeight = FontWeight.normal,
     double? letterSpacing,
     double? height,
-  }) => TextStyle(
-    fontFamily: fontSans,
-    fontFamilyFallback: fontSansFallbacks,
-    fontSize: fontSize,
-    color: color,
-    fontWeight: _bump(fontWeight, fontSize),
-    fontVariations: _bumpVariations(fontWeight, fontSize),
-    letterSpacing: letterSpacing,
-    height: height,
-  );
+  }) {
+    final size = fontSize ?? fontBody;
+    return TextStyle(
+      fontFamily: fontSans,
+      fontFamilyFallback: fontSansFallbacks,
+      fontSize: size,
+      color: color,
+      fontWeight: _bump(fontWeight, size),
+      fontVariations: _bumpVariations(fontWeight, size),
+      letterSpacing: letterSpacing,
+      height: height,
+    );
+  }
 }

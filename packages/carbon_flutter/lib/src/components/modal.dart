@@ -342,7 +342,11 @@ class CarbonModal extends StatelessWidget {
     final colors = theme.colors;
     final type = theme.typography;
     final fullScreen = CarbonModalFrame.fullScreenOf(context);
-    final closeSize = math.max(theme.minTarget, CarbonSizes.lg);
+    // Touch density takes its target from the theme, so a host that sets a
+    // smaller touch target gets a close button that honours it.
+    final closeSize = theme.isTouch
+        ? theme.minTarget
+        : math.max(theme.minTarget, CarbonSizes.lg);
 
     final header = ConstrainedBox(
       constraints: BoxConstraints(minHeight: closeSize),
@@ -383,7 +387,7 @@ class CarbonModal extends StatelessWidget {
               child: CarbonButton.iconOnly(
                 icon: const CarbonIcon(CarbonIcons.close),
                 semanticLabel: loc.close,
-                size: CarbonButtonSize.large,
+                size: theme.isTouch ? null : CarbonButtonSize.large,
                 onPressed: () => _close(context),
               ),
             ),

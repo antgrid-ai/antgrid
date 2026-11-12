@@ -215,7 +215,7 @@ class CarbonMenuButton extends StatelessWidget {
 
 /// An icon-only trigger for secondary commands, three dots by default.
 ///
-/// The footprint is 32 square in compact density and 48 in touch. The
+/// The footprint is 32 square in compact density and [CarbonThemeData.touchTarget] in touch. The
 /// accessible name defaults to the localized "Options"; give a more specific
 /// [semanticLabel] when several overflow menus share a screen. An item
 /// callback may push a route: the menu has closed and focus has returned to
@@ -294,7 +294,7 @@ class CarbonOverflowMenu extends StatelessWidget {
 /// combo button).
 ///
 /// The action and the trigger are two controls: each takes focus on its own,
-/// has its own accessible name and its own 32 / 48 target, and activating one
+/// has its own accessible name and its own 32 / touch target, and activating one
 /// never activates the other. Disable the action with a null [onPressed]
 /// while the menu stays usable, or the reverse with [menuEnabled].
 class CarbonSplitButton extends StatelessWidget {

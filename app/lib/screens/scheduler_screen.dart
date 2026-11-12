@@ -744,12 +744,13 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
 
   Widget _label(
     String value, {
-    double size = AbTokens.fontSm,
+    double? size,
     Color? color,
     FontWeight weight = FontWeight.normal,
     bool mono = false,
     int maxLines = 1,
   }) {
+    size ??= AbTokens.fontSm;
     final c = color ?? context.antgrid.textSecondary;
     return Text(
       value,

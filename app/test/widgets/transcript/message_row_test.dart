@@ -204,7 +204,7 @@ void main() {
     );
     await _pump(
       tester,
-      SizedBox(width: 180, child: MessageRow(data: data, rowIndex: 0)),
+      SizedBox(width: 190, child: MessageRow(data: data, rowIndex: 0)),
     );
     await tester.pumpAndSettle();
 

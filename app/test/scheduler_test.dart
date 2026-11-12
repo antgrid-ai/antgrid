@@ -281,8 +281,8 @@ void main() {
       expect(newSessionRow.horizontalPadding, schedulerRow.horizontalPadding);
       expect(newSessionRow.selectionStyle, AbRowSelection.surface);
       expect(newSessionRow.hoverable, isTrue);
-      expect(tester.getSize(newSession).height, greaterThanOrEqualTo(48));
-      expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
+      expect(tester.getSize(newSession).height, greaterThanOrEqualTo(44));
+      expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(44));
       expect(
         tester.getBottomLeft(newSession).dy,
         lessThan(tester.getTopLeft(scheduler).dy),
