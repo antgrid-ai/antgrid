@@ -24,6 +24,34 @@ EditableText _editableWidget(WidgetTester tester) =>
 
 void main() {
   group('sizing', () {
+    testWidgets('autocorrect and suggestions can be turned off; password '
+        'never has them', (tester) async {
+      await pumpCarbon(
+        tester,
+        _host(
+          const Column(
+            children: [
+              CarbonTextInput(label: 'Default'),
+              CarbonTextInput(
+                label: 'Cron',
+                autocorrect: false,
+                enableSuggestions: false,
+              ),
+              CarbonTextInput(
+                label: 'Secret',
+                variant: CarbonTextInputVariant.password,
+              ),
+            ],
+          ),
+        ),
+      );
+      final fields = tester.widgetList<TextField>(find.byType(TextField)).toList();
+      expect(
+        [for (final f in fields) (f.autocorrect, f.enableSuggestions)],
+        [(true, true), (false, false), (false, false)],
+      );
+    });
+
     testWidgets('field height follows density and grows with text scale', (
       tester,
     ) async {

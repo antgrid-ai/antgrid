@@ -296,6 +296,8 @@ class CarbonTextInput extends StatefulWidget {
     this.textCapitalization = TextCapitalization.none,
     this.inputFormatters,
     this.autofillHints,
+    this.autocorrect = true,
+    this.enableSuggestions = true,
     this.autofocus = false,
     this.semanticLabel,
     this.onChanged,
@@ -359,6 +361,12 @@ class CarbonTextInput extends StatefulWidget {
   final TextInputAction? textInputAction;
   final TextCapitalization textCapitalization;
   final List<TextInputFormatter>? inputFormatters;
+
+  /// Turn off for codes, expressions and identifiers that the platform
+  /// keyboard would otherwise "correct". A password field never autocorrects
+  /// or suggests, whatever these say.
+  final bool autocorrect;
+  final bool enableSuggestions;
 
   /// Defaults to [AutofillHints.password] for the password variant.
   final Iterable<String>? autofillHints;
@@ -553,8 +561,8 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       readOnly: readOnly,
       autofocus: widget.autofocus,
       obscureText: password && !_revealed,
-      enableSuggestions: !password,
-      autocorrect: !password,
+      enableSuggestions: widget.enableSuggestions && !password,
+      autocorrect: widget.autocorrect && !password,
       keyboardType:
           widget.keyboardType ??
           (password
