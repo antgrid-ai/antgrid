@@ -31,38 +31,31 @@ class CarbonMachineSelector extends StatelessWidget {
       constraints: BoxConstraints(
         maxWidth: CarbonSpacing.spacing05 * (wide ? 15 : 9),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ExcludeSemantics(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: connected ? dot : null,
-                border: connected ? null : Border.all(color: dot),
-              ),
-              child: const SizedBox.square(dimension: CarbonSpacing.spacing03),
-            ),
+      // The connection dot sits inside the trigger, beside the name it
+      // qualifies, so the two read and click as one control.
+      child: CarbonMenuButton(
+        kind: CarbonButtonKind.ghost,
+        label: name,
+        maxLines: 1,
+        leading: DecoratedBox(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: connected ? dot : null,
+            border: connected ? null : Border.all(color: dot),
           ),
-          Flexible(
-            child: CarbonMenuButton(
-              kind: CarbonButtonKind.ghost,
-              label: name,
-              maxLines: 1,
-              triggerSemanticLabel:
-                  'Machine: $name${connected ? '' : ', offline'}, change',
-              semanticLabel: 'Machines',
-              entries: [
-                CarbonMenuRadioGroup<String>(
-                  value: currentId,
-                  options: [
-                    for (final e in machines.entries)
-                      CarbonOption<String>(value: e.key, label: e.value),
-                  ],
-                  onChanged: onPicked,
-                ),
-              ],
-            ),
+          child: const SizedBox.square(dimension: CarbonSpacing.spacing03),
+        ),
+        triggerSemanticLabel:
+            'Machine: $name${connected ? '' : ', offline'}, change',
+        semanticLabel: 'Machines',
+        entries: [
+          CarbonMenuRadioGroup<String>(
+            value: currentId,
+            options: [
+              for (final e in machines.entries)
+                CarbonOption<String>(value: e.key, label: e.value),
+            ],
+            onChanged: onPicked,
           ),
         ],
       ),

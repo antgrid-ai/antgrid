@@ -113,6 +113,16 @@ void main() {
     expect(picked, ['local']);
   });
 
+  testWidgets('the dot sits inside the trigger, before the name', (
+    tester,
+  ) async {
+    await _pump(tester);
+    final button = tester.getRect(find.byType(CarbonButton));
+    final dot = tester.getRect(_dotFinder());
+    expect(button.contains(dot.center), isTrue);
+    expect(dot.right, lessThan(tester.getRect(find.text('Laptop')).left));
+  });
+
   testWidgets('dot is filled when connected, outlined when not', (
     tester,
   ) async {
