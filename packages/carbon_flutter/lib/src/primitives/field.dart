@@ -205,7 +205,8 @@ class CarbonFieldFrame extends StatelessWidget {
 /// State treatments, all painted over the content so no state changes the
 /// layout:
 /// * [focused]: 2px inset `focus` outline. Wins over the invalid outline.
-/// * [invalid]: 2px `supportError` outline plus a trailing error glyph.
+/// * [invalid]: 2px `supportError` outline plus a trailing error glyph
+///   (Carbon's `WarningFilled`).
 /// * [warn]: a trailing warning glyph, no outline.
 /// * [readOnly]: transparent fill, `borderSubtle` rule, no hover.
 /// * disabled ([enabled] false): no rule, disabled text and icon colors.
@@ -232,7 +233,16 @@ class CarbonFieldBox extends StatefulWidget {
     this.warn = false,
     this.minHeight,
     this.crossAxisAlignment = CrossAxisAlignment.center,
+    this.hoverable = true,
+    this.startPadding,
+    this.expanded = false,
   });
+
+  /// Carbon's field text inset (`$spacing-05`), the same at every size and
+  /// density. Menu rows use the same inset (`list-box.scss` margin
+  /// `0 $spacing-05`), so [CarbonThemeData.controlPaddingX] does not apply
+  /// here.
+  static const double paddingX = CarbonSpacing.spacing05;
 
   final Widget child;
   final Widget? leading;
@@ -255,6 +265,19 @@ class CarbonFieldBox extends StatefulWidget {
   /// [CrossAxisAlignment.start] for multi-line content.
   final CrossAxisAlignment crossAxisAlignment;
 
+  /// Whether the fill follows the pointer. Carbon's text input and search
+  /// have no hover state; select and list boxes do.
+  final bool hoverable;
+
+  /// Replaces [paddingX] at the start edge, for content that lays out its own
+  /// leading square (search).
+  final double? startPadding;
+
+  /// Whether the field's list is open. Carbon swaps the bottom rule for
+  /// `border-subtle` so the menu's own top edge reads as the divider, and the
+  /// fill stays at rest through hover (list-box.scss `--expanded`).
+  final bool expanded;
+
   @override
   State<CarbonFieldBox> createState() => _CarbonFieldBoxState();
 }
@@ -276,12 +299,12 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
     final validates = enabled && !readOnly;
     final invalid = validates && widget.invalid;
     final warn = validates && !invalid && widget.warn;
-    final hoverable = enabled && !readOnly;
+    final hoverable = widget.hoverable && enabled && !readOnly;
 
     final Color fill;
     if (readOnly) {
       fill = const Color(0x00000000);
-    } else if (hoverable && _hovered) {
+    } else if (hoverable && _hovered && !widget.expanded) {
       fill = theme.fieldHover(level);
     } else {
       fill = theme.field(level);
@@ -289,7 +312,7 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
 
     final Color? rule = !enabled
         ? null
-        : readOnly
+        : readOnly || widget.expanded
         ? theme.borderSubtle(level)
         : theme.borderStrong(level);
 
@@ -305,7 +328,7 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
     Widget? status;
     if (invalid) {
       status = CarbonIcon(
-        CarbonIcons.errorFilled,
+        CarbonIcons.warningFilled,
         color: colors.supportError,
         // Carbon leaves the "!" unpainted so the field shows through; painting
         // it with the fill keeps that look on hover and over any backdrop.
@@ -323,8 +346,17 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
       );
     }
 
-    final padX = theme.controlPaddingX;
+    const padX = CarbonFieldBox.paddingX;
     final trailingAction = widget.trailingAction;
+    // Carbon's text area seats the status glyph 12px from the top, 8px below
+    // the box's own top padding.
+    if (status != null &&
+        widget.crossAxisAlignment == CrossAxisAlignment.start) {
+      status = Padding(
+        padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
+        child: status,
+      );
+    }
     final children = <Widget>[
       if (widget.leading != null) ...<Widget>[
         widget.leading!,
@@ -359,7 +391,7 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
             ),
             child: Padding(
               padding: EdgeInsetsDirectional.only(
-                start: padX,
+                start: widget.startPadding ?? padX,
                 end: trailingAction == null ? padX : 0,
                 top: CarbonSpacing.spacing02,
                 bottom: CarbonSpacing.spacing02,

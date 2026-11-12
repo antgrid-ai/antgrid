@@ -86,6 +86,10 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
   // "no stop".
   Object? _stop;
   bool _hasStop = false;
+  // Carbon hides the divider beside a hovered or focused segment, so the
+  // neighbours of a segment need to know about it.
+  int _hoverIndex = -1;
+  int _focusIndex = -1;
 
   @override
   void initState() {
@@ -211,13 +215,24 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
     widget.onChanged(option.value);
   }
 
-  void _handleFocus(Object? value, bool focused) {
-    if (!focused || (_hasStop && _stop == value)) return;
+  void _handleFocus(int index, Object? value, bool focused) {
+    if (!focused) {
+      if (_focusIndex == index) setState(() => _focusIndex = -1);
+      return;
+    }
     setState(() {
+      _focusIndex = index;
       _stop = value;
       _hasStop = true;
     });
   }
+
+  void _handleHover(int index, bool hovered) {
+    final next = hovered ? index : (_hoverIndex == index ? -1 : _hoverIndex);
+    if (next != _hoverIndex) setState(() => _hoverIndex = next);
+  }
+
+  bool _lit(int index) => _hoverIndex == index || _focusIndex == index;
 
   void _handleGroupFocus(bool focused) {
     if (focused || !_hasStop) return;
@@ -252,13 +267,23 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
               selected: i == selected,
               // A rule next to the selected segment would double its edge.
               showEndRule:
-                  i < options.length - 1 && i != selected && i + 1 != selected,
+                  i < options.length - 1 &&
+                  i != selected &&
+                  i + 1 != selected &&
+                  !_lit(i) &&
+                  !_lit(i + 1),
+              first: i == 0,
+              last: i == options.length - 1,
+              largeIcons:
+                  !theme.isTouch &&
+                  widget.size == CarbonContentSwitcherSize.large,
               iconOnly: widget.iconOnly,
               focusNode: _nodes[options[i].value]!,
               level: level,
               height: height,
               onSelect: () => _select(options[i]),
-              onFocusChange: (f) => _handleFocus(options[i].value, f),
+              onFocusChange: (f) => _handleFocus(i, options[i].value, f),
+              onHoverChange: (h) => _handleHover(i, h),
             ),
           ),
       ],
@@ -271,6 +296,7 @@ class _CarbonContentSwitcherState<T> extends State<CarbonContentSwitcher<T>> {
       onFocusChange: _handleGroupFocus,
       child: DecoratedBox(
         decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(4),
           border: Border.all(
             color: theme.colors.borderInverse,
             width: CarbonBorders.hairline,
@@ -296,23 +322,31 @@ class _Segment extends StatelessWidget {
     required this.option,
     required this.selected,
     required this.showEndRule,
+    required this.first,
+    required this.last,
+    required this.largeIcons,
     required this.iconOnly,
     required this.focusNode,
     required this.level,
     required this.height,
     required this.onSelect,
     required this.onFocusChange,
+    required this.onHoverChange,
   });
 
   final CarbonOption<Object?> option;
   final bool selected;
   final bool showEndRule;
+  final bool first;
+  final bool last;
+  final bool largeIcons;
   final bool iconOnly;
   final FocusNode focusNode;
   final int level;
   final double height;
   final VoidCallback onSelect;
   final ValueChanged<bool> onFocusChange;
+  final ValueChanged<bool> onHoverChange;
 
   @override
   Widget build(BuildContext context) {
@@ -324,6 +358,7 @@ class _Segment extends StatelessWidget {
       focusNode: focusNode,
       requestFocusOnTap: true,
       onFocusChange: onFocusChange,
+      onHoverChange: onHoverChange,
       button: false,
       role: SemanticsRole.tab,
       label: option.label,
@@ -338,18 +373,34 @@ class _Segment extends StatelessWidget {
         } else {
           // Unselected segments are clear so the page shows through the
           // outline, as in Carbon.
-          fill = state.pressed
-              ? theme.layerActive(level)
-              : state.hovered
+          fill = state.pressed || state.hovered
               ? theme.layerHover(level)
               : const Color(0x00000000);
           text = !enabled
               ? colors.textDisabled
-              : state.hovered
+              : state.pressed || state.hovered
               ? colors.textPrimary
               : colors.textSecondary;
         }
+        // An SVG's fill ignores the button's text colour, so icon-only
+        // segments use the icon roles.
+        final iconColor = !iconOnly
+            ? text
+            : !enabled
+            ? colors.iconDisabled
+            : selected
+            ? colors.iconInverse
+            : colors.iconPrimary;
         final icon = option.icon;
+        final BorderRadiusGeometry? radius = selected
+            ? BorderRadius.circular(4)
+            : first
+            ? const BorderRadiusDirectional.horizontal(
+                start: Radius.circular(4),
+              )
+            : last
+            ? const BorderRadiusDirectional.horizontal(end: Radius.circular(4))
+            : null;
         return ConstrainedBox(
           constraints: BoxConstraints(
             minHeight: height,
@@ -359,48 +410,62 @@ class _Segment extends StatelessWidget {
             visible: state.focusVisible,
             onColor: selected,
             child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: fill,
-                border: showEndRule
-                    ? BorderDirectional(
-                        end: BorderSide(
-                          color: theme.borderSubtle(level),
-                          width: CarbonBorders.hairline,
-                        ),
-                      )
-                    : null,
-              ),
-              child: Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: iconOnly
-                      ? CarbonSpacing.spacing03
-                      : CarbonSpacing.spacing05,
-                  vertical: CarbonSpacing.spacing02,
-                ),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      if (icon != null)
-                        IconTheme(
-                          data: IconThemeData(color: text, size: theme.iconSize),
-                          child: icon,
-                        ),
-                      if (icon != null && !iconOnly)
-                        const SizedBox(width: CarbonSpacing.spacing03),
-                      if (!iconOnly)
-                        Flexible(
-                          child: Text(
-                            option.label,
-                            textAlign: TextAlign.center,
-                            style: theme.typography.control.copyWith(
-                              color: text,
+              decoration: BoxDecoration(color: fill, borderRadius: radius),
+              child: Stack(
+                fit: StackFit.passthrough,
+                children: <Widget>[
+                  Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: iconOnly
+                          ? (largeIcons ? 14 : CarbonSpacing.spacing03)
+                          : CarbonSpacing.spacing05,
+                      vertical: CarbonSpacing.spacing02,
+                    ),
+                    child: Center(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          if (icon != null)
+                            IconTheme(
+                              data: IconThemeData(
+                                color: iconColor,
+                                size: largeIcons ? 20 : theme.iconSize,
+                              ),
+                              child: icon,
                             ),
+                          if (icon != null && !iconOnly)
+                            const SizedBox(width: CarbonSpacing.spacing03),
+                          if (!iconOnly)
+                            Flexible(
+                              child: Text(
+                                option.label,
+                                textAlign: TextAlign.center,
+                                style: theme.typography.control.copyWith(
+                                  color: text,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (showEndRule)
+                    PositionedDirectional(
+                      end: 0,
+                      top: 0,
+                      bottom: 0,
+                      width: CarbonBorders.hairline,
+                      child: IgnorePointer(
+                        child: Center(
+                          child: SizedBox(
+                            width: CarbonBorders.hairline,
+                            height: 16,
+                            child: ColoredBox(color: theme.borderSubtle(level)),
                           ),
                         ),
-                    ],
-                  ),
-                ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),

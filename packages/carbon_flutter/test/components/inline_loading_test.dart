@@ -65,11 +65,11 @@ void main() {
     expect(tester.binding.transientCallbackCount, 0);
   });
 
-  testWidgets('description stays at the same x in every status', (
-    tester,
-  ) async {
+  testWidgets('description stays at the same x in every status with an '
+      'indicator', (tester) async {
     final xs = <double>{};
     for (final s in CarbonInlineLoadingStatus.values) {
+      if (s == CarbonInlineLoadingStatus.inactive) continue;
       await pumpCarbon(tester, _il0(s));
       xs.add(tester.getTopLeft(find.text('Saving')).dx);
     }

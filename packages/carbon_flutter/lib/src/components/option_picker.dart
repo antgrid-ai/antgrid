@@ -2,7 +2,6 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import '../foundations/icons.dart';
 import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
 import '../primitives/field.dart';
@@ -42,7 +41,12 @@ class CarbonOptionPicker<T> extends StatefulWidget {
     this.loading = false,
     this.listErrorText,
     this.emptyText,
+    this.arrowUpOpens = true,
   });
+
+  /// Whether ArrowUp opens a closed list. A native select does; Carbon's
+  /// Dropdown ignores it until the list is open (Dropdown.tsx:574).
+  final bool arrowUpOpens;
 
   final List<CarbonOption<T>> options;
   final T? value;
@@ -226,7 +230,12 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
         key == LogicalKeyboardKey.arrowUp) {
       final down = key == LogicalKeyboardKey.arrowDown;
       if (!open) {
-        _open(keyboard: true);
+        if (down || widget.arrowUpOpens) {
+          _open(keyboard: true);
+          return KeyEventResult.handled;
+        }
+        // Consumed so focus stays on the toggle, as it does on the web.
+        return KeyEventResult.handled;
       } else if (down && HardwareKeyboard.instance.isAltPressed) {
         _popup.close();
       } else {
@@ -295,16 +304,12 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
 
     final selected = CarbonOption.indexOfValue(widget.options, widget.value);
     final String text;
-    final bool muted;
     if (selected >= 0) {
       text = widget.options[selected].label;
-      muted = false;
     } else if (widget.value != null) {
       text = widget.unavailableLabel ?? messages.unavailableValue;
-      muted = true;
     } else {
       text = widget.placeholder ?? messages.selectPlaceholder;
-      muted = true;
     }
 
     final hint = <String>[
@@ -341,21 +346,17 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
           readOnly: widget.readOnly,
           invalid: error != null,
           warn: warning != null,
-          trailing: widget.readOnly
-              ? null
-              : CarbonIcon(
-                  open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown,
-                ),
+          expanded: open,
+          trailing: CarbonFieldChevron(open: open, readOnly: widget.readOnly),
           child: Text(
             text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: theme.typography.control.copyWith(
-              color: !enabled
-                  ? colors.textDisabled
-                  : muted
-                  ? colors.textPlaceholder
-                  : colors.textPrimary,
+              // The no-selection label is text-primary in Carbon
+              // (list-box.scss:453, select.scss:60); only the combo box's
+              // input hint is a placeholder.
+              color: enabled ? colors.textPrimary : colors.textDisabled,
             ),
           ),
         ),

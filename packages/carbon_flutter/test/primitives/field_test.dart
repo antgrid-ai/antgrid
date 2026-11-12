@@ -57,6 +57,37 @@ Iterable<CarbonIcons> _icons(WidgetTester tester) => tester
     .map((icon) => icon.icon);
 
 void main() {
+  group('CarbonFieldBox expanded (list-box.scss:152 border-block-end-color)', () {
+    final theme = CarbonThemeData();
+    Widget expandedBox({required bool expanded}) => Align(
+      alignment: Alignment.topLeft,
+      child: SizedBox(
+        width: 200,
+        child: CarbonFieldBox(
+          key: _box,
+          expanded: expanded,
+          child: const Text('v'),
+        ),
+      ),
+    );
+
+    testWidgets('rule is border-subtle and hover keeps the field fill', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, expandedBox(expanded: false));
+      expect(_painter(tester).rule, theme.borderStrong(1));
+
+      await pumpCarbon(tester, expandedBox(expanded: true));
+      expect(_painter(tester).rule, theme.borderSubtle(1));
+
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: tester.getCenter(find.byKey(_box)));
+      await tester.pump();
+      expect(_fill(tester), theme.field(1));
+    });
+  });
+
   group('CarbonFieldBox', () {
     testWidgets('min height is 32 compact and 48 touch at text scale 1', (
       tester,
@@ -119,13 +150,13 @@ void main() {
 
     testWidgets('invalid shows the error glyph and outline', (tester) async {
       await pumpCarbon(tester, _field(invalid: true));
-      expect(_icons(tester), <CarbonIcons>[CarbonIcons.errorFilled]);
+      expect(_icons(tester), <CarbonIcons>[CarbonIcons.warningFilled]);
       final colors = CarbonThemeData().colors;
       expect(_painter(tester).outline, colors.supportError);
 
       await pumpCarbon(tester, _field(invalid: true, focused: true));
       expect(_painter(tester).outline, colors.focus);
-      expect(_icons(tester), <CarbonIcons>[CarbonIcons.errorFilled]);
+      expect(_icons(tester), <CarbonIcons>[CarbonIcons.warningFilled]);
     });
 
     testWidgets('warn shows the warning glyph without an outline', (
@@ -188,11 +219,11 @@ void main() {
         tester.getRect(find.byKey(const Key('action'))).left,
         tester.getRect(find.byKey(_box)).left,
       );
-      // Content starts after the start padding on the right in RTL.
-      final theme = CarbonThemeData();
+      // Content starts after the start padding on the right in RTL: Carbon's
+      // text-input.scss pads fields by spacing-05 (16px) at every density.
       expect(
         tester.getRect(find.text('Value')).right,
-        tester.getRect(find.byKey(_box)).right - theme.controlPaddingX,
+        tester.getRect(find.byKey(_box)).right - 16,
       );
     });
   });

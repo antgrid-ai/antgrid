@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../foundations/icons.dart';
@@ -73,6 +75,14 @@ class CarbonToggle extends StatelessWidget {
 
   static void _ignore() {}
 
+  /// Carbon puts 16px between the label and the switch (toggle.scss:29-34).
+  /// The track is centred in a taller target, so the label's own padding is
+  /// what is left once that slack is counted.
+  double _labelGap(CarbonThemeData theme) {
+    final slack = (theme.minTarget - (small ? 16 : 24)) / 2;
+    return math.max(0, CarbonSpacing.spacing05 - slack);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
@@ -129,7 +139,9 @@ class CarbonToggle extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               CarbonFocusRing(
-                visible: state.focusVisible,
+                // :active draws the outline under pointer use too
+                // (toggle.scss:84).
+                visible: state.focusVisible || state.pressed,
                 borderRadius: BorderRadius.all(
                   small ? const Radius.circular(8) : CarbonShape.toggle,
                 ),
@@ -167,8 +179,8 @@ class CarbonToggle extends StatelessWidget {
             ExcludeSemantics(
               excluding: !labelNamesSwitch,
               child: Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  bottom: CarbonSpacing.spacing02,
+                padding: EdgeInsetsDirectional.only(
+                  bottom: _labelGap(theme),
                 ),
                 child: labelWidget,
               ),
@@ -218,10 +230,7 @@ class _ToggleTrack extends StatelessWidget {
       handleColor = colors.iconOnColor;
     }
 
-    final duration = CarbonMotion.resolve(
-      context,
-      small ? CarbonMotion.fast01 : CarbonMotion.fast02,
-    );
+    final duration = CarbonMotion.resolve(context, CarbonMotion.fast01);
     final radius = BorderRadius.all(Radius.circular(height / 2));
     final glyphSize = handle - 4;
 
@@ -249,7 +258,9 @@ class _ToggleTrack extends StatelessWidget {
     return SizedBox(
       width: width,
       height: height,
-      child: DecoratedBox(
+      child: AnimatedContainer(
+        duration: duration,
+        curve: CarbonMotion.exit,
         decoration: BoxDecoration(
           color: trackColor,
           borderRadius: radius,
@@ -259,7 +270,7 @@ class _ToggleTrack extends StatelessWidget {
           padding: const EdgeInsets.all(inset),
           child: AnimatedAlign(
             duration: duration,
-            curve: CarbonMotion.standard,
+            curve: CarbonMotion.exit,
             alignment: value
                 ? AlignmentDirectional.centerEnd
                 : AlignmentDirectional.centerStart,

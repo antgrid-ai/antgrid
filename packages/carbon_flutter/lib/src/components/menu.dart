@@ -13,6 +13,7 @@ import '../primitives/focus_ring.dart';
 import '../primitives/interaction.dart';
 import '../primitives/option.dart';
 import '../primitives/popup.dart';
+import 'tooltip.dart';
 
 /// One row, group or rule in a [CarbonMenu].
 ///
@@ -292,6 +293,8 @@ class _MenuHost {
   bool closeOnToggle = true;
   double minWidth = 160;
   double maxWidth = 320;
+  double? rowHeight;
+  bool border = false;
 
   void closeAll() => root.close();
 
@@ -344,6 +347,8 @@ class CarbonMenu extends StatefulWidget {
     this.maxWidth = 320,
     this.gap = 0,
     this.closeOnToggle = true,
+    this.rowHeight,
+    this.border = false,
     this.restoreFocus,
     this.onDismissed,
     this.semanticLabel,
@@ -360,6 +365,15 @@ class CarbonMenu extends StatefulWidget {
   final double maxWidth;
   final double gap;
   final bool closeOnToggle;
+
+  /// The height of an item row; null uses the density's control height.
+  /// Triggers pass their own height so rows match it, as Carbon's menu sizes
+  /// do.
+  final double? rowHeight;
+
+  /// Draws Carbon's optional 1px `border-subtle` outline around the panel. The
+  /// default is the shadow alone.
+  final bool border;
 
   /// Where focus returns when the menu closes with focus inside it. Defaults
   /// to whatever held focus when the menu opened.
@@ -403,6 +417,8 @@ class _CarbonMenuState extends State<CarbonMenu> {
     _host.closeOnToggle = widget.closeOnToggle;
     _host.minWidth = widget.minWidth;
     _host.maxWidth = widget.maxWidth;
+    _host.rowHeight = widget.rowHeight;
+    _host.border = widget.border;
     final host = _host;
     // Outside taps are judged here rather than by the popup because a submenu
     // is a second popup: a tap inside it is outside the root popup's own
@@ -761,7 +777,9 @@ class _MenuPanelState extends State<_MenuPanel> {
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: theme.layer(level),
-            border: Border.all(color: theme.borderSubtle(level)),
+            border: widget.host.border
+                ? Border.all(color: theme.borderSubtle(level))
+                : null,
             boxShadow: <BoxShadow>[
               BoxShadow(
                 color: theme.colors.shadow,
@@ -773,13 +791,18 @@ class _MenuPanelState extends State<_MenuPanel> {
           child: SingleChildScrollView(
             key: _viewportKey,
             controller: _scroll,
-            child: IntrinsicWidth(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  for (var i = 0; i < _flat.length; i++)
-                    _buildRow(context, theme, level, i, hasCheck, hasIcon),
-                ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                vertical: CarbonSpacing.spacing02,
+              ),
+              child: IntrinsicWidth(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    for (var i = 0; i < _flat.length; i++)
+                      _buildRow(context, theme, level, i, hasCheck, hasIcon),
+                  ],
+                ),
               ),
             ),
           ),
@@ -831,6 +854,8 @@ class _MenuPanelState extends State<_MenuPanel> {
           node: _node(index),
           hasCheck: hasCheck,
           hasIcon: hasIcon,
+          rowHeight: widget.host.rowHeight,
+          maxWidth: widget.host.maxWidth,
           onPressed: flat.enabled ? () => widget.host.activate(flat) : null,
           onFocused: () => _reveal(_node(index)),
         );
@@ -848,6 +873,8 @@ class _MenuPanelState extends State<_MenuPanel> {
               node: node,
               hasCheck: hasCheck,
               hasIcon: hasIcon,
+              maxWidth: widget.host.maxWidth,
+              rowHeight: widget.host.rowHeight,
               submenuOpen: controller.isOpen,
               submenuFlipped: flipped,
               onPressed: flat.enabled
@@ -893,6 +920,8 @@ class _MenuRow extends StatelessWidget {
     required this.node,
     required this.hasCheck,
     required this.hasIcon,
+    required this.rowHeight,
+    required this.maxWidth,
     required this.onPressed,
     required this.onFocused,
     this.submenuOpen = false,
@@ -904,11 +933,51 @@ class _MenuRow extends StatelessWidget {
   final FocusNode node;
   final bool hasCheck;
   final bool hasIcon;
+  final double? rowHeight;
+  final double maxWidth;
   final VoidCallback? onPressed;
   final VoidCallback onFocused;
   final bool submenuOpen;
   final bool submenuFlipped;
   final Widget? submenuAnchor;
+
+  /// Longest a shortcut may grow before it ellipsises; the label keeps the
+  /// rest of the row.
+  static const double _shortcutCap = 160;
+
+  double _textWidth(BuildContext context, String text, TextStyle style) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
+  // Measured rather than read from a LayoutBuilder because the panel sizes
+  // itself with IntrinsicWidth, which cannot answer for a LayoutBuilder.
+  bool _labelTruncates(
+    BuildContext context,
+    TextStyle style,
+    double iconSize,
+    bool isSubmenu,
+  ) {
+    final slots = (hasCheck ? 1 : 0) + (hasIcon ? 1 : 0) + (isSubmenu ? 1 : 0);
+    final shortcut = flat.shortcut;
+    final shortcutWidth = shortcut == null
+        ? 0.0
+        : CarbonSpacing.spacing03 +
+              math.min(_textWidth(context, shortcut, style), _shortcutCap);
+    final available =
+        maxWidth -
+        2 * CarbonSpacing.spacing05 -
+        slots * (iconSize + CarbonSpacing.spacing03) -
+        shortcutWidth;
+    return _textWidth(context, flat.label, style) > available + 0.5;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -945,9 +1014,9 @@ class _MenuRow extends StatelessWidget {
         final Color background;
         if (filledDanger) {
           background = colors.buttonDangerPrimary;
-        } else if (state.pressed) {
-          background = theme.layerActive(level);
-        } else if (state.hovered || submenuOpen) {
+        } else if (state.hovered || state.pressed || submenuOpen) {
+          // Carbon's menu item has no active rule, so a press keeps the hover
+          // fill.
           background = theme.layerHover(level);
         } else {
           background = const Color(0x00000000);
@@ -960,11 +1029,7 @@ class _MenuRow extends StatelessWidget {
             : emphasised
             ? colors.textPrimary
             : colors.textSecondary;
-        final Color secondary = !enabled
-            ? colors.textDisabled
-            : filledDanger
-            ? colors.textOnColor
-            : colors.textSecondary;
+        final Color secondary = foreground;
         final Color iconColor = !enabled
             ? colors.iconDisabled
             : filledDanger
@@ -974,6 +1039,10 @@ class _MenuRow extends StatelessWidget {
             : colors.iconSecondary;
         final style = theme.typography.control;
         final iconSize = theme.iconSize;
+        final height = rowHeight ?? theme.controlHeight;
+        // Rows grow with enlarged text; at normal scale a long label is cut
+        // off so every row keeps its height.
+        final singleLine = MediaQuery.textScalerOf(context).scale(1) <= 1;
 
         Widget slot(Widget? child) => SizedBox(
           width: iconSize,
@@ -986,17 +1055,31 @@ class _MenuRow extends StatelessWidget {
                 ),
         );
 
+        final labelText = Text(
+          flat.label,
+          maxLines: singleLine ? 1 : null,
+          overflow: singleLine ? TextOverflow.ellipsis : null,
+          style: style.copyWith(color: foreground),
+        );
+        // The tooltip owns a focus node, so only a label that needs it pays
+        // for one.
+        final truncated =
+            singleLine && _labelTruncates(context, style, iconSize, isSubmenu);
+
         return CarbonFocusRing(
           visible: state.focusVisible,
           onColor: filledDanger,
           child: ColoredBox(
             color: background,
             child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: theme.controlHeight),
+              constraints: BoxConstraints(minHeight: height),
               child: Padding(
-                padding: const EdgeInsets.symmetric(
+                padding: EdgeInsets.symmetric(
                   horizontal: CarbonSpacing.spacing05,
-                  vertical: CarbonSpacing.spacing02,
+                  // The extra-small row has no room for vertical padding.
+                  vertical: height <= CarbonSizes.xs
+                      ? 0
+                      : CarbonSpacing.spacing02,
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
@@ -1014,23 +1097,43 @@ class _MenuRow extends StatelessWidget {
                       const SizedBox(width: CarbonSpacing.spacing03),
                     ],
                     Expanded(
-                      child: Text(
-                        flat.label,
-                        style: style.copyWith(color: foreground),
-                      ),
+                      child: truncated
+                          ? CarbonTooltip(
+                              message: flat.label,
+                              // The row already carries the full label as its
+                              // name.
+                              excludeFromSemantics: true,
+                              child: labelText,
+                            )
+                          : labelText,
                     ),
                     if (flat.shortcut != null) ...<Widget>[
-                      const SizedBox(width: CarbonSpacing.spacing06),
-                      Flexible(
+                      const SizedBox(width: CarbonSpacing.spacing03),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          maxWidth: _shortcutCap,
+                        ),
                         child: Text(
                           flat.shortcut!,
+                          maxLines: singleLine ? 1 : null,
+                          overflow: singleLine ? TextOverflow.ellipsis : null,
                           style: style.copyWith(color: secondary),
                         ),
                       ),
                     ],
                     if (isSubmenu) ...<Widget>[
-                      const SizedBox(width: CarbonSpacing.spacing05),
-                      slot(const CarbonIcon(CarbonIcons.chevronRight)),
+                      const SizedBox(width: CarbonSpacing.spacing03),
+                      // Carbon's filled caret, which the icon set only has
+                      // pointing down; turned to face the submenu's side.
+                      slot(
+                        RotatedBox(
+                          quarterTurns:
+                              Directionality.of(context) == TextDirection.rtl
+                              ? 1
+                              : 3,
+                          child: const CarbonIcon(CarbonIcons.caretDown),
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -1045,12 +1148,15 @@ class _MenuRow extends StatelessWidget {
     if (anchor == null) return interaction;
     return Stack(
       fit: StackFit.passthrough,
+      clipBehavior: Clip.none,
       children: <Widget>[
         interaction,
         PositionedDirectional(
           start: submenuFlipped ? 0 : null,
           end: submenuFlipped ? null : 0,
-          top: 0,
+          // Lifted by the panel's own padding so the submenu's first row lands
+          // level with this row.
+          top: -CarbonSpacing.spacing02,
           width: 1,
           height: 1,
           child: anchor,

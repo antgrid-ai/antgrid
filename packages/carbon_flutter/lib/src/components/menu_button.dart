@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
@@ -20,6 +22,31 @@ typedef _TriggerBuilder =
 
 typedef _Decorator = Widget Function(BuildContext context, Widget menu);
 
+// The height a button of [size] renders at, mirroring CarbonButton so a menu's
+// rows can match their trigger.
+double _buttonHeight(CarbonThemeData theme, CarbonButtonSize? size) {
+  if (size == CarbonButtonSize.extraSmall && !theme.isTouch) {
+    return CarbonSizes.xs;
+  }
+  return math.max(size?.height ?? theme.controlHeight, theme.minTarget);
+}
+
+/// The trigger's chevron: one glyph that turns half a turn as the menu opens,
+/// as Carbon rotates its caret, with no turn under reduced motion.
+class _Chevron extends StatelessWidget {
+  const _Chevron({required this.open});
+
+  final bool open;
+
+  @override
+  Widget build(BuildContext context) => AnimatedRotation(
+    turns: open ? 0.5 : 0,
+    duration: CarbonMotion.resolve(context, CarbonMotion.fast02),
+    curve: CarbonMotion.standard,
+    child: const CarbonIcon(CarbonIcons.chevronDown),
+  );
+}
+
 /// Owns the controller and focus node every menu trigger needs, wires them to
 /// a [CarbonMenu] and rebuilds the trigger as the menu opens and closes.
 class _MenuTrigger extends StatefulWidget {
@@ -27,6 +54,7 @@ class _MenuTrigger extends StatefulWidget {
     required this.entries,
     required this.builder,
     required this.alignment,
+    this.size,
     this.focusNode,
     this.onDismissed,
     this.onOpenChanged,
@@ -38,6 +66,9 @@ class _MenuTrigger extends StatefulWidget {
   final List<CarbonMenuEntry> entries;
   final _TriggerBuilder builder;
   final CarbonPopupAlignment alignment;
+
+  /// The trigger's size; the menu's rows take its height.
+  final CarbonButtonSize? size;
   final FocusNode? focusNode;
   final ValueChanged<CarbonPopupDismissReason>? onDismissed;
   final ValueChanged<bool>? onOpenChanged;
@@ -105,10 +136,14 @@ class _MenuTriggerState extends State<_MenuTrigger> {
   @override
   Widget build(BuildContext context) {
     final open = _controller.isOpen;
+    final size = widget.size;
     final menu = CarbonMenu(
       controller: _controller,
       entries: widget.entries,
       alignment: widget.alignment,
+      rowHeight: size == null
+          ? null
+          : _buttonHeight(CarbonTheme.of(context), size),
       restoreFocus: _node,
       onDismissed: widget.onDismissed,
       semanticLabel: widget.semanticLabel,
@@ -192,6 +227,7 @@ class CarbonMenuButton extends StatelessWidget {
     return _MenuTrigger(
       entries: entries,
       alignment: alignment,
+      size: size,
       focusNode: focusNode,
       onDismissed: onDismissed,
       onOpenChanged: onOpenChanged,
@@ -204,8 +240,10 @@ class CarbonMenuButton extends StatelessWidget {
           label: label,
           kind: kind,
           size: size,
+          // Carbon's 12rem floor on primary and tertiary triggers.
+          minWidth: kind == CarbonButtonKind.ghost ? null : 192,
           focusNode: node,
-          icon: CarbonIcon(open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown),
+          icon: _Chevron(open: open),
           onPressed: enabled ? toggle : null,
         ),
       ),
@@ -266,26 +304,47 @@ class CarbonOverflowMenu extends StatelessWidget {
     return _MenuTrigger(
       entries: entries,
       alignment: alignment,
+      size: size,
       focusNode: focusNode,
       onDismissed: onDismissed,
       onOpenChanged: onOpenChanged,
       semanticLabel: menuLabel ?? name,
       enabled: enabled,
-      builder: (context, open, toggle, node, controls) => _expandable(
-        open,
-        controls,
-        CarbonButton.iconOnly(
-          icon: CarbonIcon(
-            horizontal
-                ? CarbonIcons.overflowMenuHorizontal
-                : CarbonIcons.overflowMenuVertical,
+      builder: (context, open, toggle, node, controls) {
+        final theme = CarbonTheme.of(context);
+        return _expandable(
+          open,
+          controls,
+          // The open trigger takes the menu's layer and shadow so the two
+          // read as one surface. The wrapper is always present so opening
+          // never remounts the button.
+          DecoratedBox(
+            decoration: open
+                ? BoxDecoration(
+                    color: theme.layer(CarbonLayer.of(context)),
+                    boxShadow: <BoxShadow>[
+                      BoxShadow(
+                        color: theme.colors.shadow,
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  )
+                : const BoxDecoration(),
+            child: CarbonButton.iconOnly(
+              icon: CarbonIcon(
+                horizontal
+                    ? CarbonIcons.overflowMenuHorizontal
+                    : CarbonIcons.overflowMenuVertical,
+              ),
+              semanticLabel: name,
+              size: size,
+              focusNode: node,
+              onPressed: enabled ? toggle : null,
+            ),
           ),
-          semanticLabel: name,
-          size: size,
-          focusNode: node,
-          onPressed: enabled ? toggle : null,
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -352,9 +411,16 @@ class CarbonSplitButton extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final triggerName =
         menuTriggerLabel ?? CarbonLocalizations.of(context).openMenu;
+    // Carbon keeps the whole control at 160 px or more: the action takes what
+    // the square trigger and the 1px rule leave, never under 111 px.
+    final actionMinWidth = math.max(
+      111.0,
+      160 - CarbonBorders.hairline - _buttonHeight(theme, size),
+    );
     return _MenuTrigger(
       entries: entries,
       alignment: alignment,
+      size: size,
       focusNode: triggerFocusNode,
       onDismissed: onDismissed,
       onOpenChanged: onOpenChanged,
@@ -368,12 +434,16 @@ class CarbonSplitButton extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Flexible(
-              child: CarbonButton(
-                label: label,
-                kind: kind,
-                size: size,
-                focusNode: focusNode,
-                onPressed: onPressed,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 239),
+                child: CarbonButton(
+                  label: label,
+                  kind: kind,
+                  size: size,
+                  minWidth: actionMinWidth,
+                  focusNode: focusNode,
+                  onPressed: onPressed,
+                ),
               ),
             ),
             SizedBox(
@@ -388,9 +458,7 @@ class CarbonSplitButton extends StatelessWidget {
           open,
           controls,
           CarbonButton.iconOnly(
-            icon: CarbonIcon(
-              open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown,
-            ),
+            icon: _Chevron(open: open),
             semanticLabel: triggerName,
             kind: kind,
             size: size,

@@ -282,7 +282,6 @@ class _NotificationCardState extends State<_NotificationCard> {
         accent = high ? colors.supportErrorInverse : colors.supportError;
     }
     textColor = high ? colors.textInverse : colors.textPrimary;
-    final captionColor = high ? colors.textInverse : colors.textSecondary;
     final glyphInner = kind == CarbonNotificationKind.warning
         ? _warningGlyph
         : background;
@@ -294,10 +293,27 @@ class _NotificationCardState extends State<_NotificationCard> {
       controlTheme = theme.copyWith(scheme: _inverseScheme(theme.scheme));
     }
 
-    final iconSize = theme.iconSize;
+    // Carbon's sizes are the compact ones; touch keeps the density's own icon
+    // and text so finger-use layouts do not shrink.
+    final compact = !theme.isTouch;
+    final stacked = widget.stacked;
+    final iconSize = compact ? 20.0 : theme.iconSize;
     final lineHeight = (type.body.height ?? 1.4) * (type.body.fontSize ?? 14);
     final titleStyle = type.heading.copyWith(color: textColor);
-    final bodyStyle = type.body.copyWith(color: textColor);
+    final bodyStyle = (compact ? type.control : type.body).copyWith(
+      color: textColor,
+    );
+    // Carbon puts the icon 14 px (16 in a toast) below the top edge and the
+    // text 15 px (16) below it, so the card's own padding is the smaller of
+    // the two and the text takes the difference.
+    final topPad = compact
+        ? (stacked ? CarbonSpacing.spacing05 : 14.0)
+        : CarbonSpacing.spacing04;
+    final textExtraTop = compact && !stacked ? 1.0 : 0.0;
+    final bottomPad = compact
+        ? (stacked ? CarbonSpacing.spacing05 : 15.0)
+        : CarbonSpacing.spacing04;
+    final closeGap = stacked ? CarbonSpacing.spacing05 : 13.0;
 
     final title = widget.title;
     final subtitle = widget.subtitle;
@@ -315,7 +331,7 @@ class _NotificationCardState extends State<_NotificationCard> {
               padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
               child: Text(
                 caption,
-                style: type.helper.copyWith(color: captionColor),
+                style: bodyStyle,
               ),
             ),
         ],
@@ -342,7 +358,9 @@ class _NotificationCardState extends State<_NotificationCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: EdgeInsets.only(top: math.max(0, (lineHeight - iconSize) / 2)),
+            padding: EdgeInsets.only(
+              top: compact ? 0 : math.max(0, (lineHeight - iconSize) / 2),
+            ),
             child: CarbonIcon(
               _icon,
               size: iconSize,
@@ -352,7 +370,12 @@ class _NotificationCardState extends State<_NotificationCard> {
             ),
           ),
           const SizedBox(width: CarbonSpacing.spacing05),
-          Expanded(child: text),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(top: textExtraTop),
+              child: text,
+            ),
+          ),
         ],
       ),
     );
@@ -374,8 +397,31 @@ class _NotificationCardState extends State<_NotificationCard> {
           border: BorderDirectional(
             start: BorderSide(color: accent, width: CarbonBorders.selectedTab),
           ),
+          boxShadow: stacked
+              ? const [
+                  BoxShadow(
+                    color: Color(0x33000000),
+                    offset: Offset(0, 2),
+                    blurRadius: 6,
+                  ),
+                ]
+              : null,
         ),
-        child: ConstrainedBox(
+        // Carbon outlines the low-contrast inline card in its support colour
+        // at 40% on every edge but the accent bar's. Painted over the card, so
+        // it takes no layout space.
+        child: DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: BoxDecoration(
+            border: high || stacked
+                ? null
+                : BorderDirectional(
+                    top: BorderSide(color: accent.withValues(alpha: 0.4)),
+                    end: BorderSide(color: accent.withValues(alpha: 0.4)),
+                    bottom: BorderSide(color: accent.withValues(alpha: 0.4)),
+                  ),
+          ),
+          child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: closeSize),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -384,9 +430,9 @@ class _NotificationCardState extends State<_NotificationCard> {
                 child: Padding(
                   padding: EdgeInsetsDirectional.only(
                     start: CarbonSpacing.spacing05 - CarbonBorders.selectedTab,
-                    end: onClose == null ? CarbonSpacing.spacing05 : 0,
-                    top: CarbonSpacing.spacing04,
-                    bottom: CarbonSpacing.spacing04,
+                    end: onClose == null ? CarbonSpacing.spacing05 : closeGap,
+                    top: topPad,
+                    bottom: bottomPad,
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -422,12 +468,14 @@ class _NotificationCardState extends State<_NotificationCard> {
                   child: CarbonButton.iconOnly(
                     icon: const CarbonIcon(CarbonIcons.close),
                     semanticLabel: loc.dismissNotification,
+                    hoverFill: false,
                     size: theme.isTouch ? null : CarbonButtonSize.large,
                     onPressed: onClose,
                   ),
                 ),
             ],
           ),
+        ),
         ),
       ),
     );
@@ -567,7 +615,7 @@ class CarbonToastOverlay extends StatelessWidget {
     required this.controller,
     required this.child,
     this.alignment = AlignmentDirectional.topEnd,
-    this.maxWidth = 320,
+    this.maxWidth = 288,
     this.maxVisible = 4,
     this.hiddenLabel,
   });
@@ -613,7 +661,11 @@ class CarbonToastOverlay extends StatelessWidget {
                   alignment: alignment,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(maxWidth: maxWidth),
+                    // Unclipped so the shadow paints past the cards without
+                    // widening the area that swallows taps meant for the app
+                    // underneath.
                     child: SingleChildScrollView(
+                      clipBehavior: Clip.none,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,

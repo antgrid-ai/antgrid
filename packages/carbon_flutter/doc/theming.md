@@ -74,7 +74,6 @@ CarbonTheme(data: theme, density: CarbonDensity.touch, child: ...)
 | Large control | 48 | 64 |
 | Minimum target | 32 | `touchTarget` (48) |
 | Icon size | 16 | 20 |
-| Control padding | 12 | 16 |
 | Control text | 14 | 16 |
 | Label and helper text | 12 | 14 |
 

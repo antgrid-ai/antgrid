@@ -49,12 +49,13 @@ class CarbonModalAction {
   final FocusNode? focusNode;
   final String? semanticLabel;
 
-  CarbonModalAction _withKind(CarbonButtonKind kind) => CarbonModalAction(
+  CarbonModalAction _withKind(CarbonButtonKind kind, {bool? autofocus}) =>
+      CarbonModalAction(
     label: label,
     onPressed: onPressed,
     kind: kind,
     busy: busy,
-    autofocus: autofocus,
+    autofocus: autofocus ?? this.autofocus,
     focusNode: focusNode,
     semanticLabel: semanticLabel,
   );
@@ -143,6 +144,11 @@ EdgeInsets _safeInsets(BuildContext context) {
   );
 }
 
+// Carbon's expressive set, which its modal uses both ways (`motion(entrance,
+// expressive)` and `motion(exit, expressive)` in `_modal.scss`).
+const Curve _expressiveEntrance = Cubic(0, 0, 0.3, 1);
+const Curve _expressiveExit = Cubic(0.4, 0.14, 1, 1);
+
 Widget _enter(BuildContext context, Animation<double> animation, Widget child) {
   if (CarbonMotion.reduced(context)) return child;
   return AnimatedBuilder(
@@ -150,8 +156,8 @@ Widget _enter(BuildContext context, Animation<double> animation, Widget child) {
     child: child,
     builder: (context, child) {
       final curve = animation.status == AnimationStatus.reverse
-          ? CarbonMotion.exit
-          : CarbonMotion.entrance;
+          ? _expressiveExit
+          : _expressiveEntrance;
       final t = curve.transform(animation.value.clamp(0.0, 1.0));
       return Opacity(
         opacity: t,
@@ -300,7 +306,11 @@ class CarbonModal extends StatelessWidget {
     this.showCloseButton = true,
     this.semanticLabel,
   }) : actions = <CarbonModalAction>[
-         secondary._withKind(CarbonButtonKind.secondary),
+         // Carbon opens a danger dialog on its safe (secondary) button.
+         secondary._withKind(
+           CarbonButtonKind.secondary,
+           autofocus: secondary.autofocus || (danger && !primary.autofocus),
+         ),
          primary._withKind(
            danger ? CarbonButtonKind.danger : CarbonButtonKind.primary,
          ),
@@ -364,9 +374,14 @@ class CarbonModal extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (label != null)
-                  Text(
-                    label!,
-                    style: type.label.copyWith(color: colors.textSecondary),
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      bottom: CarbonSpacing.spacing02,
+                    ),
+                    child: Text(
+                      label!,
+                      style: type.label.copyWith(color: colors.textSecondary),
+                    ),
                   ),
                 Semantics(
                   header: true,
@@ -385,7 +400,11 @@ class CarbonModal extends StatelessWidget {
               top: 0,
               end: 0,
               child: CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.close),
+                icon: CarbonIcon(
+                  CarbonIcons.close,
+                  size: theme.isTouch ? null : 20,
+                ),
+                iconSize: theme.isTouch ? null : 20,
                 semanticLabel: loc.close,
                 size: theme.isTouch ? null : CarbonButtonSize.large,
                 onPressed: () => _close(context),
@@ -398,9 +417,9 @@ class CarbonModal extends StatelessWidget {
     final bodyView = SingleChildScrollView(
       padding: const EdgeInsetsDirectional.fromSTEB(
         CarbonSpacing.spacing05,
-        CarbonSpacing.spacing02,
+        CarbonSpacing.spacing03,
         CarbonSpacing.spacing05,
-        CarbonSpacing.spacing06,
+        CarbonSpacing.spacing09,
       ),
       child: DefaultTextStyle.merge(
         style: type.body.copyWith(color: colors.textPrimary),
@@ -408,9 +427,17 @@ class CarbonModal extends StatelessWidget {
       ),
     );
 
+    // Each footer button takes half the width (a quarter with three) and the
+    // group packs to the end edge, so a lone action sits in the right half.
+    final footerShare = actions.length == 3
+        ? 0.75
+        : math.min(1.0, actions.length * 0.5);
     final footer = actions.isEmpty
         ? null
-        : CarbonButtonSet(
+        : FractionallySizedBox(
+            widthFactor: footerShare,
+            alignment: AlignmentDirectional.centerEnd,
+            child: CarbonButtonSet(
             alignment: CarbonButtonSetAlignment.fill,
             children: [
               for (final action in actions)
@@ -425,7 +452,7 @@ class CarbonModal extends StatelessWidget {
                   onPressed: action.onPressed,
                 ),
             ],
-          );
+          ));
 
     return Semantics(
       scopesRoute: true,
@@ -442,6 +469,10 @@ class CarbonModal extends StatelessWidget {
             width: width,
             height: fullScreen && boundedHeight ? constraints.maxHeight : null,
             child: CarbonLayerSurface(
+              // The surface paints its outline under its child, so the 1px
+              // inset keeps the header, body and buttons off it.
+              border: true,
+              padding: const EdgeInsets.all(CarbonBorders.hairline),
               child: _ModalLayout(
                 fullScreen: fullScreen,
                 header: header,
@@ -695,7 +726,7 @@ class _CarbonModalRoute<T> extends RawDialogRoute<T> {
   @override
   Duration get reverseTransitionDuration => transitionDuration == Duration.zero
       ? Duration.zero
-      : CarbonMotion.fast02;
+      : CarbonMotion.moderate02;
 
   @override
   void dispose() {

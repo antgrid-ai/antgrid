@@ -119,7 +119,11 @@ class _CarbonInlineLoadingState extends State<CarbonInlineLoading> {
       ),
     };
 
-    final style = theme.typography.body.copyWith(color: colors.textSecondary);
+    // label-02 in Carbon's compact sizes; touch keeps its body text.
+    final style = (theme.isTouch
+            ? theme.typography.body
+            : theme.typography.control)
+        .copyWith(color: colors.textSecondary);
     final text = description;
     // Center the 16px box on the first text line, so a wrapped description
     // keeps its indicator at the top.
@@ -142,13 +146,16 @@ class _CarbonInlineLoadingState extends State<CarbonInlineLoading> {
       CarbonInlineLoadingStatus.error => statusLabel ?? loc.error,
     };
 
+    // Carbon renders no indicator container when inactive, so the description
+    // starts at the edge instead of after an empty slot.
+    final inactive = status == CarbonInlineLoadingStatus.inactive;
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        box,
+        if (!inactive) box,
         if (text != null) ...[
-          const SizedBox(width: CarbonSpacing.spacing03),
+          if (!inactive) const SizedBox(width: CarbonSpacing.spacing03),
           Flexible(child: Text(text, style: style)),
         ],
       ],
@@ -178,7 +185,10 @@ class _CarbonInlineLoadingState extends State<CarbonInlineLoading> {
         spacing: CarbonSpacing.spacing03,
         runSpacing: CarbonSpacing.spacing02,
         children: [
-          announced,
+          ConstrainedBox(
+            constraints: BoxConstraints(minHeight: theme.isTouch ? 0 : 32),
+            child: Center(widthFactor: 1, child: announced),
+          ),
           if (showRetry)
             CarbonButton(
               label: widget.retryLabel ?? loc.retry,

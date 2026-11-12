@@ -47,6 +47,9 @@ enum CarbonTextInputVariant {
   multiline,
 }
 
+/// Which Carbon role a [CarbonFieldAction] fills with while pressed.
+enum CarbonFieldActionPress { selected, active }
+
 /// An icon action that lives inside a field, such as clear or reveal.
 ///
 /// It has its own focus stop and its own target: at least
@@ -59,6 +62,7 @@ class CarbonFieldAction extends StatelessWidget {
     required this.semanticLabel,
     this.onPressed,
     this.focusNode,
+    this.pressedFill = CarbonFieldActionPress.selected,
   });
 
   /// Usually a `CarbonIcon`; it inherits the field's icon size and color.
@@ -71,6 +75,10 @@ class CarbonFieldAction extends StatelessWidget {
   final VoidCallback? onPressed;
 
   final FocusNode? focusNode;
+
+  /// The fill while pressed: Carbon's search close button uses
+  /// `$background-selected`, the password toggle `$background-active`.
+  final CarbonFieldActionPress pressedFill;
 
   @override
   Widget build(BuildContext context) {
@@ -86,7 +94,7 @@ class CarbonFieldAction extends StatelessWidget {
         excludeChildSemantics: true,
         builder: (context, state, _) {
           return CarbonFocusRing(
-            visible: state.focusVisible,
+            visible: state.focusVisible || state.pressed,
             child: ConstrainedBox(
               constraints: BoxConstraints(
                 minWidth: theme.minTarget,
@@ -97,7 +105,14 @@ class CarbonFieldAction extends StatelessWidget {
               child: Padding(
                 padding: inset?.insets ?? EdgeInsets.zero,
                 child: ColoredBox(
-                  color: state.hovered
+                  color: state.pressed
+                      ? switch (pressedFill) {
+                          CarbonFieldActionPress.selected =>
+                            theme.colors.backgroundSelected,
+                          CarbonFieldActionPress.active =>
+                            theme.colors.backgroundActive,
+                        }
+                      : state.hovered
                       ? theme.layerHover(level)
                       : const Color(0x00000000),
                   child: Center(
@@ -154,11 +169,19 @@ class CarbonActionFieldBox extends StatelessWidget {
     this.warn = false,
     this.minHeight,
     this.crossAxisAlignment = CrossAxisAlignment.center,
+    this.hoverable = true,
+    this.startPadding,
   });
 
   final Widget child;
   final Widget? leading;
   final Widget? trailing;
+
+  /// See [CarbonFieldBox.hoverable].
+  final bool hoverable;
+
+  /// See [CarbonFieldBox.startPadding].
+  final double? startPadding;
 
   /// [CarbonFieldAction]s, first to last from the content toward the end
   /// edge.
@@ -186,7 +209,7 @@ class CarbonActionFieldBox extends StatelessWidget {
     final reserve = actions.isEmpty
         ? 0.0
         : actions.length * theme.minTarget -
-              theme.controlPaddingX -
+              CarbonFieldBox.paddingX -
               CarbonSpacing.spacing03;
     final top = crossAxisAlignment == CrossAxisAlignment.start;
     final outline = focused || invalid || warn
@@ -213,6 +236,8 @@ class CarbonActionFieldBox extends StatelessWidget {
           warn: warn,
           minHeight: minHeight,
           crossAxisAlignment: crossAxisAlignment,
+          hoverable: hoverable,
+          startPadding: startPadding,
           child: child,
         ),
         if (actions.isNotEmpty)
@@ -560,7 +585,10 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     ];
 
     final foreground = enabled ? colors.textPrimary : colors.textDisabled;
-    final controlStyle = type.control.copyWith(color: foreground);
+    // Carbon's text area is body-01 (14/20); the single-line input is
+    // body-compact-01.
+    final baseStyle = multiline ? type.body : type.control;
+    final controlStyle = baseStyle.copyWith(color: foreground);
     final maxLength = widget.maxLength;
 
     final textField = TextField(
@@ -602,7 +630,7 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       cursorWidth: 1,
       decoration: InputDecoration.collapsed(
         hintText: widget.placeholder,
-        hintStyle: type.control.copyWith(
+        hintStyle: baseStyle.copyWith(
           color: enabled ? colors.textPlaceholder : colors.textDisabled,
         ),
       ),
@@ -636,8 +664,8 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       counter = ExcludeSemantics(
         child: Text(
           '$_length/$maxLength',
-          style: type.helper.copyWith(
-            color: enabled ? colors.textHelper : colors.textDisabled,
+          style: type.label.copyWith(
+            color: enabled ? colors.textSecondary : colors.textDisabled,
           ),
         ),
       );
@@ -651,16 +679,17 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
           semanticLabel: messages.clear,
           onPressed: _clear,
         ),
-      if (password && enabled)
+      if (password)
         CarbonFieldAction(
           key: const ValueKey<String>('reveal'),
+          pressedFill: CarbonFieldActionPress.active,
           icon: CarbonIcon(
             _revealed ? CarbonIcons.viewOff : CarbonIcons.view,
           ),
           semanticLabel: _revealed
               ? messages.hidePassword
               : messages.showPassword,
-          onPressed: _toggleReveal,
+          onPressed: enabled ? _toggleReveal : null,
         ),
     ];
 
@@ -690,7 +719,11 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
     }
     if (multiline) {
       content = Padding(
-        padding: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing02),
+        // With the box's own 4px: Carbon's 11px above and 8px below.
+        padding: const EdgeInsets.only(
+          top: CarbonSpacing.spacing02 + 3,
+          bottom: CarbonSpacing.spacing02,
+        ),
         child: content,
       );
     }
@@ -711,6 +744,7 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
         invalid: error != null,
         warn: warning != null,
         minHeight: height,
+        hoverable: false,
         crossAxisAlignment: multiline
             ? CrossAxisAlignment.start
             : CrossAxisAlignment.center,

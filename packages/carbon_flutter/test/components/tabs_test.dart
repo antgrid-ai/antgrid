@@ -159,7 +159,7 @@ void main() {
       expect(log, ['c']);
     });
 
-    testWidgets('icons show before the label', (tester) async {
+    testWidgets('icons show after the label', (tester) async {
       await pumpCarbon(
         tester,
         CarbonTabs<String>(
@@ -177,7 +177,7 @@ void main() {
       expect(find.byType(CarbonIcon), findsOneWidget);
       expect(
         tester.getTopLeft(find.byType(CarbonIcon)).dx,
-        lessThan(tester.getTopLeft(find.text('Settings')).dx),
+        greaterThan(tester.getTopLeft(find.text('Settings')).dx),
       );
     });
   });
@@ -422,14 +422,20 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      expect(find.bySemanticsLabel('Scroll back'), findsOneWidget);
+      // Carbon hides a button while there is nothing to scroll that way.
+      expect(find.bySemanticsLabel('Scroll back'), findsNothing);
       expect(find.bySemanticsLabel('Scroll forward'), findsOneWidget);
       final before = tester.getTopLeft(find.text('Tab number 0')).dx;
       await tester.tap(find.bySemanticsLabel('Scroll forward'));
       await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Scroll back'), findsOneWidget);
       expect(tester.getTopLeft(find.text('Tab number 0')).dx, lessThan(before));
-      await tester.tap(find.bySemanticsLabel('Scroll back'));
-      await tester.pumpAndSettle();
+      // The viewport is narrower while the back button shows, so a page back
+      // can stop short of the start; the button hides once it gets there.
+      for (var i = 0; i < 3 && find.bySemanticsLabel('Scroll back').evaluate().isNotEmpty; i++) {
+        await tester.tap(find.bySemanticsLabel('Scroll back'));
+        await tester.pumpAndSettle();
+      }
       expect(tester.getTopLeft(find.text('Tab number 0')).dx, before);
       handle.dispose();
     });
@@ -513,7 +519,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      expect(find.byType(CarbonIcon), findsNWidgets(2));
+      expect(find.byType(CarbonIcon), findsNWidgets(1));
       await pumpCarbon(
         tester,
         _Host(tabs: many, initial: 'tab0'),

@@ -15,8 +15,15 @@ import 'loading.dart';
 // widgets own their own API, this file only holds the popup list and the
 // keyboard helpers they must agree on.
 
-/// How many rows the list shows before it scrolls.
-const int kOptionListMaxRows = 6;
+/// How many rows the list shows before it scrolls. The half row cut off at
+/// the bottom is Carbon's cue that more options sit below (dropdown.scss:358,
+/// list-box.scss:613).
+const double kOptionListMaxRows = 5.5;
+
+/// Height of a list holding [count] rows, border included.
+double optionListHeight(int count, double extent) =>
+    math.min(count.toDouble(), kOptionListMaxRows) * extent +
+    2 * CarbonBorders.hairline;
 
 /// Height of one list row.
 ///
@@ -198,6 +205,15 @@ class CarbonOptionListbox<T> extends StatelessWidget {
   final String? errorText;
   final String? emptyText;
 
+  bool _isSelected(int index) =>
+      selectedValue != null && options[index].value == selectedValue;
+
+  bool _isFilled(int index) =>
+      index >= 0 &&
+      index < options.length &&
+      (_isSelected(index) ||
+          (index == activeIndex && options[index].enabled));
+
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
@@ -230,7 +246,6 @@ class CarbonOptionListbox<T> extends StatelessWidget {
 
     final leading = status == null ? 0 : 1;
     final count = options.length + leading;
-    final rows = math.min(count, kOptionListMaxRows);
     final border = theme.borderSubtle(level);
 
     return DecoratedBox(
@@ -239,7 +254,7 @@ class CarbonOptionListbox<T> extends StatelessWidget {
         border: Border.all(color: border, width: CarbonBorders.hairline),
       ),
       child: SizedBox(
-        height: rows * extent + 2 * CarbonBorders.hairline,
+        height: optionListHeight(count, extent),
         child: Semantics(
           container: true,
           explicitChildNodes: true,
@@ -254,11 +269,12 @@ class CarbonOptionListbox<T> extends StatelessWidget {
               return _OptionRow<T>(
                 option: options[index],
                 level: level,
-                selected: selectedValue != null &&
-                    options[index].value == selectedValue,
+                selected: _isSelected(index),
                 active: index == activeIndex,
                 keyboardActive: keyboardActive,
-                divider: i > 0,
+                // Carbon blanks the rule on both sides of a filled row so the
+                // fill reads as one block (list-box.scss:750, :813, :835, :865).
+                divider: i > 0 && !_isFilled(index) && !_isFilled(index - 1),
                 onSelect: () => onSelect(index),
                 onHover: () => onHover(index),
               );
@@ -294,7 +310,9 @@ class _StatusRow extends StatelessWidget {
         child: SizedBox(
           height: extent,
           child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: theme.controlPaddingX),
+            padding: const EdgeInsets.symmetric(
+              horizontal: CarbonSpacing.spacing05,
+            ),
             child: Row(
               children: [
                 if (leading != null) ...[
@@ -362,13 +380,16 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
     final highlighted = active && enabled;
     final pressed = _pressed && enabled;
 
+    // The keyboard highlight is only the focus outline (list-box.scss:829); the
+    // hover fill belongs to the pointer.
+    final hovered = highlighted && !widget.keyboardActive;
     final Color? fill = pressed
-        ? theme.layerActive(level)
-        : selected && highlighted
+        ? theme.layerSelected(level)
+        : selected && hovered
         ? theme.layerSelectedHover(level)
         : selected
         ? theme.layerSelected(level)
-        : highlighted
+        : hovered
         ? theme.layerHover(level)
         : null;
     // Carbon dims resting options and brightens the one under the pointer or
@@ -408,21 +429,24 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
             child: CarbonFocusRing(
               visible: highlighted && widget.keyboardActive,
               child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: fill,
-                  border: widget.divider
-                      ? Border(
-                          top: BorderSide(
-                            color: theme.borderSubtle(level),
-                            width: CarbonBorders.hairline,
-                          ),
-                        )
-                      : null,
-                ),
+                decoration: BoxDecoration(color: fill),
+                // The rule sits inside the inset so it stops 16px short of
+                // both edges while the fill stays full width.
                 child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: theme.controlPaddingX,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: CarbonSpacing.spacing05,
                   ),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: widget.divider
+                          ? Border(
+                              top: BorderSide(
+                                color: theme.borderSubtle(level),
+                                width: CarbonBorders.hairline,
+                              ),
+                            )
+                          : null,
+                    ),
                   child: Row(
                     children: [
                       if (option.icon != null) ...[
@@ -475,11 +499,36 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
                       ],
                     ],
                   ),
+                  ),
                 ),
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The field chevron. It turns half a revolution when the list opens rather
+/// than swapping glyphs (list-box.scss:472, :479-483), and a read-only field
+/// keeps it in the disabled colour (select.scss:307).
+class CarbonFieldChevron extends StatelessWidget {
+  const CarbonFieldChevron({super.key, required this.open, this.readOnly = false});
+
+  final bool open;
+  final bool readOnly;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
+    return AnimatedRotation(
+      turns: open ? 0.5 : 0,
+      duration: CarbonMotion.resolve(context, CarbonMotion.fast01),
+      curve: CarbonMotion.standard,
+      child: CarbonIcon(
+        CarbonIcons.chevronDown,
+        color: readOnly ? colors.iconDisabled : null,
       ),
     );
   }

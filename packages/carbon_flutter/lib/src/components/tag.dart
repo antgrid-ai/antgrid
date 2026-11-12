@@ -141,13 +141,16 @@ class CarbonTag extends StatelessWidget {
         background: theme.layer(layerLevel),
         foreground: colors.textDisabled,
         hover: theme.layer(layerLevel),
-        border: colors.borderDisabled,
+        // Only selectable and operational tags are outlined; a read-only or
+        // dismissible one is a plain fill.
+        border: _selectable || operational ? colors.borderDisabled : null,
       );
     } else if (isSelected) {
       palette = _TagPalette(
-        background: colors.backgroundInverse,
+        background: colors.layerSelectedInverse,
         foreground: colors.textInverse,
-        hover: colors.backgroundInverseHover,
+        // Carbon holds the selected fill on hover.
+        hover: colors.layerSelectedInverse,
         border: null,
       );
     } else if (_selectable) {
@@ -165,15 +168,18 @@ class CarbonTag extends StatelessWidget {
 
     final radius = BorderRadius.all(CarbonShape.pill);
     final style = theme.typography.label.copyWith(color: palette.foreground);
-    final padX = size == CarbonTagSize.small
-        ? CarbonSpacing.spacing02
-        : CarbonSpacing.spacing03;
+    final hasIcon = isSelected || icon != null;
+    final large = size == CarbonTagSize.large;
+    final padEnd = large ? CarbonSpacing.spacing04 : CarbonSpacing.spacing03;
+    final padStart = hasIcon
+        ? (large ? CarbonSpacing.spacing03 : CarbonSpacing.spacing02)
+        : padEnd;
 
     Widget content({required bool trailingPad}) {
       return Padding(
         padding: EdgeInsetsDirectional.only(
-          start: padX,
-          end: trailingPad ? padX : 0,
+          start: padStart,
+          end: trailingPad ? padEnd : 0,
         ),
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: size.height),
@@ -186,13 +192,13 @@ class CarbonTag extends StatelessWidget {
                   size: 16,
                   color: palette.foreground,
                 ),
-                const SizedBox(width: CarbonSpacing.spacing01),
+                const SizedBox(width: CarbonSpacing.spacing02),
               ] else if (icon != null) ...[
                 IconTheme(
                   data: IconThemeData(color: palette.foreground, size: 16),
                   child: icon!,
                 ),
-                const SizedBox(width: CarbonSpacing.spacing01),
+                const SizedBox(width: CarbonSpacing.spacing02),
               ],
               Flexible(
                 child: Text(
@@ -266,9 +272,9 @@ class CarbonTag extends StatelessWidget {
       );
     }
     final fixedWidth =
-        padX +
-        (_dismissible ? 0 : padX) +
-        (isSelected || icon != null ? 16 + CarbonSpacing.spacing01 : 0);
+        padStart +
+        (_dismissible ? 0 : padEnd) +
+        (hasIcon ? 16 + CarbonSpacing.spacing02 : 0);
     final mainTarget = main;
     main = LayoutBuilder(
       builder: (context, constraints) => CarbonTooltip(
@@ -338,15 +344,20 @@ class CarbonTag extends StatelessWidget {
       ),
     );
 
-    return Stack(
-      children: [
-        pill,
-        // The row sizes the stack; the pill fill is painted behind it.
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [Flexible(child: main), ?remove],
-        ),
-      ],
+    return ConstrainedBox(
+      // Carbon keeps a tag pill-shaped at 32 and truncates it at 208.
+      constraints: const BoxConstraints(minWidth: 32, maxWidth: 208),
+      child: Stack(
+        alignment: AlignmentDirectional.center,
+        children: [
+          pill,
+          // The row sizes the stack; the pill fill is painted behind it.
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [Flexible(child: main), ?remove],
+          ),
+        ],
+      ),
     );
   }
 }

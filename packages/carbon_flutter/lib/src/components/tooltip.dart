@@ -291,7 +291,6 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   Widget build(BuildContext context) {
     final active = _active;
     final theme = CarbonTheme.of(context);
-    final caretHeight = widget.caret ? _kCaretHeight : 0.0;
 
     return CarbonAnchoredPopup(
       controller: _controller,
@@ -299,7 +298,9 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
       alignment: widget.alignment == CarbonTooltipAlignment.start
           ? CarbonPopupAlignment.start
           : CarbonPopupAlignment.end,
-      gap: CarbonSpacing.spacing02 + caretHeight,
+      // Carbon offsets a caret tooltip 12 px from its trigger, the caret
+      // included.
+      gap: widget.caret ? _kCaretOffset : CarbonSpacing.spacing02,
       maxWidth: widget.maxWidth,
       raiseLayer: false,
       dismissOnEscape: false,
@@ -454,6 +455,7 @@ class _TooltipScope extends InheritedWidget {
 }
 
 const double _kCaretHeight = 6;
+const double _kCaretOffset = 12;
 const double _kCaretWidth = 12;
 
 /// Paints the tooltip's caret on the side facing [anchor], which is decided at

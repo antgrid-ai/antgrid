@@ -28,11 +28,18 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   `CarbonAnchoredPopup` with `CarbonPopupController`, and `CarbonOption`.
 - `CarbonFieldFrame.announceError` keeps an error as a polite live region
   for fields whose status line already carries one (Search uses it).
+- `CarbonFieldBox.paddingX` (16 px text inset), `hoverable` (no hover fill for
+  text input and search) and `startPadding`, the last two also on
+  `CarbonActionFieldBox`, and `expanded` (an open list box
+  draws a `border-subtle` bottom rule).
+- `CarbonFieldAction.pressedFill` with `CarbonFieldActionPress` (`selected` or
+  `active`) for the fill of a pressed field action.
 
 ### Components
 
 - Button: `CarbonButton` (seven kinds, icon-only with tooltip, five sizes,
-  busy) and `CarbonButtonSet`.
+  busy, optional `minWidth`; `iconSize` and `hoverFill` on icon-only buttons)
+  and `CarbonButtonSet`, whose end-aligned row buttons are at least 196 px columns.
 - Text input: `CarbonTextInput` with single-line, password and multiline
   variants, clear and reveal actions, and a counter.
 - Form: `CarbonForm`, `CarbonFormSection`, `CarbonFormActions`,
@@ -42,14 +49,14 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Search: `CarbonSearch` with host-fed busy, error and result count.
 - Select: `CarbonSelect`.
 - Dropdown: `CarbonDropdown` and the searchable `CarbonComboBox`.
-- Checkbox: `CarbonCheckbox` (including indeterminate) and
+- Checkbox: `CarbonCheckbox` (including indeterminate, and `invalid` for a border without a message of its own) and
   `CarbonCheckboxGroup`.
 - Toggle: `CarbonToggle` with a busy state.
 - Tabs: `CarbonTabs` (line and contained, automatic and manual activation,
   overflow scrolling) and `CarbonTabPanels`.
 - Content switcher: `CarbonContentSwitcher`.
-- Menu: `CarbonMenu` with items, check items, radio groups, groups,
-  dividers and submenus, and `CarbonContextMenu`.
+- Menu: `CarbonMenu` (optional `rowHeight` and `border`) with items, check
+  items, radio groups, groups, dividers and submenus, and `CarbonContextMenu`.
 - Menu button: `CarbonMenuButton`, `CarbonOverflowMenu` and
   `CarbonSplitButton`.
 - Modal: `CarbonModal` (informational, confirmation, form) presented with
@@ -61,7 +68,7 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Inline loading: `CarbonInlineLoading`.
 - Tag: `CarbonTag` (read-only, dismissible, selectable, operational).
 - Contained list: `CarbonContainedList`, `CarbonContainedListSliver` and
-  `CarbonContainedListRow`.
+  `CarbonContainedListRow` (optional `disabled`).
 
 ### Gallery
 

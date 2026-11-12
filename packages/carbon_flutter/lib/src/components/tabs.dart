@@ -59,7 +59,7 @@ enum CarbonActivationMode {
 /// scrolled into view. A label wider than the whole list wraps inside its tab.
 ///
 /// Tabs are identified by [CarbonOption.value]; a disabled option is shown but
-/// cannot be focused or selected. [CarbonOption.icon] shows before the label.
+/// cannot be focused or selected. [CarbonOption.icon] shows after the label.
 class CarbonTabs<T> extends StatefulWidget {
   const CarbonTabs({
     super.key,
@@ -299,10 +299,15 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
 
   void _updateMetrics(ScrollMetrics m) {
     final content = m.viewportDimension + m.maxScrollExtent - m.minScrollExtent;
-    final full = m.viewportDimension + (_overflow ? 2 * _buttonExtent : 0);
+    // A button only takes width while it is shown, so the room the tabs have
+    // is the viewport plus whichever buttons are currently out.
+    final full =
+        m.viewportDimension +
+        (_canBack ? _buttonExtent : 0) +
+        (_canForward ? _buttonExtent : 0);
     final overflow = content > full + 0.5;
-    final back = m.pixels > m.minScrollExtent + 0.5;
-    final forward = m.pixels < m.maxScrollExtent - 0.5;
+    final back = overflow && m.pixels > m.minScrollExtent + 0.5;
+    final forward = overflow && m.pixels < m.maxScrollExtent - 0.5;
     if (overflow == _overflow && back == _canBack && forward == _canForward) {
       return;
     }
@@ -336,7 +341,9 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
     final loc = CarbonLocalizations.of(context);
     final contained = widget.variant == CarbonTabsVariant.contained;
     final height = math.max(theme.isTouch ? theme.touchTarget : 40.0, theme.minTarget);
-    _buttonExtent = theme.minTarget;
+    // Carbon's overflow buttons are 40 wide on line tabs and 48 on contained
+    // tabs; touch density never goes below the finger target.
+    _buttonExtent = math.max(theme.minTarget, contained ? 48.0 : 40.0);
 
     final selected = _indexOf(widget.value);
     final stop = _stopIndex(selected);
@@ -374,7 +381,9 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      for (var i = 0; i < widget.tabs.length; i++)
+                      for (var i = 0; i < widget.tabs.length; i++) ...<Widget>[
+                        if (i > 0 && !contained)
+                          const SizedBox(width: CarbonBorders.hairline),
                         ConstrainedBox(
                           constraints: BoxConstraints(maxWidth: maxTab),
                           child: _Tab(
@@ -389,6 +398,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
                                 _handleTabFocus(widget.tabs[i].value, f),
                           ),
                         ),
+                      ],
                     ],
                   ),
                   ),
@@ -401,18 +411,23 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
     );
 
     Widget scrollButton({required bool back}) {
-      final enabled = back ? _canBack : _canForward;
       return ExcludeFocus(
         child: CarbonInteraction(
-          onPressed: enabled ? () => _page(back ? -1 : 1) : null,
+          onPressed: () => _page(back ? -1 : 1),
           label: back ? loc.scrollBackward : loc.scrollForward,
           excludeChildSemantics: true,
           builder: (context, state, _) {
-            final fill = state.hovered
+            final fill = state.pressed
+                ? (contained
+                      ? _layerAccentActive(theme, level)
+                      : theme.colors.backgroundActive)
+                : state.hovered
                 ? (contained
                       ? _layerAccentHover(theme, level)
-                      : theme.layerHover(level))
-                : (contained ? _layerAccent(theme, level) : null);
+                      : theme.colors.backgroundHover)
+                : (contained
+                      ? _layerAccent(theme, level)
+                      : theme.colors.background);
             return Container(
               width: _buttonExtent,
               height: height,
@@ -421,9 +436,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
               child: CarbonIcon(
                 back ? CarbonIcons.chevronLeft : CarbonIcons.chevronRight,
                 size: theme.iconSize,
-                color: enabled
-                    ? theme.colors.iconPrimary
-                    : theme.colors.iconDisabled,
+                color: theme.colors.iconPrimary,
               ),
             );
           },
@@ -431,25 +444,13 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
       );
     }
 
-    final list = DecoratedBox(
-      decoration: BoxDecoration(
-        border: contained
-            ? null
-            : Border(
-                bottom: BorderSide(
-                  color: theme.borderSubtle(level),
-                  width: CarbonBorders.hairline,
-                ),
-              ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          if (_overflow) scrollButton(back: true),
-          Expanded(child: scroller),
-          if (_overflow) scrollButton(back: false),
-        ],
-      ),
+    final list = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (_canBack) scrollButton(back: true),
+        Expanded(child: scroller),
+        if (_canForward) scrollButton(back: false),
+      ],
     );
 
     return Focus(
@@ -504,13 +505,11 @@ class _Tab extends StatelessWidget {
         if (contained) {
           fill = selected
               ? theme.layer(level)
-              : state.pressed
-              ? _layerAccentActive(theme, level)
               : hovered
               ? _layerAccentHover(theme, level)
               : _layerAccent(theme, level);
         } else {
-          fill = state.pressed ? theme.layerActive(level) : null;
+          fill = null;
         }
         final Color textColor = !enabled
             ? colors.textDisabled
@@ -527,7 +526,7 @@ class _Tab extends StatelessWidget {
               width: CarbonBorders.selectedTab,
             ),
             end: BorderSide(
-              color: theme.borderSubtle(level),
+              color: theme.borderStrong(level),
               width: CarbonBorders.hairline,
             ),
           );
@@ -538,7 +537,7 @@ class _Tab extends StatelessWidget {
                   ? colors.borderInteractive
                   : (hovered && enabled
                         ? theme.borderStrong(level)
-                        : transparent),
+                        : theme.borderSubtle(level)),
               width: CarbonBorders.indicator,
             ),
           );
@@ -559,16 +558,6 @@ class _Tab extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
-                      if (option.icon != null) ...<Widget>[
-                        IconTheme(
-                          data: IconThemeData(
-                            color: iconColor,
-                            size: theme.iconSize,
-                          ),
-                          child: option.icon!,
-                        ),
-                        const SizedBox(width: CarbonSpacing.spacing03),
-                      ],
                       Flexible(
                         child: Text(
                           option.label,
@@ -577,6 +566,20 @@ class _Tab extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (option.icon != null) ...<Widget>[
+                        SizedBox(
+                          width: contained
+                              ? CarbonSpacing.spacing05
+                              : CarbonSpacing.spacing03,
+                        ),
+                        IconTheme(
+                          data: IconThemeData(
+                            color: iconColor,
+                            size: theme.iconSize,
+                          ),
+                          child: option.icon!,
+                        ),
+                      ],
                     ],
                   ),
                 ),

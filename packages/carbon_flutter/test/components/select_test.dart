@@ -192,7 +192,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('list matches the anchor width and scrolls past six rows', (
+    testWidgets('list matches the anchor width and scrolls past five and a half rows', (
       tester,
     ) async {
       final many = [
@@ -212,7 +212,7 @@ void main() {
       // Rows are built lazily.
       expect(find.text('Option 0'), findsOneWidget);
       expect(find.text('Option 39'), findsNothing);
-      expect(tester.getSize(_list).height, 6 * 32 + 2);
+      expect(tester.getSize(_list).height, 5.5 * 32 + 2);
     });
   });
 

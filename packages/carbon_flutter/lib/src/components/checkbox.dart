@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../foundations/icons.dart';
@@ -28,6 +30,7 @@ class CarbonCheckbox extends StatelessWidget {
     this.semanticLabel,
     this.helperText,
     this.errorText,
+    this.invalid = false,
     this.readOnly = false,
     this.focusNode,
     this.autofocus = false,
@@ -62,6 +65,10 @@ class CarbonCheckbox extends StatelessWidget {
   /// takes the place of [helperText].
   final String? errorText;
 
+  /// Draws the invalid border without a message of its own, for a checkbox
+  /// whose group shows the error once. Implied by [errorText].
+  final bool invalid;
+
   final bool readOnly;
   final FocusNode? focusNode;
   final bool autofocus;
@@ -83,7 +90,7 @@ class CarbonCheckbox extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
     final enabled = onChanged != null;
-    final invalid = errorText != null;
+    final invalid = errorText != null || this.invalid;
     final message = errorText ?? helperText;
     final hasLabel = label != null || labelText != null;
     final name = labelText ?? semanticLabel;
@@ -112,6 +119,7 @@ class CarbonCheckbox extends StatelessWidget {
       builder: (context, state, _) {
         final box = CarbonFocusRing(
           visible: state.focusVisible,
+          borderRadius: _CheckboxIndicator.radius,
           child: _CheckboxIndicator(
             checked: _isChecked,
             mixed: _isMixed,
@@ -138,11 +146,14 @@ class CarbonCheckbox extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Carbon seats the box 3px in and starts the text 30px in
+            // (checkbox.scss:78, :84, :124).
+            const SizedBox(width: _boxInset),
             SizedBox(
               height: lineHeight + 2 * pad,
               child: Center(child: box),
             ),
-            const SizedBox(width: CarbonSpacing.spacing03),
+            const SizedBox(width: _labelGap),
             Flexible(
               child: Padding(
                 padding: EdgeInsets.symmetric(vertical: pad),
@@ -186,6 +197,9 @@ class CarbonCheckbox extends StatelessWidget {
     );
   }
 
+  static const double _boxInset = 3;
+  static const double _labelGap = 11;
+
   static void _ignore() {}
 }
 
@@ -220,12 +234,21 @@ class _FieldMessage extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (error) ...[
-              CarbonIcon(
-                CarbonIcons.errorFilled,
-                size: 16,
-                color: colors.supportError,
+              // checkbox.scss:258 seats the glyph 1px down and 3px in; the
+              // text follows at spacing-03 (:294).
+              Padding(
+                padding: const EdgeInsetsDirectional.only(
+                  start: 3,
+                  top: 1,
+                  end: 1,
+                ),
+                child: CarbonIcon(
+                  CarbonIcons.warningFilled,
+                  size: 16,
+                  color: colors.supportError,
+                ),
               ),
-              const SizedBox(width: CarbonSpacing.spacing02),
+              const SizedBox(width: CarbonSpacing.spacing03),
             ],
             Flexible(child: Text(text, style: style)),
           ],
@@ -251,6 +274,7 @@ class _CheckboxIndicator extends StatelessWidget {
   final bool invalid;
 
   static const double _size = 16;
+  static const BorderRadius radius = BorderRadius.all(Radius.circular(2));
 
   @override
   Widget build(BuildContext context) {
@@ -273,26 +297,65 @@ class _CheckboxIndicator extends StatelessWidget {
     final showGlyph = checked || mixed;
     return SizedBox.square(
       dimension: _size,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: fill,
-          border: Border.all(
-            color: border,
-            width: invalid && enabled && !readOnly ? 2 : 1,
+      child: CustomPaint(
+        foregroundPainter: showGlyph
+            ? _CheckMarkPainter(mixed: mixed, color: glyph)
+            : null,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: radius,
+            // Invalid only recolours the 1px border (checkbox.scss:219).
+            border: Border.all(color: border),
           ),
         ),
-        child: showGlyph
-            ? Center(
-                child: CarbonIcon(
-                  mixed ? CarbonIcons.subtract : CarbonIcons.checkmark,
-                  size: 12,
-                  color: glyph,
-                ),
-              )
-            : null,
       ),
     );
   }
+}
+
+/// Carbon draws the mark from borders, not a glyph: a 9x5 L of 1.5px strokes
+/// turned -45 degrees about its bottom-right corner, or an 8x2 bar
+/// (checkbox.scss:131-135, :171-173). A scaled icon glyph is half that weight.
+class _CheckMarkPainter extends CustomPainter {
+  const _CheckMarkPainter({required this.mixed, required this.color});
+
+  final bool mixed;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    if (mixed) {
+      canvas.drawRect(
+        Rect.fromCenter(center: size.center(Offset.zero), width: 8, height: 2),
+        paint,
+      );
+      return;
+    }
+    paint
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeJoin = StrokeJoin.miter;
+    // Stroke centrelines of the element's left and bottom borders, in the
+    // box's coordinates before the turn.
+    const pivot = Offset(13, 5.5);
+    final path = Path()
+      ..moveTo(4.75, 0.5)
+      ..lineTo(4.75, 4.75)
+      ..lineTo(13, 4.75);
+    canvas
+      ..save()
+      ..translate(pivot.dx, pivot.dy)
+      ..rotate(-math.pi / 4)
+      ..translate(-pivot.dx, -pivot.dy)
+      ..drawPath(path, paint)
+      ..restore();
+  }
+
+  @override
+  bool shouldRepaint(_CheckMarkPainter old) =>
+      old.mixed != mixed || old.color != color;
 }
 
 /// One entry of a [CarbonCheckboxGroup]; identity is [value].
@@ -375,6 +438,7 @@ class CarbonCheckboxGroup<T> extends StatelessWidget {
               value: selected.contains(item.value),
               labelText: item.label,
               helperText: item.helperText,
+              invalid: invalid,
               readOnly: readOnly,
               onChanged: enabled && item.enabled
                   ? (checked) {

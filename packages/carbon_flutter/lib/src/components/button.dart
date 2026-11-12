@@ -82,10 +82,13 @@ class CarbonButton extends StatelessWidget {
     this.icon,
     this.busy = false,
     this.expand = false,
+    this.minWidth,
     this.semanticLabel,
     this.focusNode,
     this.autofocus = false,
-  }) : _iconOnly = false;
+  }) : iconSize = null,
+       hoverFill = true,
+       _iconOnly = false;
 
   /// A square button showing only [icon]. [semanticLabel] names it for
   /// assistive technology.
@@ -99,8 +102,11 @@ class CarbonButton extends StatelessWidget {
     this.busy = false,
     this.focusNode,
     this.autofocus = false,
+    this.iconSize,
+    this.hoverFill = true,
   }) : label = null,
        expand = false,
+       minWidth = null,
        _iconOnly = true;
 
   /// The visible text; null for an icon-only button.
@@ -123,13 +129,31 @@ class CarbonButton extends StatelessWidget {
   /// end. Requires a bounded width.
   final bool expand;
 
+  /// A floor under the button's width. With an [icon] the icon stays at the
+  /// trailing edge of the extra width, as Carbon pins it.
+  final double? minWidth;
+
   /// Overrides the announced name; defaults to [label].
   final String? semanticLabel;
 
   final FocusNode? focusNode;
   final bool autofocus;
 
+  /// Glyph size of an icon-only button; null follows the density's icon size.
+  /// The button keeps its own footprint, so a larger glyph gains no tap area.
+  final double? iconSize;
+
+  /// False keeps an icon-only ghost button's fill clear and its glyph colour
+  /// unchanged on hover and press, as Carbon's notification close buttons are;
+  /// the focus ring still shows.
+  final bool hoverFill;
+
   final bool _iconOnly;
+
+  static const double _maxWidth = 320;
+
+  // (lg 48 - 18 line height) / 2 - 1 border, the cap in _mixins.scss.
+  static const double _pinnedPadding = 14;
 
   bool get _isFilled => switch (kind) {
     CarbonButtonKind.primary ||
@@ -148,6 +172,18 @@ class CarbonButton extends StatelessWidget {
         ? CarbonSizes.xs
         : math.max(size?.height ?? theme.controlHeight, theme.minTarget);
     final name = semanticLabel ?? label ?? '';
+    // Carbon caps a button's block padding at what a 48px button needs, so a
+    // taller one keeps its label near the top instead of centring it.
+    final topPinned =
+        !_iconOnly && !theme.isTouch && height > CarbonSizes.lg;
+    final hPad = switch ((_iconOnly, extraSmall)) {
+      (true, true) => CarbonSpacing.spacing02,
+      (true, false) || (false, true) => CarbonSpacing.spacing03,
+      (false, false) => CarbonSpacing.spacing05,
+    };
+    final vPad = extraSmall
+        ? 0.0
+        : CarbonSpacing.spacing02 + CarbonSpacing.spacing01;
 
     final button = CarbonInteraction(
       onPressed: disabled ? null : (busy ? _ignore : onPressed),
@@ -160,25 +196,36 @@ class CarbonButton extends StatelessWidget {
       builder: (context, state, _) {
         // A busy button reads as active, not disabled, but gives no hover or
         // press feedback because pressing does nothing.
-        final hovered = state.hovered && !busy;
-        final pressed = state.pressed && !busy;
+        final feedback =
+            !busy &&
+            (hoverFill ||
+                !_iconOnly ||
+                (kind != CarbonButtonKind.ghost &&
+                    kind != CarbonButtonKind.dangerGhost));
+        final hovered = state.hovered && feedback;
+        final pressed = state.pressed && feedback;
         final style = _CarbonButtonStyle.resolve(
           theme,
           kind,
           disabled: disabled,
           hovered: hovered,
           pressed: pressed,
+          focused: state.focusVisible,
+          iconOnly: _iconOnly,
         );
         return ConstrainedBox(
           constraints: BoxConstraints(
             minHeight: height,
             minWidth: _iconOnly
                 ? height
-                : (expand ? double.infinity : 0),
+                : (expand ? double.infinity : (minWidth ?? 0)),
+            // Carbon caps a button's inline size, so a long label wraps.
+            maxWidth: _iconOnly || expand ? double.infinity : _maxWidth,
           ),
           child: CarbonFocusRing(
             visible: state.focusVisible,
-            onColor: _isFilled,
+            // Outlined kinds fill on focus, so they need the inner ring too.
+            onColor: _isFilled || (!disabled && style.focusFilled),
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: style.background,
@@ -192,23 +239,21 @@ class CarbonButton extends StatelessWidget {
               child: Padding(
                 // The minimum height centres the content, so extra small
                 // needs no vertical padding to fit 24.
-                padding: EdgeInsets.symmetric(
-                  horizontal: switch ((_iconOnly, extraSmall)) {
-                    (true, true) => CarbonSpacing.spacing02,
-                    (true, false) || (false, true) => CarbonSpacing.spacing03,
-                    (false, false) => CarbonSpacing.spacing05,
-                  },
-                  vertical: extraSmall
-                      ? 0
-                      : CarbonSpacing.spacing02 + CarbonSpacing.spacing01,
+                padding: EdgeInsetsDirectional.fromSTEB(
+                  hPad,
+                  topPinned ? _pinnedPadding : vPad,
+                  hPad,
+                  topPinned ? _pinnedPadding : vPad,
                 ),
                 child: Align(
                   alignment: _iconOnly
                       ? Alignment.center
-                      : AlignmentDirectional.centerStart,
+                      : (topPinned
+                            ? AlignmentDirectional.topStart
+                            : AlignmentDirectional.centerStart),
                   widthFactor: 1,
                   heightFactor: 1,
-                  child: _content(context, theme, style),
+                  child: _content(context, theme, style, hPad),
                 ),
               ),
             ),
@@ -238,15 +283,13 @@ class CarbonButton extends StatelessWidget {
 
   Widget _iconBox(CarbonThemeData theme, _CarbonButtonStyle style) {
     final icon = this.icon;
+    final glyph = (_iconOnly ? iconSize : null) ?? theme.iconSize;
     return SizedBox.square(
-      dimension: theme.iconSize,
+      dimension: glyph,
       child: busy
           ? _spinner(theme, style)
           : IconTheme(
-              data: IconThemeData(
-                color: style.iconColor,
-                size: theme.iconSize,
-              ),
+              data: IconThemeData(color: style.iconColor, size: glyph),
               child: icon ?? const SizedBox.shrink(),
             ),
     );
@@ -256,6 +299,7 @@ class CarbonButton extends StatelessWidget {
     BuildContext context,
     CarbonThemeData theme,
     _CarbonButtonStyle style,
+    double hPad,
   ) {
     if (_iconOnly) return _iconBox(theme, style);
 
@@ -264,6 +308,7 @@ class CarbonButton extends StatelessWidget {
       style: theme.typography.control.copyWith(color: style.foreground),
     );
     final hasIcon = icon != null;
+    final floor = minWidth;
     final labelWidget = hasIcon || !busy
         ? text
         // The label stays in layout, invisible, so a text-only button keeps
@@ -282,6 +327,30 @@ class CarbonButton extends StatelessWidget {
             ],
           );
     if (!hasIcon) return expand ? _fill(labelWidget) : labelWidget;
+    if (floor != null && !expand) {
+      // The row sizes to the floor, and spaceBetween pins the icon to the end.
+      // The border is painted over the padding box and takes no layout space.
+      final chrome = 2 * hPad;
+      return ConstrainedBox(
+        constraints: BoxConstraints(minWidth: math.max(0, floor - chrome)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsetsDirectional.only(
+                  end: CarbonSpacing.spacing05,
+                ),
+                child: labelWidget,
+              ),
+            ),
+            _iconBox(theme, style),
+          ],
+        ),
+      );
+    }
     final row = Row(
       mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -304,12 +373,17 @@ class _CarbonButtonStyle {
     required this.foreground,
     required this.iconColor,
     this.border,
+    this.focusFilled = false,
   });
 
   final Color background;
   final Color foreground;
   final Color iconColor;
   final Color? border;
+
+  /// True when keyboard focus fills an outlined button, which then needs the
+  /// inner focus ring like a filled one.
+  final bool focusFilled;
 
   static const Color _clear = Color(0x00000000);
 
@@ -319,6 +393,8 @@ class _CarbonButtonStyle {
     required bool disabled,
     required bool hovered,
     required bool pressed,
+    required bool focused,
+    required bool iconOnly,
   }) {
     final c = theme.colors;
     Color pick(Color rest, Color hover, Color active) =>
@@ -344,7 +420,9 @@ class _CarbonButtonStyle {
         CarbonButtonKind.dangerGhost => _CarbonButtonStyle(
           background: _clear,
           foreground: c.textDisabled,
-          iconColor: c.iconDisabled,
+          // Carbon dims an icon-only ghost glyph with the on-color role; with
+          // a label the icon follows the text.
+          iconColor: iconOnly ? c.iconOnColorDisabled : c.iconDisabled,
         ),
       };
     }
@@ -356,21 +434,29 @@ class _CarbonButtonStyle {
           iconColor: c.iconOnColor,
         );
 
-    // Outlined and ghost treatments fill with their accent on hover, which
-    // flips the text to the on-color / inverse role for contrast.
+    // Outlined treatments fill on hover, press and keyboard focus, which flips
+    // the text to the on-color / inverse role for contrast. The frame follows
+    // the fill once pressed (and on hover for danger), so no accent edge shows
+    // around a darker fill.
     _CarbonButtonStyle outlined(
       Color accent,
       Color hover,
       Color active,
+      Color focusFill,
+      Color hoverBorder,
       Color invertedText,
       Color invertedIcon,
     ) {
-      final on = hovered || pressed;
+      final on = hovered || pressed || focused;
+      final Color fill = pressed
+          ? active
+          : (hovered ? hover : (focused ? focusFill : _clear));
       return _CarbonButtonStyle(
-        background: on ? pick(accent, hover, active) : _clear,
+        background: fill,
         foreground: on ? invertedText : accent,
         iconColor: on ? invertedIcon : accent,
-        border: accent,
+        border: pressed ? active : (hovered ? hoverBorder : accent),
+        focusFilled: focused && !hovered && !pressed,
       );
     }
 
@@ -412,6 +498,8 @@ class _CarbonButtonStyle {
         c.buttonTertiary,
         c.buttonTertiaryHover,
         c.buttonTertiaryActive,
+        c.buttonTertiary,
+        c.buttonTertiary,
         c.textInverse,
         c.iconInverse,
       ),
@@ -419,6 +507,8 @@ class _CarbonButtonStyle {
         c.buttonDangerSecondary,
         c.buttonDangerHover,
         c.buttonDangerActive,
+        c.buttonDangerPrimary,
+        c.buttonDangerHover,
         c.textOnColor,
         c.iconOnColor,
       ),
@@ -427,7 +517,7 @@ class _CarbonButtonStyle {
         c.iconPrimary,
         c.backgroundHover,
         c.backgroundActive,
-        c.linkPrimary,
+        c.linkPrimaryHover,
         c.iconPrimary,
         c.backgroundHover,
         c.backgroundActive,
@@ -578,6 +668,13 @@ class _RenderButtonSet extends RenderBox
     return out;
   }
 
+  // Carbon sizes row buttons as 196 px columns (`.btn-set .btn`), so a short
+  // label still gets the full column; longer labels keep their natural width.
+  static const double _column = 196;
+
+  List<double> _columns(List<double> natural) =>
+      [for (final w in natural) math.max(w, _column)];
+
   bool _stacks(List<double> natural, double maxWidth) {
     if (!maxWidth.isFinite) return false;
     final n = natural.length;
@@ -586,7 +683,8 @@ class _RenderButtonSet extends RenderBox
       final share = (maxWidth - gaps) / n;
       return natural.any((w) => w > share + 0.01);
     }
-    return natural.fold<double>(0, (a, b) => a + b) + gaps > maxWidth + 0.01;
+    return _columns(natural).fold<double>(0, (a, b) => a + b) + gaps >
+        maxWidth + 0.01;
   }
 
   List<double> _widths(List<double> natural, double maxWidth, bool stacked) {
@@ -595,7 +693,9 @@ class _RenderButtonSet extends RenderBox
     if (_alignment == CarbonButtonSetAlignment.fill && maxWidth.isFinite) {
       return List.filled(n, (maxWidth - _gap * (n - 1)) / n);
     }
-    return natural;
+    return _alignment == CarbonButtonSetAlignment.fill
+        ? natural
+        : _columns(natural);
   }
 
   // Mirrors the stack-or-row decision in layout so an intrinsic-sized parent
@@ -717,10 +817,11 @@ class _RenderButtonSet extends RenderBox
 
   @override
   double computeMaxIntrinsicWidth(double height) {
-    var w = 0.0;
-    for (final k in _kids) {
-      w += k.getMaxIntrinsicWidth(height);
-    }
+    final natural = [for (final k in _kids) k.getMaxIntrinsicWidth(height)];
+    final w = (_alignment == CarbonButtonSetAlignment.fill
+            ? natural
+            : _columns(natural))
+        .fold<double>(0, (a, b) => a + b);
     return w + _gap * math.max(0, childCount - 1);
   }
 

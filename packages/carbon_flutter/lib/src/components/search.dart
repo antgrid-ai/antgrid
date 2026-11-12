@@ -257,8 +257,12 @@ class _CarbonSearchState extends State<CarbonSearch> {
     final foreground = enabled ? colors.textPrimary : colors.textDisabled;
     final placeholder = widget.placeholder ?? messages.search;
     final name = widget.semanticLabel ?? messages.search;
+    // Carbon paints a disabled search placeholder in the field fill, so it
+    // vanishes.
     final hintStyle = type.control.copyWith(
-      color: enabled ? colors.textPlaceholder : colors.textDisabled,
+      color: enabled
+          ? colors.textPlaceholder
+          : theme.field(CarbonLayer.of(context)),
     );
 
     final textField = TextField(
@@ -318,7 +322,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
       ),
     );
 
-    final Widget leading = widget.busy
+    final Widget glyph = widget.busy
         ? Semantics(
             container: true,
             liveRegion: true,
@@ -329,12 +333,28 @@ class _CarbonSearchState extends State<CarbonSearch> {
           )
         : CarbonIcon(
             CarbonIcons.search,
-            color: enabled ? colors.iconSecondary : colors.iconDisabled,
+            color: enabled
+                ? colors.iconSecondary
+                : colors.iconOnColorDisabled,
           );
 
     final height = math.max(
       widget.size?.height ?? theme.controlHeight,
       theme.minTarget,
+    );
+    // Carbon centres the glyph in a field-height square and starts the text
+    // at the end of it; the box adds its gap after the leading slot.
+    final leading = SizedBox(
+      width: height - CarbonSpacing.spacing03,
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(
+            start: (height - theme.iconSize) / 2,
+          ),
+          child: glyph,
+        ),
+      ),
     );
 
     final box = GestureDetector(
@@ -347,6 +367,8 @@ class _CarbonSearchState extends State<CarbonSearch> {
         readOnly: readOnly,
         invalid: error != null,
         minHeight: height,
+        hoverable: false,
+        startPadding: 0,
         leading: leading,
         actions: <Widget>[
           if (_editable && _hasText)

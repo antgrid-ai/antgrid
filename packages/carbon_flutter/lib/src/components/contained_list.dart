@@ -68,7 +68,8 @@ Widget _header(
   final level = CarbonLayer.of(context);
   return DecoratedBox(
     decoration: BoxDecoration(
-      color: _baseFill(theme, level, variant),
+      // The disclosed header is filled too; only its rows stay clear.
+      color: theme.layer(level),
       border: Border(
         bottom: BorderSide(
           color: theme.borderSubtle(level),
@@ -98,13 +99,7 @@ Widget _header(
               ),
             ),
           ),
-          if (action != null)
-            Padding(
-              padding: const EdgeInsetsDirectional.only(
-                end: CarbonSpacing.spacing03,
-              ),
-              child: action,
-            ),
+          ?action,
         ],
       ),
     ),
@@ -396,6 +391,7 @@ class CarbonContainedListRow extends StatefulWidget {
     this.onSelectedChanged,
     this.selected,
     this.revealActionsOnHover = false,
+    this.disabled = false,
     this.focusNode,
   });
 
@@ -415,6 +411,7 @@ class CarbonContainedListRow extends StatefulWidget {
   final ValueChanged<bool>? onSelectedChanged;
   final bool? selected;
   final bool revealActionsOnHover;
+  final bool disabled;
   final FocusNode? focusNode;
 
   @override
@@ -447,7 +444,10 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
     final scope = _ListScope.maybeOf(context);
     final variant = scope?.variant ?? CarbonContainedListVariant.onPage;
     final inset = scope?.inset ?? false;
-    final activate = _activate;
+    final disabled = widget.disabled;
+    // A disabled row is still a button in the tree, just one nothing reaches.
+    final clickable = _activate != null;
+    final activate = disabled ? null : _activate;
     final interactive = activate != null;
     final selected = widget.selected ?? false;
     final selectable =
@@ -473,15 +473,18 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
         bottom: secondary == null ? CarbonSpacing.spacing02 : CarbonSpacing.spacing03,
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           if (widget.leading != null) ...<Widget>[
-            IconTheme(
-              data: IconThemeData(
-                color: colors.iconPrimary,
-                size: theme.iconSize,
+            Padding(
+              padding: const EdgeInsets.only(top: CarbonSpacing.spacing01),
+              child: IconTheme(
+                data: IconThemeData(
+                  color: disabled ? colors.iconDisabled : colors.iconPrimary,
+                  size: theme.iconSize,
+                ),
+                child: widget.leading!,
               ),
-              child: widget.leading!,
             ),
             const SizedBox(width: CarbonSpacing.spacing04),
           ],
@@ -492,15 +495,17 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               children: <Widget>[
                 Text(
                   widget.title,
-                  style: theme.typography.control.copyWith(
-                    color: colors.textPrimary,
+                  style: theme.typography.body.copyWith(
+                    color: disabled ? colors.textDisabled : colors.textPrimary,
                   ),
                 ),
                 if (secondary != null)
                   Text(
                     secondary,
                     style: theme.typography.helper.copyWith(
-                      color: colors.textSecondary,
+                      color: disabled
+                          ? colors.textDisabled
+                          : colors.textSecondary,
                     ),
                   ),
               ],
@@ -511,7 +516,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
     );
 
     Widget target;
-    if (interactive) {
+    if (clickable) {
       target = CarbonInteraction(
         onPressed: activate,
         focusNode: widget.focusNode,
@@ -578,19 +583,14 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               maintainSize: true,
               maintainSemantics: true,
               maintainFocusability: true,
-              child: Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  end: CarbonSpacing.spacing03,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    for (var i = 0; i < widget.actions.length; i++) ...<Widget>[
-                      if (i > 0) const SizedBox(width: CarbonSpacing.spacing02),
-                      widget.actions[i],
-                    ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  for (var i = 0; i < widget.actions.length; i++) ...<Widget>[
+                    if (i > 0) const SizedBox(width: CarbonSpacing.spacing02),
+                    widget.actions[i],
                   ],
-                ),
+                ],
               ),
             ),
         ],

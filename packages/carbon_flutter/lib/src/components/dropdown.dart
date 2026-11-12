@@ -3,7 +3,6 @@ import 'package:flutter/material.dart'
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import '../foundations/icons.dart';
 import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
 import '../primitives/field.dart';
@@ -25,7 +24,7 @@ typedef CarbonOptionFilter<T> =
 /// already loaded. An empty list shows [emptyText]. Use `CarbonComboBox` when
 /// the list is long enough to need search.
 ///
-/// The list builds its rows lazily and scrolls past six rows. A null
+/// The list builds its rows lazily and scrolls past five and a half rows. A null
 /// [onChanged] disables the field. The label is optional so the dropdown can
 /// sit in a toolbar; supply one wherever the field is not otherwise named.
 class CarbonDropdown<T> extends StatelessWidget {
@@ -101,6 +100,7 @@ class CarbonDropdown<T> extends StatelessWidget {
     emptyText: emptyText,
     focusNode: focusNode,
     autofocus: autofocus,
+    arrowUpOpens: false,
   );
 }
 
@@ -694,9 +694,8 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
       readOnly: widget.readOnly,
       invalid: error != null,
       warn: warning != null,
-      trailing: widget.readOnly
-          ? null
-          : CarbonIcon(open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown),
+      expanded: open,
+      trailing: CarbonFieldChevron(open: open, readOnly: widget.readOnly),
       child: field,
     );
     box = GestureDetector(
