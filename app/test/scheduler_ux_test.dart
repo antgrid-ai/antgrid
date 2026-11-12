@@ -933,6 +933,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(saveButton(tester).onPressed, isNull);
       expect(find.text('Workspace settings locked'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is CarbonIcon && w.icon == CarbonIcons.locked,
+        ),
+        findsOneWidget,
+      );
       await tester.ensureVisible(find.text('Keep mine'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Keep mine'));

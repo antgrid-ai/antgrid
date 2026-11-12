@@ -55,16 +55,22 @@ class CarbonNotification extends StatelessWidget {
   const CarbonNotification({
     super.key,
     this.kind = CarbonNotificationKind.info,
-    required this.title,
+    this.title,
     this.subtitle,
     this.action,
     this.onClose,
     this.highContrast = false,
     this.announce = true,
-  });
+  }) : assert(
+         title != null || subtitle != null,
+         'A notification needs a title, a subtitle or both.',
+       );
 
   final CarbonNotificationKind kind;
-  final String title;
+
+  /// The bold lead. Optional, as in Carbon: a single-sentence message reads
+  /// better as a [subtitle] alone than as a run of heading-weight text.
+  final String? title;
   final String? subtitle;
   final CarbonNotificationAction? action;
 
@@ -150,7 +156,7 @@ class _NotificationCard extends StatefulWidget {
   });
 
   final CarbonNotificationKind kind;
-  final String title;
+  final String? title;
   final String? subtitle;
   final String? caption;
   final CarbonNotificationAction? action;
@@ -206,7 +212,7 @@ class _NotificationCardState extends State<_NotificationCard> {
     final loc = CarbonLocalizations.of(context);
     final parts = <String>[
       _kindName(loc),
-      widget.title,
+      ?widget.title,
       ?widget.subtitle,
     ];
     unawaited(
@@ -293,6 +299,7 @@ class _NotificationCardState extends State<_NotificationCard> {
     final titleStyle = type.heading.copyWith(color: textColor);
     final bodyStyle = type.body.copyWith(color: textColor);
 
+    final title = widget.title;
     final subtitle = widget.subtitle;
     final caption = widget.caption;
     final Widget text;
@@ -301,7 +308,7 @@ class _NotificationCardState extends State<_NotificationCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(widget.title, style: titleStyle),
+          if (title != null) Text(title, style: titleStyle),
           if (subtitle != null) Text(subtitle, style: bodyStyle),
           if (caption != null)
             Padding(
@@ -317,8 +324,12 @@ class _NotificationCardState extends State<_NotificationCard> {
       text = Text.rich(
         TextSpan(
           children: [
-            TextSpan(text: widget.title, style: titleStyle),
-            if (subtitle != null) TextSpan(text: ' $subtitle', style: bodyStyle),
+            if (title != null) TextSpan(text: title, style: titleStyle),
+            if (subtitle != null)
+              TextSpan(
+                text: title == null ? subtitle : ' $subtitle',
+                style: bodyStyle,
+              ),
           ],
         ),
       );

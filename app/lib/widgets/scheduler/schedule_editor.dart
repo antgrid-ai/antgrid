@@ -614,7 +614,8 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         kind: error
             ? CarbonNotificationKind.error
             : CarbonNotificationKind.warning,
-        title: text,
+        // A one-sentence notice, so body weight rather than a bold title run.
+        subtitle: text,
       );
 
   Widget _hint(String text) => Text(
@@ -1292,11 +1293,19 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
           ]);
           final workspace = _section('Workspace', [
             if (_locked) ...[
-              Text(
-                'Workspace settings locked',
-                style: t.typography.heading.copyWith(
-                  color: t.colors.textPrimary,
-                ),
+              Row(
+                spacing: CarbonSpacing.spacing03,
+                children: [
+                  CarbonIcon(CarbonIcons.locked, color: t.colors.iconPrimary),
+                  Expanded(
+                    child: Text(
+                      'Workspace settings locked',
+                      style: t.typography.heading.copyWith(
+                        color: t.colors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ],
               ),
               _fact(
                 'Project',

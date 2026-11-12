@@ -45,6 +45,8 @@ enum CarbonIcons {
   information,
   /// Carbon `information--filled`.
   informationFilled,
+  /// Carbon `locked`.
+  locked,
   /// Carbon `misuse--outline`.
   misuseOutline,
   /// Carbon `overflow-menu--horizontal`.
@@ -145,6 +147,9 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.informationFilled: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M16,2A14,14,0,1,0,30,16,14,14,0,0,0,16,2Zm0,6a1.5,1.5,0,1,1-1.5,1.5A1.5,1.5,0,0,1,16,8Zm4,16.125H12v-2.25h2.875v-5.75H13v-2.25h4.125v8H20Z')],
     inner: <_CarbonIconPath>[_CarbonIconPath('M16,8a1.5,1.5,0,1,1-1.5,1.5A1.5,1.5,0,0,1,16,8Zm4,13.875H17.125v-8H13v2.25h1.875v5.75H12v2.25h8Z')],
+  ),
+  CarbonIcons.locked: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M24,14H22V8A6,6,0,0,0,10,8v6H8a2,2,0,0,0-2,2V28a2,2,0,0,0,2,2H24a2,2,0,0,0,2-2V16A2,2,0,0,0,24,14ZM12,8a4,4,0,0,1,8,0v6H12ZM24,28H8V16H24Z')],
   ),
   CarbonIcons.misuseOutline: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M16,2C8.2,2,2,8.2,2,16s6.2,14,14,14s14-6.2,14-14S23.8,2,16,2z M16,28C9.4,28,4,22.6,4,16S9.4,4,16,4s12,5.4,12,12 S22.6,28,16,28z'), _CarbonIconPath('M21.4 23 16 17.6 10.6 23 9 21.4 14.4 16 9 10.6 10.6 9 16 14.4 21.4 9 23 10.6 17.6 16 23 21.4z')],

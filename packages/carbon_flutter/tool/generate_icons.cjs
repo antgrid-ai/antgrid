@@ -38,6 +38,7 @@ const ICONS = [
   ['filter', 'filter', false],
   ['information', 'information', false],
   ['informationFilled', 'information--filled', false],
+  ['locked', 'locked', false],
   ['misuseOutline', 'misuse--outline', false],
   ['overflowMenuHorizontal', 'overflow-menu--horizontal', false],
   ['overflowMenuVertical', 'overflow-menu--vertical', false],

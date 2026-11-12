@@ -2,7 +2,7 @@
 
 ## 0.1.0 (unreleased)
 
-Initial release. Exercised with `flutter test` and as a Windows desktop
+Initial release. Exercised with `flutter test` and built as a Windows desktop
 gallery only; see "Verification status" in `doc/coverage.md`.
 
 ### Foundations
@@ -55,8 +55,8 @@ gallery only; see "Verification status" in `doc/coverage.md`.
 - Modal: `CarbonModal` (informational, confirmation, form) presented with
   `showCarbonModal` and pluggable `CarbonModalPresentation`s.
 - Tooltip: `CarbonTooltip`.
-- Notification: `CarbonNotification`, `CarbonToast`, `CarbonToastController`
-  and `CarbonToastOverlay`.
+- Notification: `CarbonNotification` (title, subtitle or both, as in
+  Carbon), `CarbonToast`, `CarbonToastController` and `CarbonToastOverlay`.
 - Loading: `CarbonLoading`, `CarbonLoadingOverlay` and `CarbonSpinner`.
 - Inline loading: `CarbonInlineLoading`.
 - Tag: `CarbonTag` (read-only, dismissible, selectable, operational).

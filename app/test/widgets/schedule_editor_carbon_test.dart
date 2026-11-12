@@ -349,7 +349,7 @@ void main() {
           find.byType(CarbonNotification),
         );
         expect(notice.kind, CarbonNotificationKind.error);
-        expect(notice.title, 'Enter a valid time from 00:00 to 23:59.');
+        expect(notice.subtitle, 'Enter a valid time from 00:00 to 23:59.');
         expect(
           announcements.any((m) => m.contains('Enter a valid time')),
           isTrue,
@@ -374,7 +374,7 @@ void main() {
           find.byType(CarbonNotification),
         );
         expect(notice.kind, CarbonNotificationKind.error);
-        expect(notice.title, 'Name and prompt are required.');
+        expect(notice.subtitle, 'Name and prompt are required.');
         expect(
           host.calls.where((c) => c.method == 'scheduler.update'),
           isEmpty,

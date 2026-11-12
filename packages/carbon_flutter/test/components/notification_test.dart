@@ -344,6 +344,57 @@ void main() {
       handle.dispose();
     });
 
+    testWidgets('a subtitle alone renders at body weight and is announced', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final sent = _captureAnnouncements(tester);
+      await pumpCarbon(
+        tester,
+        _top(
+          const CarbonNotification(
+            kind: CarbonNotificationKind.error,
+            subtitle: 'Choose a project before saving.',
+          ),
+        ),
+      );
+      await tester.pump();
+      final theme = CarbonTheme.of(
+        tester.element(find.byType(CarbonNotification)),
+      );
+      final rich = tester.widget<RichText>(
+        find.descendant(
+          of: find.byType(CarbonNotification),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is RichText &&
+                w.text.toPlainText() == 'Choose a project before saving.',
+          ),
+        ),
+      );
+      final spans = <TextSpan>[];
+      rich.text.visitChildren((span) {
+        if (span is TextSpan && (span.text?.isNotEmpty ?? false)) {
+          spans.add(span);
+        }
+        return true;
+      });
+      expect(spans, hasLength(1), reason: 'no empty or leading-space title run');
+      expect(spans.single.text, 'Choose a project before saving.');
+      expect(
+        spans.single.style?.fontWeight,
+        theme.typography.body.fontWeight,
+        reason: 'the message is body text, not the heading weight',
+      );
+      expect(
+        theme.typography.body.fontWeight,
+        isNot(theme.typography.heading.fontWeight),
+      );
+      final data = sent.single['data']! as Map<Object?, Object?>;
+      expect(data['message'], 'Error. Choose a project before saving.');
+      handle.dispose();
+    });
+
     testWidgets('a newly shown notification announces again', (tester) async {
       final handle = tester.ensureSemantics();
       final sent = _captureAnnouncements(tester);
