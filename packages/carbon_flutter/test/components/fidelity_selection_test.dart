@@ -178,7 +178,7 @@ void main() {
         size: const Size(400, 800),
       );
       await _openByTap(tester);
-      expect(tester.getSize(_listView).height, 5.5 * 32 + 2);
+      expect(tester.getSize(_listView).height, 5.5 * 32);
     });
 
     testWidgets('a short list is not padded to five and a half rows', (
@@ -186,7 +186,7 @@ void main() {
     ) async {
       await pumpCarbon(tester, _dropdown(options: _five.sublist(0, 3)));
       await _openByTap(tester);
-      expect(tester.getSize(_listView).height, 3 * 32 + 2);
+      expect(tester.getSize(_listView).height, 3 * 32);
     });
   });
 

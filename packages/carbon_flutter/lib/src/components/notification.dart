@@ -292,6 +292,26 @@ class _NotificationCardState extends State<_NotificationCard> {
     if (high && colors == theme.scheme.colors) {
       controlTheme = theme.copyWith(scheme: _inverseScheme(theme.scheme));
     }
+    // The action button's hover and press fills are the notification's own
+    // tokens, not the ghost button's; on the inverse surface its text stays
+    // link-inverse because Carbon's colour rule outranks the ghost hover text.
+    final actionTheme = controlTheme.copyWith(
+      colors: controlTheme.colors.copyWith(
+        backgroundHover: high
+            ? colors.backgroundInverseHover
+            : colors.notificationActionHover,
+        backgroundActive: high
+            ? colors.backgroundInverseHover
+            : colors.notificationActionHover,
+        linkPrimaryHover: high ? colors.linkInverse : null,
+      ),
+    );
+    // icon-inverse of the active theme, not the swapped scheme's icon-primary.
+    final closeTheme = high
+        ? controlTheme.copyWith(
+            colors: controlTheme.colors.copyWith(iconPrimary: colors.iconInverse),
+          )
+        : controlTheme;
 
     // Carbon's sizes are the compact ones; touch keeps the density's own icon
     // and text so finger-use layouts do not shrink.
@@ -448,7 +468,7 @@ class _NotificationCardState extends State<_NotificationCard> {
                           child: Align(
                             alignment: AlignmentDirectional.centerStart,
                             child: CarbonTheme(
-                              data: controlTheme,
+                              data: actionTheme,
                               child: CarbonButton(
                                 label: action.label,
                                 kind: action.kind,
@@ -464,7 +484,7 @@ class _NotificationCardState extends State<_NotificationCard> {
               ),
               if (onClose != null)
                 CarbonTheme(
-                  data: controlTheme,
+                  data: closeTheme,
                   child: CarbonButton.iconOnly(
                     icon: const CarbonIcon(CarbonIcons.close),
                     semanticLabel: loc.dismissNotification,

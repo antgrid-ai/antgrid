@@ -236,6 +236,7 @@ class CarbonFieldBox extends StatefulWidget {
     this.hoverable = true,
     this.startPadding,
     this.expanded = false,
+    this.focusOutlineWidth = CarbonBorders.focus,
   });
 
   /// Carbon's field text inset (`$spacing-05`), the same at every size and
@@ -252,6 +253,11 @@ class CarbonFieldBox extends StatefulWidget {
   /// Whether the field's editable or trigger holds focus. The box does not
   /// observe focus itself, because the focusable widget lives inside it.
   final bool focused;
+
+  /// Stroke of the [focused] outline. Carbon thins it to 1px on an open
+  /// combo box while a row is highlighted (`combo-box.scss`), so the
+  /// highlight reads as the current position.
+  final double focusOutlineWidth;
 
   final bool enabled;
   final bool readOnly;
@@ -379,10 +385,18 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
     ];
 
     return MouseRegion(
-      onEnter: hoverable ? (_) => _setHovered(true) : null,
+      // Tracked even while disabled: the pointer does not re-enter when the
+      // box is enabled under it, and CSS :hover applies at once.
+      onEnter: (_) => _setHovered(true),
       onExit: (_) => _setHovered(false),
       child: CustomPaint(
-        foregroundPainter: _FieldPainter(rule: rule, outline: outline),
+        foregroundPainter: _FieldPainter(
+          rule: rule,
+          outline: outline,
+          outlineWidth: widget.focused
+              ? widget.focusOutlineWidth
+              : CarbonBorders.focus,
+        ),
         child: DecoratedBox(
           decoration: BoxDecoration(color: fill),
           child: ConstrainedBox(
@@ -415,10 +429,15 @@ class _CarbonFieldBoxState extends State<CarbonFieldBox> {
 }
 
 class _FieldPainter extends CustomPainter {
-  const _FieldPainter({required this.rule, required this.outline});
+  const _FieldPainter({
+    required this.rule,
+    required this.outline,
+    required this.outlineWidth,
+  });
 
   final Color? rule;
   final Color? outline;
+  final double outlineWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -436,7 +455,7 @@ class _FieldPainter extends CustomPainter {
     }
     final outlineColor = outline;
     if (outlineColor != null) {
-      const width = CarbonBorders.focus;
+      final width = outlineWidth;
       final rect = (Offset.zero & size).deflate(width / 2);
       if (rect.width > 0 && rect.height > 0) {
         canvas.drawRect(
@@ -452,5 +471,7 @@ class _FieldPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_FieldPainter old) =>
-      old.rule != rule || old.outline != outline;
+      old.rule != rule ||
+      old.outline != outline ||
+      old.outlineWidth != outlineWidth;
 }

@@ -448,22 +448,16 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
     // A disabled row is still a button in the tree, just one nothing reaches.
     final clickable = _activate != null;
     final activate = disabled ? null : _activate;
-    final interactive = activate != null;
     final selected = widget.selected ?? false;
     final selectable =
         widget.onSelectedChanged != null || widget.selected != null;
     final secondary = widget.secondary;
 
-    final Color fill;
-    if (selected) {
-      fill = _hovered && interactive
-          ? theme.layerSelectedHover(level)
-          : theme.layerSelected(level);
-    } else if (_hovered && interactive) {
-      fill = theme.layerHover(level);
-    } else {
-      fill = _baseFill(theme, level, variant);
-    }
+    // Hover and press belong to the content cell alone, as in Carbon, where
+    // the actions are a separate grid cell; only the resting fill spans the row.
+    final Color fill = selected
+        ? theme.layerSelected(level)
+        : _baseFill(theme, level, variant);
 
     final text = Padding(
       padding: EdgeInsetsDirectional.only(
@@ -527,7 +521,13 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
         builder: (context, state, _) => CarbonFocusRing(
           visible: state.focusVisible,
           child: ColoredBox(
-            color: state.pressed ? theme.layerActive(level) : const Color(0x00000000),
+            color: state.pressed
+                ? theme.layerActive(level)
+                : state.hovered
+                ? (selected
+                      ? theme.layerSelectedHover(level)
+                      : theme.layerHover(level))
+                : const Color(0x00000000),
             child: ConstrainedBox(
               constraints: BoxConstraints(minHeight: theme.minTarget),
               child: Align(
@@ -559,9 +559,11 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
         _hovered ||
         _focusWithin;
 
+    // The selection bar paints above the content so a pressed or hovered fill
+    // never hides it.
     final row = DecoratedBox(
+      position: DecorationPosition.foreground,
       decoration: BoxDecoration(
-        color: fill,
         border: selected
             ? BorderDirectional(
                 start: BorderSide(
@@ -571,6 +573,8 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               )
             : null,
       ),
+      child: DecoratedBox(
+      decoration: BoxDecoration(color: fill),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: <Widget>[
@@ -594,6 +598,7 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               ),
             ),
         ],
+      ),
       ),
     );
 

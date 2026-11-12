@@ -1,15 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart'
-    show
-        AdaptiveTextSelectionToolbar,
-        InputBorder,
-        InputDecoration,
-        Material,
-        MaterialType,
-        TextField,
-        TextSelectionTheme,
-        TextSelectionThemeData;
+    show Material, MaterialType, TextField;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -19,6 +11,7 @@ import '../foundations/icons.dart';
 import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
+import '../primitives/bare_input_decoration.dart';
 import '../primitives/field.dart';
 import 'form.dart';
 import 'loading.dart';
@@ -275,12 +268,11 @@ class _CarbonSearchState extends State<CarbonSearch> {
       style: type.control.copyWith(color: foreground),
       cursorColor: colors.textPrimary,
       cursorWidth: 1,
+      mouseCursor: enabled ? null : SystemMouseCursors.forbidden,
       decoration: placeholder == name
           // The hint text is merged into the editable's label, so a
           // placeholder equal to the name would be read twice.
-          ? InputDecoration(
-              isCollapsed: true,
-              border: InputBorder.none,
+          ? carbonBareInputDecoration(
               hint: ExcludeSemantics(
                 child: Text(
                   placeholder,
@@ -290,7 +282,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
                 ),
               ),
             )
-          : InputDecoration.collapsed(
+          : carbonBareInputDecoration(
               hintText: placeholder,
               hintStyle: hintStyle,
             ),
@@ -298,9 +290,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
       onSubmitted: widget.onSubmitted,
       contextMenuBuilder: (context, state) => _ToolbarPresence(
         onChanged: (shown) => _toolbarShown = shown,
-        child: AdaptiveTextSelectionToolbar.editableText(
-          editableTextState: state,
-        ),
+        child: carbonSelectionToolbar(theme, state),
       ),
     );
 
@@ -312,13 +302,7 @@ class _CarbonSearchState extends State<CarbonSearch> {
           : SemanticsValidationResult.none,
       child: Material(
         type: MaterialType.transparency,
-        child: TextSelectionTheme(
-          data: TextSelectionThemeData(
-            cursorColor: colors.textPrimary,
-            selectionColor: colors.highlight,
-          ),
-          child: textField,
-        ),
+        child: CarbonSelectionScope(child: textField),
       ),
     );
 

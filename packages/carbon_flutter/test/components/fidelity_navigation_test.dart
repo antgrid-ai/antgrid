@@ -95,9 +95,23 @@ void main() {
 
     testWidgets('the contained divider is border-strong', (tester) async {
       await pumpCarbon(tester, _tabs(variant: CarbonTabsVariant.contained));
-      final beta = _decoration(tester, _box('Beta')).border! as BorderDirectional;
-      expect(beta.end.width, 1);
-      expect(beta.end.color, _theme.borderStrong(1));
+      // tabs.scss: a contained tab's rule is on its leading edge.
+      final gamma =
+          _decoration(tester, _box('Gamma')).border! as BorderDirectional;
+      expect(gamma.start.width, 1);
+      expect(gamma.start.color, _theme.borderStrong(1));
+    });
+
+    testWidgets('no contained divider touches the selected tab', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _tabs(variant: CarbonTabsVariant.contained));
+      for (final label in ['Alpha', 'Beta']) {
+        final border =
+            _decoration(tester, _box(label)).border! as BorderDirectional;
+        expect(border.start, BorderSide.none, reason: label);
+        expect(border.end, BorderSide.none, reason: label);
+      }
     });
 
     for (final contained in [false, true]) {
@@ -335,7 +349,16 @@ void main() {
     ) async {
       await pumpCarbon(tester, switcher());
       final gesture = await _press(tester, find.text('Opt b'));
-      expect(_decoration(tester, _box('Opt b')).color, _theme.layerHover(1));
+      // The fill sits beside the label in a Stack, not above it.
+      final fill = find
+          .descendant(
+            of: find
+                .ancestor(of: find.text('Opt b'), matching: find.byType(Stack))
+                .first,
+            matching: find.byType(DecoratedBox),
+          )
+          .first;
+      expect(_decoration(tester, fill).color, _theme.layerHover(1));
       expect(_textColor(tester, 'Opt b'), _theme.colors.textPrimary);
       await gesture.up();
     });

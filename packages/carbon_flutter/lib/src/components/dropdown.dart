@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart'
-    show InputDecoration, Material, MaterialType, TextField;
+    show Material, MaterialType, TextField;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
+import '../foundations/tokens.dart';
+import '../primitives/bare_input_decoration.dart';
 import '../primitives/field.dart';
 import '../primitives/option.dart';
 import '../primitives/popup.dart';
@@ -101,6 +103,7 @@ class CarbonDropdown<T> extends StatelessWidget {
     focusNode: focusNode,
     autofocus: autofocus,
     arrowUpOpens: false,
+    hideOutlineWhenOpen: true,
   );
 }
 
@@ -663,7 +666,8 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
       child: DefaultSelectionStyle(
         cursorColor: colors.textPrimary,
         selectionColor: colors.highlight,
-        child: TextField(
+        child: CarbonSelectionScope(
+          child: TextField(
           controller: _controller,
           focusNode: _focus,
           autofocus: widget.autofocus,
@@ -673,7 +677,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
           cursorColor: colors.textPrimary,
           maxLines: 1,
           textInputAction: TextInputAction.done,
-          decoration: InputDecoration.collapsed(
+          decoration: carbonBareInputDecoration(
             hintText: hint,
             hintStyle: style.copyWith(
               color: unavailable ? colors.textSecondary : colors.textPlaceholder,
@@ -681,6 +685,9 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
           ),
           onTap: _handleTap,
           onEditingComplete: _handleEditingComplete,
+          contextMenuBuilder: (_, state) =>
+              carbonSelectionToolbar(theme, state),
+          ),
         ),
       ),
     );
@@ -695,6 +702,9 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
       invalid: error != null,
       warn: warning != null,
       expanded: open,
+      focusOutlineWidth: open && _active >= 0
+          ? CarbonBorders.hairline
+          : CarbonBorders.focus,
       trailing: CarbonFieldChevron(open: open, readOnly: widget.readOnly),
       child: field,
     );
@@ -731,7 +741,7 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
             child: CarbonAnchoredPopup(
               controller: _popup,
               matchAnchorWidth: true,
-              maxHeight: kOptionListMaxRows * extent + 2,
+              maxHeight: kOptionListMaxRows * extent,
               popupBuilder: (context, available) => TextFieldTapRegion(
                 child: CarbonOptionListbox<T>(
                   options: _visible,
@@ -749,6 +759,9 @@ class _CarbonComboBoxState<T> extends State<CarbonComboBox<T>> {
                     _active = i;
                     _keyboard = false;
                   }),
+                  onLeave: () {
+                    if (mounted && _popup.isOpen) setState(() => _active = -1);
+                  },
                 ),
               ),
               child: box,

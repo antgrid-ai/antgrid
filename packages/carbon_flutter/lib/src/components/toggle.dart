@@ -261,11 +261,12 @@ class _ToggleTrack extends StatelessWidget {
       child: AnimatedContainer(
         duration: duration,
         curve: CarbonMotion.exit,
-        decoration: BoxDecoration(
-          color: trackColor,
-          borderRadius: radius,
-          border: border,
-        ),
+        decoration: BoxDecoration(color: trackColor, borderRadius: radius),
+        // Drawn over the track rather than as part of it, which would pad the
+        // handle in by the border width and squash it.
+        foregroundDecoration: border == null
+            ? null
+            : BoxDecoration(borderRadius: radius, border: border),
         child: Padding(
           padding: const EdgeInsets.all(inset),
           child: AnimatedAlign(

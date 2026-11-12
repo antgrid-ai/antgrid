@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -114,6 +115,8 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   bool _yielded = false;
   bool _pointerDown = false;
   Timer? _pointerTimer;
+  Timer? _longPressTimer;
+  Offset _pressOrigin = Offset.zero;
 
   bool get _active =>
       widget.enabled && widget.message.isNotEmpty && !_yielded;
@@ -131,6 +134,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
     _showTimer?.cancel();
     _hideTimer?.cancel();
     _pointerTimer?.cancel();
+    _longPressTimer?.cancel();
     _detachKeyHandler();
     _controller.removeListener(_syncKeyHandler);
     _controller.dispose();
@@ -267,8 +271,33 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   // Focus a press hands to the child arrives after the pointer-up has been
   // dispatched, in a microtask, so the flag outlives the event by one timer.
   void _onPointerEnd() {
+    _longPressTimer?.cancel();
     _pointerTimer?.cancel();
     _pointerTimer = Timer(Duration.zero, () => _pointerDown = false);
+  }
+
+  // Timed from raw pointer events rather than a long-press recognizer: a
+  // recognizer in the arena holds back the child's tap-down until
+  // kPressTimeout, so pressed feedback on the trigger would lag the press.
+  //
+  // A long press is a request for the description, not an activation: with
+  // no recognizer in the arena to win it, the press is cancelled once the
+  // tooltip shows, so the child sees a tap cancel instead of a tap.
+  void _startLongPress(PointerDownEvent event) {
+    _longPressTimer?.cancel();
+    _pressOrigin = event.position;
+    final pointer = event.pointer;
+    _longPressTimer = Timer(kLongPressTimeout, () {
+      if (!mounted) return;
+      _onLongPress();
+      GestureBinding.instance.cancelPointer(pointer);
+    });
+  }
+
+  void _moveLongPress(PointerMoveEvent event) {
+    if ((event.position - _pressOrigin).distance > kTouchSlop) {
+      _longPressTimer?.cancel();
+    }
   }
 
   void _onPointerDown() {
@@ -344,25 +373,22 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
         message: widget.message,
         child: Listener(
           behavior: HitTestBehavior.translucent,
-          onPointerDown: (_) => _onPointerDown(),
+          onPointerDown: (e) {
+            _onPointerDown();
+            if (active) _startLongPress(e);
+          },
+          onPointerMove: _moveLongPress,
           onPointerUp: (_) => _onPointerEnd(),
           onPointerCancel: (_) => _onPointerEnd(),
           child: MouseRegion(
             onEnter: (_) => _onHover(true),
             onExit: (_) => _onHover(false),
-            child: GestureDetector(
-              // The popup is visual only, so advertising the long press that
-              // opens it would hand assistive technology an action with no
-              // effect it can perceive.
-              excludeFromSemantics: true,
-              onLongPress: active ? _onLongPress : null,
-              child: Focus(
-                canRequestFocus: false,
-                skipTraversal: true,
-                includeSemantics: false,
-                onFocusChange: _onFocusChange,
-                child: _TooltipScope(active: active, child: widget.child),
-              ),
+            child: Focus(
+              canRequestFocus: false,
+              skipTraversal: true,
+              includeSemantics: false,
+              onFocusChange: _onFocusChange,
+              child: _TooltipScope(active: active, child: widget.child),
             ),
           ),
         ),

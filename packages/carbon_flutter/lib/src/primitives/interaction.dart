@@ -96,6 +96,7 @@ class CarbonInteraction extends StatefulWidget {
     this.autofocus = false,
     this.focusableWhenDisabled = false,
     this.requestFocusOnTap = false,
+    this.requestFocusOnPress = false,
     this.mouseCursor,
     this.onFocusChange,
     this.onHoverChange,
@@ -141,6 +142,11 @@ class CarbonInteraction extends StatefulWidget {
   /// focus can return to them when the popup closes.
   final bool requestFocusOnTap;
 
+  /// Moves focus to the control as soon as a primary pointer goes down, as a
+  /// browser does on mousedown, so a control that outlines itself while
+  /// pressed does not share the outline with the one that held focus before.
+  final bool requestFocusOnPress;
+
   /// Defaults to [SystemMouseCursors.click] when enabled and
   /// [SystemMouseCursors.basic] when disabled.
   final MouseCursor? mouseCursor;
@@ -184,10 +190,12 @@ class CarbonInteraction extends StatefulWidget {
 
 class _CarbonInteractionState extends State<CarbonInteraction> {
   FocusNode? _ownedNode;
-  bool _hovered = false;
+  // Whether a pointer is over the region, kept apart from the effective hover
+  // so a control enabled under a resting pointer is hovered at once, as CSS
+  // :hover is, rather than only after the pointer leaves and re-enters.
+  bool _pointerInside = false;
   bool _pressed = false;
   bool _focused = false;
-  bool _highlightTraditional = false;
 
   // What the host was last told through onHoverChange / onFocusChange. Kept
   // apart from the live flags because changes found during build are
@@ -195,6 +203,8 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   // delivered the same value.
   bool _reportedHover = false;
   bool _reportedFocus = false;
+
+  bool get _hovered => widget.enabled && _pointerInside;
 
   FocusNode get _node => widget.focusNode ?? _ownedNode!;
 
@@ -232,7 +242,6 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
     _node.addListener(_handleNodeChange);
     _focused = _node.hasFocus;
     _reportedFocus = _focused;
-    _highlightTraditional = _isTraditional(FocusManager.instance.highlightMode);
     FocusManager.instance.addHighlightModeListener(_handleHighlightMode);
   }
 
@@ -253,13 +262,8 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
         _reportAfterFrame();
       }
     }
-    if (!widget.enabled) {
-      _pressed = false;
-      if (_hovered) {
-        _hovered = false;
-        _reportAfterFrame();
-      }
-    }
+    if (!widget.enabled) _pressed = false;
+    if (_reportedHover != _hovered) _reportAfterFrame();
     if (widget.enabled != oldWidget.enabled) {
       for (final action
           in _actions.values.whereType<_ActivateAction<Intent>>()) {
@@ -309,15 +313,11 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   }
 
   void _handleHighlightMode(FocusHighlightMode mode) {
-    final traditional = _isTraditional(mode);
-    if (!mounted || _highlightTraditional == traditional) return;
-    // Only a focused control shows the ring, and gaining focus rebuilds anyway,
-    // so an unfocused one just records the flag.
-    if (!_focused) {
-      _highlightTraditional = traditional;
-      return;
-    }
-    setState(() => _highlightTraditional = traditional);
+    // Only a focused control shows the ring; the mode itself is read live in
+    // build, because the platform default flips with mouse connection without
+    // notifying listeners.
+    if (!mounted || !_focused) return;
+    setState(() {});
   }
 
   void _activate() {
@@ -331,14 +331,47 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   }
 
   void _handleHover(bool value) {
-    if (!widget.enabled) value = false;
-    if (_hovered == value) return;
-    setState(() => _hovered = value);
+    if (_pointerInside == value) return;
+    setState(() => _pointerInside = value);
     _reportHover();
+  }
+
+  void _handlePressDown() {
+    _setPressed(true);
+    if (widget.requestFocusOnPress && _node.canRequestFocus) {
+      _node.requestFocus();
+    }
   }
 
   // Pointer taps and screen-reader taps both come here, so a popup trigger
   // takes focus either way and focus can return to it when the popup closes.
+  /// Whether the last pointer release landed on this control. A tap is
+  /// recognised anywhere within the touch slop of the press, so a press
+  /// dragged onto the next menu row would otherwise activate the first one.
+  /// Carbon's controls are buttons, which only click when released over
+  /// themselves.
+  bool _releasedInside = true;
+
+  void _handleTapUp(TapUpDetails details) {
+    final box = context.findRenderObject();
+    _releasedInside =
+        box is! RenderBox ||
+        !box.hasSize ||
+        (Offset.zero & box.size).contains(
+          box.globalToLocal(details.globalPosition),
+        );
+  }
+
+  void _handlePointerTap() {
+    final inside = _releasedInside;
+    _releasedInside = true;
+    if (inside) {
+      _handleTap();
+    } else {
+      _setPressed(false);
+    }
+  }
+
   void _handleTap() {
     _setPressed(false);
     if (!widget.enabled) return;
@@ -352,10 +385,11 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
   Widget build(BuildContext context) {
     final enabled = widget.enabled;
     final state = CarbonInteractionState(
-      hovered: enabled && _hovered,
+      hovered: _hovered,
       pressed: enabled && _pressed,
       focused: _focused,
-      focusVisible: _focused && _highlightTraditional,
+      focusVisible:
+          _focused && _isTraditional(FocusManager.instance.highlightMode),
       enabled: enabled,
     );
     // Excluded below the focus detector so its focusable and focused flags
@@ -405,9 +439,10 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
               child: GestureDetector(
                 behavior: widget.hitTestBehavior,
                 excludeFromSemantics: true,
-                onTapDown: enabled ? (_) => _setPressed(true) : null,
+                onTapDown: enabled ? (_) => _handlePressDown() : null,
                 onTapCancel: enabled ? () => _setPressed(false) : null,
-                onTap: enabled ? _handleTap : null,
+                onTapUp: enabled ? _handleTapUp : null,
+                onTap: enabled ? _handlePointerTap : null,
                 onLongPress: enabled && widget.onLongPress != null
                     ? () {
                         _setPressed(false);

@@ -42,7 +42,12 @@ class CarbonOptionPicker<T> extends StatefulWidget {
     this.listErrorText,
     this.emptyText,
     this.arrowUpOpens = true,
+    this.hideOutlineWhenOpen = false,
   });
+
+  /// Whether the field drops its focus outline while the list is open and a
+  /// value is committed, as Carbon's Dropdown does (dropdown.scss:108).
+  final bool hideOutlineWhenOpen;
 
   /// Whether ArrowUp opens a closed list. A native select does; Carbon's
   /// Dropdown ignores it until the list is open (Dropdown.tsx:574).
@@ -341,7 +346,9 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
         expanded: interactive ? open : null,
         excludeChildSemantics: true,
         builder: (context, state, _) => CarbonFieldBox(
-          focused: state.focused,
+          focused:
+              state.focused &&
+              !(open && widget.hideOutlineWhenOpen && widget.value != null),
           enabled: enabled,
           readOnly: widget.readOnly,
           invalid: error != null,
@@ -383,8 +390,15 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
           child: CarbonAnchoredPopup(
             controller: _popup,
             matchAnchorWidth: true,
-            maxHeight: kOptionListMaxRows * extent + 2,
+            maxHeight: kOptionListMaxRows * extent,
             restoreFocus: _node,
+            // A click on inert page space blurs a native button, so the field
+            // must not keep its focus outline behind a closed list.
+            onDismissed: (reason) {
+              if (reason == CarbonPopupDismissReason.outsideTap) {
+                _node.unfocus();
+              }
+            },
             popupBuilder: (context, available) => CarbonOptionListbox<T>(
               options: widget.options,
               selectedValue: widget.value,
@@ -401,6 +415,9 @@ class _CarbonOptionPickerState<T> extends State<CarbonOptionPicker<T>> {
                 _active = i;
                 _keyboard = false;
               }),
+              onLeave: () {
+                if (mounted && _popup.isOpen) setState(() => _active = -1);
+              },
             ),
             child: trigger,
           ),

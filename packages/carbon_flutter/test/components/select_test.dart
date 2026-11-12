@@ -212,7 +212,7 @@ void main() {
       // Rows are built lazily.
       expect(find.text('Option 0'), findsOneWidget);
       expect(find.text('Option 39'), findsNothing);
-      expect(tester.getSize(_list).height, 5.5 * 32 + 2);
+      expect(tester.getSize(_list).height, 5.5 * 32);
     });
   });
 

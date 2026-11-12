@@ -340,6 +340,10 @@ class CarbonOverflowMenu extends StatelessWidget {
               semanticLabel: name,
               size: size,
               focusNode: node,
+              // An open trigger stays on the layer fill the wrapper paints;
+              // Carbon's open-and-hover rule outranks the ghost hover and
+              // active fills.
+              hoverFill: !open,
               onPressed: enabled ? toggle : null,
             ),
           ),

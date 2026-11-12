@@ -90,8 +90,11 @@ class CarbonCheckbox extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
     final enabled = onChanged != null;
-    final invalid = errorText != null || this.invalid;
-    final message = errorText ?? helperText;
+    // Carbon ignores invalid while the control is disabled or read-only and
+    // shows the helper text instead.
+    final validates = enabled && !readOnly;
+    final invalid = validates && (errorText != null || this.invalid);
+    final message = validates ? (errorText ?? helperText) : helperText;
     final hasLabel = label != null || labelText != null;
     final name = labelText ?? semanticLabel;
     final labelStyle = theme.typography.control.copyWith(
@@ -408,8 +411,8 @@ class CarbonCheckboxGroup<T> extends StatelessWidget {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
     final enabled = onChanged != null;
-    final invalid = errorText != null;
-    final message = errorText ?? helperText;
+    final invalid = enabled && !readOnly && errorText != null;
+    final message = invalid ? errorText : helperText;
     return Semantics(
       container: true,
       explicitChildNodes: true,

@@ -788,20 +788,30 @@ class _MenuPanelState extends State<_MenuPanel> {
               ),
             ],
           ),
-          child: SingleChildScrollView(
-            key: _viewportKey,
-            controller: _scroll,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                vertical: CarbonSpacing.spacing02,
-              ),
-              child: IntrinsicWidth(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    for (var i = 0; i < _flat.length; i++)
-                      _buildRow(context, theme, level, i, hasCheck, hasIcon),
-                  ],
+          // Carbon scrolls with the platform's native overflow; the host
+          // app's Material scrollbar would paint its own theme colours here.
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(
+              context,
+            ).copyWith(scrollbars: false),
+            child: SingleChildScrollView(
+              key: _viewportKey,
+              controller: _scroll,
+              child: Padding(
+                // Rows are full width; inside a frame they stop at its sides,
+                // so neither a hovered fill nor a focus ring covers it.
+                padding: EdgeInsets.symmetric(
+                  vertical: CarbonSpacing.spacing02,
+                  horizontal: widget.host.border ? CarbonBorders.hairline : 0,
+                ),
+                child: IntrinsicWidth(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      for (var i = 0; i < _flat.length; i++)
+                        _buildRow(context, theme, level, i, hasCheck, hasIcon),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1010,7 +1020,10 @@ class _MenuRow extends StatelessWidget {
       builder: (context, state, _) {
         final colors = theme.colors;
         final danger = flat.danger && enabled;
-        final filledDanger = danger && (state.hovered || state.focusVisible);
+        // Carbon's menu item has no active rule, but a touch press never hovers,
+        // so without this it would fall through to the neutral hover fill.
+        final filledDanger =
+            danger && (state.hovered || state.pressed || state.focusVisible);
         final Color background;
         if (filledDanger) {
           background = colors.buttonDangerPrimary;

@@ -254,6 +254,11 @@ class CarbonTag extends StatelessWidget {
                     color: (state.hovered || state.pressed)
                         ? palette.hover
                         : const Color(0x00000000),
+                    // Carbon changes only the background on hover, so the
+                    // pill's border stays over the hover fill.
+                    border: palette.border == null
+                        ? null
+                        : Border.all(color: palette.border!),
                   ),
                 ),
               ),
@@ -302,7 +307,14 @@ class CarbonTag extends StatelessWidget {
           width: theme.minTarget,
           height: footprint,
           child: Center(
-            child: CarbonFocusRing(
+            child: _withFocusColor(
+              // A high-contrast fill is dark in a light theme, so Carbon's
+              // close button focuses with the inverse colour there.
+              color == CarbonTagColor.highContrast
+                  ? theme.colors.focusInverse
+                  : null,
+              theme,
+              CarbonFocusRing(
               visible: state.focusVisible,
               onColor: true,
               borderRadius: radius,
@@ -324,6 +336,7 @@ class CarbonTag extends StatelessWidget {
                   ),
                 ),
               ),
+            ),
             ),
           ),
         ),
@@ -361,6 +374,14 @@ class CarbonTag extends StatelessWidget {
     );
   }
 }
+
+Widget _withFocusColor(Color? focus, CarbonThemeData theme, Widget child) =>
+    focus == null
+    ? child
+    : CarbonTheme(
+        data: theme.copyWith(colors: theme.colors.copyWith(focus: focus)),
+        child: child,
+      );
 
 class _TagPalette {
   const _TagPalette({

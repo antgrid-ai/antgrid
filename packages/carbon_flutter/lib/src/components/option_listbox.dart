@@ -20,10 +20,9 @@ import 'loading.dart';
 /// list-box.scss:613).
 const double kOptionListMaxRows = 5.5;
 
-/// Height of a list holding [count] rows, border included.
+/// Height of a list holding [count] rows.
 double optionListHeight(int count, double extent) =>
-    math.min(count.toDouble(), kOptionListMaxRows) * extent +
-    2 * CarbonBorders.hairline;
+    math.min(count.toDouble(), kOptionListMaxRows) * extent;
 
 /// Height of one list row.
 ///
@@ -177,6 +176,7 @@ class CarbonOptionListbox<T> extends StatelessWidget {
     required this.keyboardActive,
     required this.onSelect,
     required this.onHover,
+    this.onLeave,
     required this.controller,
     required this.extent,
     this.level,
@@ -199,15 +199,28 @@ class CarbonOptionListbox<T> extends StatelessWidget {
   final bool keyboardActive;
   final ValueChanged<int> onSelect;
   final ValueChanged<int> onHover;
+
+  /// The pointer left a row, or sat on one that cannot be highlighted: the
+  /// pointer-driven highlight must not outlive the pointer. Not called while
+  /// the keyboard owns the highlight.
+  final VoidCallback? onLeave;
   final ScrollController controller;
   final double extent;
   final bool loading;
   final String? errorText;
   final String? emptyText;
 
+  void _leave(int index) {
+    if (index == activeIndex && !keyboardActive) onLeave?.call();
+  }
+
   bool _isSelected(int index) =>
       selectedValue != null && options[index].value == selectedValue;
 
+  /// Whether the rules above and below a row are hidden. Carbon hides them
+  /// around the committed row (`--active`), the highlighted row
+  /// (`--highlighted`, whether the keyboard or the pointer moved it) and the
+  /// row under the pointer (`:hover`, which the row handles itself).
   bool _isFilled(int index) =>
       index >= 0 &&
       index < options.length &&
@@ -232,7 +245,11 @@ class CarbonOptionListbox<T> extends StatelessWidget {
     } else if (errorText != null) {
       status = _StatusRow(
         extent: extent,
-        leading: CarbonIcon(CarbonIcons.errorFilled, color: colors.supportError),
+        leading: CarbonIcon(
+          CarbonIcons.errorFilled,
+          size: theme.iconSize,
+          color: colors.supportError,
+        ),
         text: errorText!,
         color: colors.textError,
       );
@@ -246,19 +263,33 @@ class CarbonOptionListbox<T> extends StatelessWidget {
 
     final leading = status == null ? 0 : 1;
     final count = options.length + leading;
-    final border = theme.borderSubtle(level);
-
+    // Carbon v11 separates the list from the page with a shadow alone
+    // (list-box.scss `list-box__menu`; its 1px border is v12-only). A frame
+    // here would also sit under the full-width rows, so a hovered or
+    // selected row's fill would erase its sides.
     return DecoratedBox(
       decoration: BoxDecoration(
         color: theme.field(level),
-        border: Border.all(color: border, width: CarbonBorders.hairline),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: colors.shadow,
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: SizedBox(
         height: optionListHeight(count, extent),
         child: Semantics(
           container: true,
           explicitChildNodes: true,
-          child: ListView.builder(
+          // Carbon's menu scrolls natively; a host Material scrollbar would
+          // bring the host's colours into the list.
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(
+              context,
+            ).copyWith(scrollbars: false),
+            child: ListView.builder(
             controller: controller,
             padding: EdgeInsets.zero,
             itemExtent: extent,
@@ -277,8 +308,10 @@ class CarbonOptionListbox<T> extends StatelessWidget {
                 divider: i > 0 && !_isFilled(index) && !_isFilled(index - 1),
                 onSelect: () => onSelect(index),
                 onHover: () => onHover(index),
+                onLeave: () => _leave(index),
               );
             },
+            ),
           ),
         ),
       ),
@@ -346,6 +379,7 @@ class _OptionRow<T> extends StatefulWidget {
     required this.divider,
     required this.onSelect,
     required this.onHover,
+    required this.onLeave,
   });
 
   final CarbonOption<T> option;
@@ -356,6 +390,7 @@ class _OptionRow<T> extends StatefulWidget {
   final bool divider;
   final VoidCallback onSelect;
   final VoidCallback onHover;
+  final VoidCallback onLeave;
 
   @override
   State<_OptionRow<T>> createState() => _OptionRowState<T>();
@@ -363,6 +398,11 @@ class _OptionRow<T> extends StatefulWidget {
 
 class _OptionRowState<T> extends State<_OptionRow<T>> {
   bool _pressed = false;
+  bool _pointerOver = false;
+
+  void _setPointerOver(bool value) {
+    if (_pointerOver != value) setState(() => _pointerOver = value);
+  }
 
   void _setPressed(bool value) {
     if (_pressed != value) setState(() => _pressed = value);
@@ -381,13 +421,16 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
     final pressed = _pressed && enabled;
 
     // The keyboard highlight is only the focus outline (list-box.scss:829); the
-    // hover fill belongs to the pointer.
-    final hovered = highlighted && !widget.keyboardActive;
-    final Color? fill = pressed
-        ? theme.layerSelected(level)
-        : selected && hovered
-        ? theme.layerSelectedHover(level)
-        : selected
+    // hover fill is CSS :hover, so it needs a pointer actually over the row.
+    final hovered = _pointerOver && enabled;
+    // A pressed selected row under a mouse keeps its hover fill: the
+    // `--active:hover` rule follows `:active` at equal specificity
+    // (list-box.scss:632, :860).
+    final Color? fill = selected
+        ? (hovered
+              ? theme.layerSelectedHover(level)
+              : theme.layerSelected(level))
+        : pressed
         ? theme.layerSelected(level)
         : hovered
         ? theme.layerHover(level)
@@ -396,7 +439,7 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
     // the committed one.
     final textColor = !enabled
         ? colors.textDisabled
-        : (highlighted || selected || pressed)
+        : (highlighted || hovered || selected || pressed)
         ? colors.textPrimary
         : colors.textSecondary;
     final description = option.description;
@@ -418,7 +461,14 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
       onTap: enabled ? widget.onSelect : null,
       child: ExcludeSemantics(
         child: MouseRegion(
-          cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+          cursor: enabled
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.forbidden,
+          onEnter: (_) => _setPointerOver(true),
+          onExit: (_) {
+            _setPointerOver(false);
+            widget.onLeave();
+          },
           onHover: enabled && !active ? (_) => widget.onHover() : null,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
@@ -438,7 +488,7 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
                   ),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      border: widget.divider
+                      border: widget.divider && !hovered
                           ? Border(
                               top: BorderSide(
                                 color: theme.borderSubtle(level),
@@ -492,6 +542,7 @@ class _OptionRowState<T> extends State<_OptionRow<T>> {
                         const SizedBox(width: CarbonSpacing.spacing03),
                         CarbonIcon(
                           CarbonIcons.checkmark,
+                          size: theme.iconSize,
                           color: enabled
                               ? colors.iconPrimary
                               : colors.iconDisabled,

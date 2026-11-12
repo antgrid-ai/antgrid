@@ -222,7 +222,10 @@ class CarbonButton extends StatelessWidget {
             // Carbon caps a button's inline size, so a long label wraps.
             maxWidth: _iconOnly || expand ? double.infinity : _maxWidth,
           ),
-          child: CarbonFocusRing(
+          child: _ButtonStateTag(
+            focused: state.focused,
+            disabled: disabled,
+            child: CarbonFocusRing(
             visible: state.focusVisible,
             // Outlined kinds fill on focus, so they need the inner ring too.
             onColor: _isFilled || (!disabled && style.focusFilled),
@@ -256,6 +259,7 @@ class CarbonButton extends StatelessWidget {
                   child: _content(context, theme, style, hPad),
                 ),
               ),
+            ),
             ),
           ),
         );
@@ -448,15 +452,17 @@ class _CarbonButtonStyle {
       Color invertedIcon,
     ) {
       final on = hovered || pressed || focused;
+      // Focus outranks hover for the fill, as the later :focus rule does in
+      // Carbon; only :active overrides it.
       final Color fill = pressed
           ? active
-          : (hovered ? hover : (focused ? focusFill : _clear));
+          : (focused ? focusFill : (hovered ? hover : _clear));
       return _CarbonButtonStyle(
         background: fill,
         foreground: on ? invertedText : accent,
         iconColor: on ? invertedIcon : accent,
         border: pressed ? active : (hovered ? hoverBorder : accent),
-        focusFilled: focused && !hovered && !pressed,
+        focusFilled: focused,
       );
     }
 
@@ -568,6 +574,8 @@ class CarbonButtonSet extends StatelessWidget {
     return _ButtonSetLayout(
       alignment: alignment,
       separatorColor: theme.colors.buttonSeparator,
+      disabledSeparatorColor: theme.colors.iconOnColorDisabled,
+      stackedDisabledSeparatorColor: theme.colors.layerSelectedDisabled,
       textDirection: Directionality.of(context),
       children: children,
     );
@@ -579,17 +587,23 @@ class _ButtonSetLayout extends MultiChildRenderObjectWidget {
     required super.children,
     required this.alignment,
     required this.separatorColor,
+    required this.disabledSeparatorColor,
+    required this.stackedDisabledSeparatorColor,
     required this.textDirection,
   });
 
   final CarbonButtonSetAlignment alignment;
   final Color separatorColor;
+  final Color disabledSeparatorColor;
+  final Color stackedDisabledSeparatorColor;
   final TextDirection textDirection;
 
   @override
   RenderObject createRenderObject(BuildContext context) => _RenderButtonSet(
     alignment: alignment,
     separatorColor: separatorColor,
+    disabledSeparatorColor: disabledSeparatorColor,
+    stackedDisabledSeparatorColor: stackedDisabledSeparatorColor,
     textDirection: textDirection,
   );
 
@@ -598,6 +612,10 @@ class _ButtonSetLayout extends MultiChildRenderObjectWidget {
     renderObject
       ..alignment = alignment
       ..separatorColor = separatorColor
+      ..setDisabledSeparators(
+        disabledSeparatorColor,
+        stackedDisabledSeparatorColor,
+      )
       ..textDirection = textDirection;
   }
 }
@@ -620,9 +638,13 @@ class _RenderButtonSet extends RenderBox
   _RenderButtonSet({
     required CarbonButtonSetAlignment alignment,
     required Color separatorColor,
+    required Color disabledSeparatorColor,
+    required Color stackedDisabledSeparatorColor,
     required TextDirection textDirection,
   }) : _alignment = alignment,
        _separatorColor = separatorColor,
+       _rowDisabledSeparator = disabledSeparatorColor,
+       _stackedDisabledSeparator = stackedDisabledSeparatorColor,
        _textDirection = textDirection;
 
   static const double _gap = CarbonBorders.hairline;
@@ -641,6 +663,29 @@ class _RenderButtonSet extends RenderBox
     if (_separatorColor == v) return;
     _separatorColor = v;
     markNeedsPaint();
+  }
+
+  Color _rowDisabledSeparator;
+  Color _stackedDisabledSeparator;
+  void setDisabledSeparators(Color row, Color stacked) {
+    if (_rowDisabledSeparator == row && _stackedDisabledSeparator == stacked) {
+      return;
+    }
+    _rowDisabledSeparator = row;
+    _stackedDisabledSeparator = stacked;
+    markNeedsPaint();
+  }
+
+  Color _disabledSeparatorColor(bool stacked) =>
+      stacked ? _stackedDisabledSeparator : _rowDisabledSeparator;
+
+  // The state tag sits somewhere inside each button; a child without one (a
+  // non-button) counts as neither focused nor disabled.
+  static _RenderButtonStateTag? _tagOf(RenderObject root) {
+    if (root is _RenderButtonStateTag) return root;
+    _RenderButtonStateTag? found;
+    root.visitChildren((c) => found ??= _tagOf(c));
+    return found;
   }
 
   TextDirection _textDirection;
@@ -841,23 +886,38 @@ class _RenderButtonSet extends RenderBox
   void paint(PaintingContext context, Offset offset) {
     final plan = _plan;
     if (plan != null && childCount > 1) {
-      final paint = Paint()..color = _separatorColor;
+      final kids = _kids;
       final ltr = _textDirection == TextDirection.ltr;
       for (var i = 0; i < plan.offsets.length; i++) {
         final o = plan.offsets[i];
         final s = plan.childSizes[i];
         final Rect rule;
+        // The rule belongs to the button it is drawn for, and Carbon drops it
+        // when that button or its neighbour holds focus.
+        final int owner;
+        final int neighbour;
         if (plan.stacked) {
           // Child 0 is the bottom button and has nothing below it.
           if (i == 0) continue;
           rule = Rect.fromLTWH(o.dx, o.dy + s.height, size.width, _gap);
+          owner = i;
+          neighbour = i - 1;
         } else {
           // The rule follows each button in reading order except the last.
           if (i == plan.offsets.length - 1) continue;
           final x = ltr ? o.dx + s.width : o.dx - _gap;
           rule = Rect.fromLTWH(x, 0, _gap, size.height);
+          owner = i + 1;
+          neighbour = i;
         }
-        context.canvas.drawRect(rule.shift(offset), paint);
+        final ownerTag = _tagOf(kids[owner]);
+        if (ownerTag?.focused == true || _tagOf(kids[neighbour])?.focused == true) {
+          continue;
+        }
+        final color = ownerTag?.disabled == true
+            ? _disabledSeparatorColor(plan.stacked)
+            : _separatorColor;
+        context.canvas.drawRect(rule.shift(offset), Paint()..color = color);
       }
     }
     defaultPaint(context, offset);
@@ -866,4 +926,62 @@ class _RenderButtonSet extends RenderBox
   @override
   bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
       defaultHitTestChildren(result, position: position);
+}
+
+/// Publishes a button's focus and disabled state to an enclosing
+/// [CarbonButtonSet], whose separators depend on both.
+class _ButtonStateTag extends SingleChildRenderObjectWidget {
+  const _ButtonStateTag({
+    required this.focused,
+    required this.disabled,
+    required super.child,
+  });
+
+  final bool focused;
+  final bool disabled;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderButtonStateTag(focused, disabled);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderButtonStateTag renderObject,
+  ) {
+    renderObject
+      ..focused = focused
+      ..disabled = disabled;
+  }
+}
+
+class _RenderButtonStateTag extends RenderProxyBox {
+  _RenderButtonStateTag(this._focused, this._disabled);
+
+  bool _focused;
+  bool get focused => _focused;
+  set focused(bool v) {
+    if (_focused == v) return;
+    _focused = v;
+    _repaintSet();
+  }
+
+  bool _disabled;
+  bool get disabled => _disabled;
+  set disabled(bool v) {
+    if (_disabled == v) return;
+    _disabled = v;
+    _repaintSet();
+  }
+
+  void _repaintSet() {
+    RenderObject? p = parent;
+    while (p != null) {
+      if (p is _RenderButtonSet) {
+        p.markNeedsPaint();
+        return;
+      }
+      p = p.parent;
+    }
+  }
 }

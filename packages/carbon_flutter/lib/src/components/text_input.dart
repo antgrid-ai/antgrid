@@ -2,12 +2,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart'
     show
-        InputDecoration,
         Material,
         MaterialType,
-        TextField,
-        TextSelectionTheme,
-        TextSelectionThemeData;
+        TextField;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -17,6 +14,7 @@ import '../foundations/icons.dart';
 import '../foundations/localizations.dart';
 import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
+import '../primitives/bare_input_decoration.dart';
 import '../primitives/field.dart';
 import '../primitives/focus_ring.dart';
 import '../primitives/interaction.dart';
@@ -212,10 +210,11 @@ class CarbonActionFieldBox extends StatelessWidget {
               CarbonFieldBox.paddingX -
               CarbonSpacing.spacing03;
     final top = crossAxisAlignment == CrossAxisAlignment.start;
-    final outline = focused || invalid || warn
-        ? CarbonBorders.focus
-        : CarbonBorders.hairline;
-    final edge = focused || invalid || warn ? CarbonBorders.focus : 0.0;
+    // The box paints an outline only for focus and error; a warning has none
+    // for the hover fill to keep clear.
+    final outlined = focused || invalid;
+    final outline = outlined ? CarbonBorders.focus : CarbonBorders.hairline;
+    final edge = outlined ? CarbonBorders.focus : 0.0;
     return Stack(
       children: <Widget>[
         CarbonFieldBox(
@@ -628,7 +627,11 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
       style: controlStyle,
       cursorColor: colors.textPrimary,
       cursorWidth: 1,
-      decoration: InputDecoration.collapsed(
+      // Carbon's disabled field is not-allowed, where Material's falls back
+      // to the basic arrow.
+      mouseCursor: enabled ? null : SystemMouseCursors.forbidden,
+      contextMenuBuilder: (_, state) => carbonSelectionToolbar(theme, state),
+      decoration: carbonBareInputDecoration(
         hintText: widget.placeholder,
         hintStyle: baseStyle.copyWith(
           color: enabled ? colors.textPlaceholder : colors.textDisabled,
@@ -649,12 +652,13 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
           : SemanticsValidationResult.none,
       child: Material(
         type: MaterialType.transparency,
-        child: TextSelectionTheme(
-          data: TextSelectionThemeData(
-            cursorColor: colors.textPrimary,
-            selectionColor: colors.highlight,
+        child: CarbonSelectionScope(
+          // The editable builds its scrollbar from the inherited behavior;
+          // the host's Material one would apply its ScrollbarTheme here.
+          child: ScrollConfiguration(
+            behavior: const ScrollBehavior(),
+            child: textField,
           ),
-          child: textField,
         ),
       ),
     );

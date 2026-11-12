@@ -389,6 +389,8 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
                           child: _Tab(
                             option: widget.tabs[i],
                             selected: i == selected,
+                            divider:
+                                i > 0 && i != selected && i - 1 != selected,
                             focusNode: _nodes[widget.tabs[i].value]!,
                             contained: contained,
                             level: level,
@@ -467,6 +469,7 @@ class _Tab extends StatelessWidget {
   const _Tab({
     required this.option,
     required this.selected,
+    required this.divider,
     required this.focusNode,
     required this.contained,
     required this.level,
@@ -477,6 +480,11 @@ class _Tab extends StatelessWidget {
 
   final CarbonOption<Object?> option;
   final bool selected;
+
+  /// Whether a contained tab draws the rule on its leading edge. Carbon
+  /// separates contained tabs with a leading rule only, and drops it on both
+  /// sides of the selected tab (tabs.scss: `nav-item--selected + nav-item`).
+  final bool divider;
   final FocusNode focusNode;
   final bool contained;
   final int level;
@@ -493,6 +501,7 @@ class _Tab extends StatelessWidget {
       onPressed: enabled ? onSelect : null,
       focusNode: focusNode,
       requestFocusOnTap: true,
+      requestFocusOnPress: true,
       onFocusChange: onFocusChange,
       button: false,
       role: SemanticsRole.tab,
@@ -525,10 +534,12 @@ class _Tab extends StatelessWidget {
               color: selected && enabled ? colors.borderInteractive : transparent,
               width: CarbonBorders.selectedTab,
             ),
-            end: BorderSide(
-              color: theme.borderStrong(level),
-              width: CarbonBorders.hairline,
-            ),
+            start: divider
+                ? BorderSide(
+                    color: theme.borderStrong(level),
+                    width: CarbonBorders.hairline,
+                  )
+                : BorderSide.none,
           );
         } else {
           border = Border(
@@ -545,7 +556,8 @@ class _Tab extends StatelessWidget {
         return ConstrainedBox(
           constraints: BoxConstraints(minHeight: height),
           child: CarbonFocusRing(
-            visible: state.focusVisible,
+            // Carbon outlines a tab on :active as well as :focus.
+            visible: state.focusVisible || state.pressed,
             child: DecoratedBox(
               decoration: BoxDecoration(color: fill, border: border),
               child: Padding(

@@ -399,31 +399,43 @@ class CarbonModal extends StatelessWidget {
             PositionedDirectional(
               top: 0,
               end: 0,
-              child: CarbonButton.iconOnly(
-                icon: CarbonIcon(
-                  CarbonIcons.close,
-                  size: theme.isTouch ? null : 20,
+              // The close button sits on layer-01, so Carbon hovers it with
+              // layer-hover rather than the ghost button's background-hover.
+              child: CarbonTheme(
+                data: theme.copyWith(
+                  colors: colors.copyWith(backgroundHover: colors.layerHover01),
                 ),
-                iconSize: theme.isTouch ? null : 20,
-                semanticLabel: loc.close,
-                size: theme.isTouch ? null : CarbonButtonSize.large,
-                onPressed: () => _close(context),
+                child: CarbonButton.iconOnly(
+                  icon: CarbonIcon(
+                    CarbonIcons.close,
+                    size: theme.isTouch ? null : 20,
+                  ),
+                  iconSize: theme.isTouch ? null : 20,
+                  semanticLabel: loc.close,
+                  size: theme.isTouch ? null : CarbonButtonSize.large,
+                  onPressed: () => _close(context),
+                ),
               ),
             ),
         ],
       ),
     );
 
-    final bodyView = SingleChildScrollView(
-      padding: const EdgeInsetsDirectional.fromSTEB(
-        CarbonSpacing.spacing05,
-        CarbonSpacing.spacing03,
-        CarbonSpacing.spacing05,
-        CarbonSpacing.spacing09,
-      ),
-      child: DefaultTextStyle.merge(
-        style: type.body.copyWith(color: colors.textPrimary),
-        child: body,
+    // The ambient behavior of a Material host builds its own scrollbar in the
+    // host's colours; Carbon draws none.
+    final bodyView = ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: SingleChildScrollView(
+        padding: const EdgeInsetsDirectional.fromSTEB(
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing03,
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing09,
+        ),
+        child: DefaultTextStyle.merge(
+          style: type.body.copyWith(color: colors.textPrimary),
+          child: body,
+        ),
       ),
     );
 

@@ -62,9 +62,12 @@ void main() {
     const tabs = <CarbonOption<String>>[
       CarbonOption(value: 'a', label: 'Alpha'),
       CarbonOption(value: 'b', label: 'Beta'),
+      CarbonOption(value: 'c', label: 'Gamma'),
     ];
+    // tabs.scss: the rule is on a tab's leading edge, and the tab after the
+    // selected one has none, so Gamma carries the first rule.
     for (final dir in TextDirection.values) {
-      testWidgets('sits on the end edge in $dir', (tester) async {
+      testWidgets('sits on the leading edge in $dir', (tester) async {
         await pumpCarbon(
           tester,
           CarbonTabs<String>(
@@ -75,9 +78,9 @@ void main() {
           ),
           dir: dir,
         );
-        final border = _tabBorder(tester, 'Beta')!.dimensions.resolve(dir);
-        final rule = dir == TextDirection.ltr ? border.right : border.left;
-        final other = dir == TextDirection.ltr ? border.left : border.right;
+        final border = _tabBorder(tester, 'Gamma')!.dimensions.resolve(dir);
+        final rule = dir == TextDirection.ltr ? border.left : border.right;
+        final other = dir == TextDirection.ltr ? border.right : border.left;
         expect(rule, 1.0);
         expect(other, 0.0);
       });

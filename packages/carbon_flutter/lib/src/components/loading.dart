@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show GestureBinding;
 import 'package:flutter/widgets.dart';
 
 import '../foundations/localizations.dart';
@@ -275,6 +276,11 @@ class _CarbonLoadingOverlayState extends State<CarbonLoadingOverlay> {
   );
   FocusNode? _restore;
 
+  // Pointers held on the child. The scrim only absorbs new hit tests, so a
+  // press already in flight would otherwise complete under it and activate a
+  // control the scrim covers.
+  final Set<int> _held = <int>{};
+
   @override
   void dispose() {
     _inside.dispose();
@@ -286,6 +292,10 @@ class _CarbonLoadingOverlayState extends State<CarbonLoadingOverlay> {
     super.didUpdateWidget(oldWidget);
     if (widget.loading == oldWidget.loading) return;
     if (widget.loading) {
+      for (final pointer in _held.toList()) {
+        GestureBinding.instance.cancelPointer(pointer);
+      }
+      _held.clear();
       // ExcludeFocus drops focus during this build, so remember it first.
       final focused = FocusManager.instance.primaryFocus;
       _restore = focused != null && _inside.hasFocus ? focused : null;
@@ -305,14 +315,20 @@ class _CarbonLoadingOverlayState extends State<CarbonLoadingOverlay> {
     final loading = widget.loading;
     return Stack(
       children: [
-        ExcludeSemantics(
-          excluding: loading,
-          child: ExcludeFocus(
+        Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (e) => _held.add(e.pointer),
+          onPointerUp: (e) => _held.remove(e.pointer),
+          onPointerCancel: (e) => _held.remove(e.pointer),
+          child: ExcludeSemantics(
             excluding: loading,
-            child: Focus(
-              focusNode: _inside,
-              includeSemantics: false,
-              child: widget.child,
+            child: ExcludeFocus(
+              excluding: loading,
+              child: Focus(
+                focusNode: _inside,
+                includeSemantics: false,
+                child: widget.child,
+              ),
             ),
           ),
         ),

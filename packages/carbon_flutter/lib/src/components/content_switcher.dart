@@ -401,6 +401,19 @@ class _Segment extends StatelessWidget {
             : last
             ? const BorderRadiusDirectional.horizontal(end: Radius.circular(4))
             : null;
+        // Carbon's segments carry their own share of the frame, painted over
+        // their fill (content-switcher.scss: top and bottom borders, an inset
+        // box-shadow on the end segments), and drop it when selected or
+        // focused. So a hovered fill stops inside the frame, while a
+        // selected fill and a focus ring cover it.
+        final EdgeInsetsGeometry fillInset = selected || state.focusVisible
+            ? EdgeInsets.zero
+            : EdgeInsetsDirectional.only(
+                top: CarbonBorders.hairline,
+                bottom: CarbonBorders.hairline,
+                start: first ? CarbonBorders.hairline : 0,
+                end: last ? CarbonBorders.hairline : 0,
+              );
         return ConstrainedBox(
           constraints: BoxConstraints(
             minHeight: height,
@@ -409,11 +422,20 @@ class _Segment extends StatelessWidget {
           child: CarbonFocusRing(
             visible: state.focusVisible,
             onColor: selected,
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: fill, borderRadius: radius),
-              child: Stack(
+            child: Stack(
                 fit: StackFit.passthrough,
                 children: <Widget>[
+                  Positioned.fill(
+                    child: Padding(
+                      padding: fillInset,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: fill,
+                          borderRadius: radius,
+                        ),
+                      ),
+                    ),
+                  ),
                   Padding(
                     padding: EdgeInsets.symmetric(
                       horizontal: iconOnly
@@ -467,7 +489,6 @@ class _Segment extends StatelessWidget {
                     ),
                 ],
               ),
-            ),
           ),
         );
       },
