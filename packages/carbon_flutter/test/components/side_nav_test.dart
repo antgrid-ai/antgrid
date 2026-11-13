@@ -240,6 +240,26 @@ void main() {
       expect(await height(_touch(), large: true), 48);
     });
 
+    testWidgets('keeps its own height inside a bounded parent', (tester) async {
+      for (final theme in [CarbonThemeData(), _touch()]) {
+        await pumpCarbon(
+          tester,
+          Align(
+            alignment: AlignmentDirectional.topStart,
+            // Loose, like a Scaffold body: a row must not grow to fill it.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 288, maxHeight: 600),
+              child: CarbonSideNavScope(
+                child: const CarbonSideNavLink(label: 'Home', onPressed: _noop),
+              ),
+            ),
+          ),
+          theme: theme,
+        );
+        expect(tester.getSize(_link('Home')).height, theme.isTouch ? 44 : 32);
+      }
+    });
+
     testWidgets('grows past its minimum height at 200% text', (tester) async {
       Future<double> height(CarbonThemeData theme) async {
         await pumpCarbon(
@@ -869,6 +889,46 @@ void main() {
       await tester.pump();
       expect(_glyph(CarbonIcons.chevronDown), findsNothing);
       expect(_glyph(CarbonIcons.folder), findsOneWidget);
+    });
+
+    testWidgets('afterLabel puts a tree chevron right after the title', (
+      tester,
+    ) async {
+      double turns() => tester
+          .widget<AnimatedRotation>(
+            find.ancestor(
+              of: _glyph(CarbonIcons.chevronDown),
+              matching: find.byType(AnimatedRotation),
+            ),
+          )
+          .turns;
+      for (final dir in TextDirection.values) {
+        await pumpCarbon(
+          tester,
+          Directionality(
+            textDirection: dir,
+            child: menu(chevron: CarbonSideNavChevron.afterLabel),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(_glyph(CarbonIcons.chevronDown), findsOneWidget);
+        expect(_glyph(CarbonIcons.folder), findsOneWidget);
+        // Closed, it points toward the reading end.
+        expect(turns(), dir == TextDirection.ltr ? -0.25 : 0.25);
+        final title = tester.getRect(find.text('Proj'));
+        final chevron = tester.getRect(_glyph(CarbonIcons.chevronDown));
+        final gap = dir == TextDirection.ltr
+            ? chevron.left - title.right
+            : title.left - chevron.right;
+        expect(gap, CarbonSpacing.spacing02);
+      }
+
+      await pumpCarbon(
+        tester,
+        menu(chevron: CarbonSideNavChevron.afterLabel, expanded: true),
+      );
+      await tester.pumpAndSettle();
+      expect(turns(), 0);
     });
 
     testWidgets('hoverFill false leaves the row unfilled under a pointer', (

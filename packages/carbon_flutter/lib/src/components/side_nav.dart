@@ -35,6 +35,11 @@ enum CarbonSideNavChevron {
   /// In place of the leading icon, and only while a pointer is over the item:
   /// never on touch and never for focus alone (deviation CSN-chevron).
   swapsIcon,
+
+  /// Right after the title, pointing toward the end when closed and down when
+  /// open, so a heading-like menu reads as a disclosure next to its name and
+  /// leaves the trailing slot to status marks (deviation CSN-chevron-inline).
+  afterLabel,
 }
 
 /// What a side nav's items read from their surroundings: how deep they nest
@@ -381,17 +386,19 @@ class CarbonSideNavMenu extends StatelessWidget {
     final glyph = icon;
     final slot = leading;
     final swaps = chevron == CarbonSideNavChevron.swapsIcon;
+    final inline = chevron == CarbonSideNavChevron.afterLabel;
     final rtl = Directionality.of(context) == TextDirection.rtl;
     final duration = CarbonMotion.resolve(context, CarbonMotion.fast02);
 
+    // A tree chevron: down when open, toward the reading end when closed.
+    Widget treeChevron() => AnimatedRotation(
+      turns: expanded ? 0 : (rtl ? 0.25 : -0.25),
+      duration: duration,
+      child: const CarbonIcon(CarbonIcons.chevronDown),
+    );
+
     Widget? leadingFor(bool pointerHovered) {
-      if (swaps && pointerHovered) {
-        return AnimatedRotation(
-          turns: expanded ? 0 : (rtl ? 0.25 : -0.25),
-          duration: duration,
-          child: const CarbonIcon(CarbonIcons.chevronDown),
-        );
-      }
+      if (swaps && pointerHovered) return treeChevron();
       if (glyph != null) return CarbonIcon(glyph);
       return slot;
     }
@@ -406,7 +413,8 @@ class CarbonSideNavMenu extends StatelessWidget {
           leadingBuilder: swaps || glyph != null || slot != null
               ? leadingFor
               : null,
-          endGlyph: swaps
+          labelGlyph: inline ? treeChevron() : null,
+          endGlyph: swaps || inline
               ? null
               : AnimatedRotation(
                   turns: expanded ? 0.5 : 0,
@@ -460,6 +468,7 @@ class _SideNavRow extends StatelessWidget {
     this.activeBranch = false,
     this.leadingBuilder,
     this.endGlyph,
+    this.labelGlyph,
     this.semanticsSelected,
     this.expanded,
     this.hoverFill = true,
@@ -479,6 +488,9 @@ class _SideNavRow extends StatelessWidget {
   /// is over the row. Null means no slot.
   final Widget? Function(bool pointerHovered)? leadingBuilder;
   final Widget? endGlyph;
+
+  /// A glyph that follows the label directly rather than the end of the row.
+  final Widget? labelGlyph;
 
   /// Fill and start bar.
   final bool selected;
@@ -509,6 +521,21 @@ class _SideNavRow extends StatelessWidget {
   final FocusNode? focusNode;
   final ValueChanged<bool>? onFocusChange;
   final ValueChanged<bool>? onHoverChange;
+
+  Widget _withLabelGlyph(CarbonThemeData theme, Color color, Widget label) {
+    final glyph = labelGlyph;
+    if (glyph == null) return label;
+    return Row(
+      children: <Widget>[
+        Flexible(child: label),
+        const SizedBox(width: CarbonSpacing.spacing02),
+        IconTheme(
+          data: IconThemeData(color: color, size: theme.iconSize),
+          child: glyph,
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -639,8 +666,11 @@ class _SideNavRow extends StatelessWidget {
                   top: CarbonSpacing.spacing02,
                   bottom: CarbonSpacing.spacing02,
                 ),
+                // heightFactor keeps a row at its own height inside a bounded
+                // parent instead of filling it.
                 child: Align(
                   alignment: AlignmentDirectional.centerStart,
+                  heightFactor: 1,
                   child: Row(
                     children: <Widget>[
                       if (leadingBuilder != null) ...<Widget>[
@@ -657,11 +687,15 @@ class _SideNavRow extends StatelessWidget {
                         const SizedBox(width: CarbonSpacing.spacing03),
                       ],
                       Expanded(
-                        child: DefaultTextStyle(
-                          style: style,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          child: content ?? Text(label),
+                        child: _withLabelGlyph(
+                          theme,
+                          iconColor,
+                          DefaultTextStyle(
+                            style: style,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            child: content ?? Text(label),
+                          ),
                         ),
                       ),
                       if (endGlyph != null) ...<Widget>[

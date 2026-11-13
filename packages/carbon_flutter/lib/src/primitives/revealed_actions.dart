@@ -23,14 +23,25 @@ class RevealedActionsHost extends StatefulWidget {
 
 class _RevealedActionsHostState extends State<RevealedActionsHost> {
   bool _hovered = false;
-  bool _focusWithin = false;
+
+  // Read live in build rather than cached from onFocusChange: when the focused
+  // descendant is disposed (a menu item under a trigger that unmounted), the
+  // focus manager drops primary focus without notifying this ancestor, so a
+  // cached flag would hold the row revealed until something else refocused it.
+  final FocusNode _focus = FocusNode(
+    canRequestFocus: false,
+    skipTraversal: true,
+    debugLabel: 'RevealedActionsHost',
+  );
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
 
   void _setHover(bool value) {
     if (_hovered != value) setState(() => _hovered = value);
-  }
-
-  void _setFocusWithin(bool value) {
-    if (_focusWithin != value) setState(() => _focusWithin = value);
   }
 
   @override
@@ -39,10 +50,9 @@ class _RevealedActionsHostState extends State<RevealedActionsHost> {
       onEnter: (_) => _setHover(true),
       onExit: (_) => _setHover(false),
       child: Focus(
-        canRequestFocus: false,
-        skipTraversal: true,
-        onFocusChange: _setFocusWithin,
-        child: widget.builder(context, _hovered, _focusWithin),
+        focusNode: _focus,
+        onFocusChange: (_) => setState(() {}),
+        child: widget.builder(context, _hovered, _focus.hasFocus),
       ),
     );
   }
