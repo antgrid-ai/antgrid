@@ -9,20 +9,10 @@ import '../../util/detached.dart';
 import '../session_delete_flow.dart';
 import 'recent_sessions_summary.dart' show RecentGroupBy;
 
-/// Below this OUTER row width a Recent row (and the starting row above them)
-/// drops the one-line rail for the stacked layout, so a narrow split pane does
-/// not overflow. Measured outside the contained row's padding and leading slot
-/// so every row in a list switches together.
-const double kRecentRailMinWidth = 560;
-
 /// Fixed width of the desktop rail's project slot, applied as the slot's actual
 /// size (not just a cap) so every row's project text starts at the same x
 /// instead of trailing the name column by a variable amount.
 const double kRecentRailProjectWidth = 220;
-
-/// The longest relative time a row can show, which the Carbon rail measures
-/// to size its time column.
-const String kRecentRailLongestTime = '11 months ago';
 
 /// Fixed width of the desktop rail's trailing time slot, wide enough for the
 /// longest relative time ("11 months ago", 13 chars) in the mono data style.

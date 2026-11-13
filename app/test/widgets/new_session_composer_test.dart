@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_agent_mark.dart';
 import 'package:antgrid/launcher/host_control_client.dart'
     show HostControlException;
 import 'package:antgrid/models/agent_descriptor.dart';
@@ -1633,6 +1634,12 @@ void main() {
     testWidgets('every control in the form refuses taps', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      // Test fonts run about twice real width, so at the default view the
+      // locked agent trigger's slot beside the status line falls under its
+      // floor and the trigger drops out, leaving nothing to tap.
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
         _host(
@@ -1746,6 +1753,36 @@ void main() {
 
       expect(container.read(newSessionPromptProvider), 'fix the bug');
       debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('the labelled send key keeps one width across a start', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      expect(tester.widget<CarbonButton>(sendButton()).label, 'Start');
+      // The slot, not the key: Stop is drawn narrower than Start, but the slot
+      // reserves the wider of the two so nothing else on the row moves.
+      Finder slot() =>
+          find.ancestor(of: sendButton(), matching: find.byType(Stack)).first;
+      final idle = tester.getSize(slot()).width;
+
+      begin(container);
+      await settle(tester);
+      expect(stopButton(), findsOneWidget);
+      final stop = tester.widget<CarbonButton>(sendButton());
+      expect(stop.label, 'Stop');
+      expect(stop.semanticLabel, 'Stop starting session');
+      expect(tester.getSize(slot()).width, idle);
+
+      advance(container, NewSessionStartPhase.creating);
+      await settle(tester);
+      expect(tester.widget<CarbonButton>(sendButton()).label, 'Start');
+      expect(tester.getSize(slot()).width, idle);
     });
 
     testWidgets('send becomes Stop, then a plain busy button past the '
@@ -2029,6 +2066,107 @@ void main() {
       await settle(tester);
 
       expect(tester.widget<CarbonButton>(sendButton()).busy, isTrue);
+    });
+  });
+
+  group('launch pad controls', () {
+    Finder send() => find.byKey(const Key('new-session-send-button'));
+
+    Future<void> pumpAt(
+      WidgetTester tester,
+      Size size, {
+      NewSessionAgent agent = const KnownAgent('claude-code'),
+    }) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionAgentProvider.overrideWith(() => ValueController(agent)),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a roomy row labels the send key Start', (tester) async {
+      await pumpAt(tester, const Size(1400, 900));
+
+      final button = tester.widget<CarbonButton>(send());
+      expect(button.label, 'Start');
+      expect(button.icon, isNotNull);
+      expect(button.kind, CarbonButtonKind.primary);
+      expect(
+        find.descendant(of: send(), matching: find.text('Start')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Start session'),
+        findsAtLeastNWidgets(1),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a narrow row keeps the send key icon-only', (tester) async {
+      await pumpAt(tester, const Size(411, 900));
+
+      final button = tester.widget<CarbonButton>(send());
+      expect(button.label, isNull);
+      expect(button.semanticLabel, 'Start session');
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the row never overflows from 280 up', (tester) async {
+      for (final width in <double>[280, 360, 459, 460, 539, 540, 541, 640, 900]) {
+        await pumpAt(tester, Size(width, 900));
+        expect(tester.takeException(), isNull, reason: 'width $width');
+      }
+    });
+
+    testWidgets('picker triggers read as values, not links', (tester) async {
+      await pumpAt(tester, const Size(1400, 900));
+
+      for (final key in const [
+        'new-session-mode-chip',
+        'new-session-agent-selector',
+      ]) {
+        final menu = tester.widget<CarbonMenuButton>(
+          find.descendant(
+            of: find.byKey(Key(key)),
+            matching: find.byType(CarbonMenuButton),
+          ),
+        );
+        expect(menu.neutral, isTrue, reason: key);
+        expect(menu.kind, CarbonButtonKind.ghost, reason: key);
+      }
+    });
+
+    testWidgets('the agent trigger leads with the agent brand mark', (
+      tester,
+    ) async {
+      await pumpAt(tester, const Size(1400, 900));
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('new-session-agent-selector')),
+          matching: find.byType(AbAgentMark),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a custom command has no brand mark', (tester) async {
+      await pumpAt(tester, const Size(1400, 900), agent: const CustomAgent());
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('new-session-agent-selector')),
+          matching: find.byType(AbAgentMark),
+        ),
+        findsNothing,
+      );
     });
   });
 }

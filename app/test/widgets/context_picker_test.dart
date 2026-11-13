@@ -246,4 +246,61 @@ void main() {
     await _mount(tester, _slot(400, _picker()));
     expect(abWidgetsInScope(tester), isEmpty);
   });
+
+  testWidgets('the labelled trigger is a neutral ghost menu button', (
+    tester,
+  ) async {
+    await _mount(tester, _slot(400, _picker()));
+    final menu = tester.widget<CarbonMenuButton>(find.byType(CarbonMenuButton));
+    expect(menu.kind, CarbonButtonKind.ghost);
+    expect(menu.neutral, isTrue);
+  });
+
+  testWidgets('a mark leads the label of a picker with no glyph', (
+    tester,
+  ) async {
+    const mark = SizedBox.square(key: Key('mark'), dimension: 16);
+    await _mount(
+      tester,
+      _slot(
+        400,
+        const ContextPicker(
+          label: 'Claude Code',
+          field: 'Agent',
+          mark: mark,
+          entries: _entries,
+        ),
+      ),
+    );
+    expect(find.byKey(const Key('mark')), findsOneWidget);
+    expect(tester.widget<CarbonMenuButton>(find.byType(CarbonMenuButton)).leading,
+        same(mark));
+  });
+
+  testWidgets('a mark is dropped, not scaled, between the two floors', (
+    tester,
+  ) async {
+    const mark = SizedBox.square(key: Key('mark'), dimension: 16);
+    ContextPicker picker() => const ContextPicker(
+      label: 'Claude Code',
+      field: 'Agent',
+      mark: mark,
+      entries: _entries,
+    );
+    await _mount(tester, _slot(400, picker()));
+    final t = _theme(tester);
+    final withMark = contextPickerFullMinWidth(t);
+    final without = withMark - t.iconSize - CarbonSpacing.spacing03;
+
+    await _mount(tester, _slot((withMark + without) / 2, picker()));
+    expect(find.byKey(const Key('mark')), findsNothing);
+    expect(
+      tester.widget<CarbonMenuButton>(find.byType(CarbonMenuButton)).leading,
+      isNull,
+    );
+    expect(find.byType(FittedBox), findsNothing);
+
+    await _mount(tester, _slot(withMark, picker()));
+    expect(find.byKey(const Key('mark')), findsOneWidget);
+  });
 }

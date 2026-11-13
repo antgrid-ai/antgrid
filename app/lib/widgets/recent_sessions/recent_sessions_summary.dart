@@ -31,13 +31,10 @@ String workStatusLabel(AgentWorkStatus s) => switch (s) {
   AgentWorkStatus.done => 'Done',
 };
 
-/// `Sessions · N total` and the per-state summary badges on one line.
+/// `Sessions` and the per-state summary badges on one line.
 ///
 /// Phone-width only ([_TopBar] in `new_session_content.dart` picks this over
-/// the tablet/desktop title+chips+badges arrangement below
-/// `kCompactBreakpoint`) — there's no room on a phone for the group-by chips
-/// too, so this keeps the old two-piece layout instead of squeezing a third
-/// element into the row.
+/// the tablet/desktop arrangement below `kCompactBreakpoint`).
 class RecentSessionsSummaryLine extends StatelessWidget {
   const RecentSessionsSummaryLine({super.key});
 
@@ -70,20 +67,17 @@ class RecentSessionsSummaryLine extends StatelessWidget {
   }
 }
 
-/// `Sessions · N total` on its own — every mount point that places the chips
-/// and badges around it itself (the canvas's fixed top bar on tablet/narrow
-/// desktop, `_SessionsHeader` on a wide mouse desktop), since the arrangement
-/// differs (chips between title and badges, plus a drawer button and search
-/// icon at the outer edges on tablet/narrow).
-class RecentSessionsTitle extends ConsumerWidget {
+/// The canvas title on its own, for the mount points that place the badges and
+/// a drawer or search button around it themselves. The count lives in the
+/// list's header, which scrolls with the rows it counts.
+class RecentSessionsTitle extends StatelessWidget {
   const RecentSessionsTitle({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final total = ref.watch(recentSessionsProvider).length;
+  Widget build(BuildContext context) {
     final t = CarbonTheme.of(context);
     return Text(
-      'Sessions · $total total',
+      'Sessions',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: t.typography.heading.copyWith(color: t.colors.textPrimary),
@@ -130,18 +124,21 @@ final recentGroupByProvider =
       () => ValueController(RecentGroupBy.project),
     );
 
-/// The Machine / Project / Status switcher. Hides itself while there are
-/// no recent sessions to group — [RecentSessionsTab] never builds its group
-/// headers in that state either, so a live switcher would toggle a grouping
-/// nothing on screen obeys.
+String _groupByWord(RecentGroupBy g) => switch (g) {
+  RecentGroupBy.machine => 'Machine',
+  RecentGroupBy.project => 'Project',
+  RecentGroupBy.status => 'Status',
+};
+
+/// The Machine / Project / Status switcher, for a list wide enough to show all
+/// three segments. Hides itself while there are no recent sessions to group:
+/// [RecentSessionsTab] never builds its group headings in that state either, so
+/// a live switcher would toggle a grouping nothing on screen obeys.
 ///
 /// Needs an `AbCarbonScope` above it: the switcher is 32 tall on a compact
 /// density and 44 on touch.
 class RecentGroupByChips extends ConsumerWidget {
-  const RecentGroupByChips({super.key, this.expand = false});
-
-  /// Fill the width it is given rather than sizing to the widest label.
-  final bool expand;
+  const RecentGroupByChips({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -152,14 +149,133 @@ class RecentGroupByChips extends ConsumerWidget {
     return CarbonContentSwitcher<RecentGroupBy>(
       semanticLabel: 'Group by',
       size: CarbonContentSwitcherSize.small,
-      expand: expand,
       value: groupBy,
       onChanged: (g) => ref.read(recentGroupByProvider.notifier).set(g),
-      options: const [
-        CarbonOption(value: RecentGroupBy.machine, label: 'Machine'),
-        CarbonOption(value: RecentGroupBy.project, label: 'Project'),
-        CarbonOption(value: RecentGroupBy.status, label: 'Status'),
+      options: [
+        for (final g in RecentGroupBy.values)
+          CarbonOption(value: g, label: _groupByWord(g)),
       ],
+    );
+  }
+}
+
+/// The same choice as one ghost button for a list too narrow for three
+/// segments: the button names the current grouping and the menu changes it.
+class RecentGroupByMenu extends ConsumerWidget {
+  const RecentGroupByMenu({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(recentSessionsProvider).isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final groupBy = ref.watch(recentGroupByProvider);
+    return CarbonMenuButton(
+      label: 'By ${_groupByWord(groupBy).toLowerCase()}',
+      semanticLabel: 'Group by',
+      triggerSemanticLabel: 'Group by: ${_groupByWord(groupBy)}',
+      kind: CarbonButtonKind.ghost,
+      neutral: true,
+      size: CarbonButtonSize.small,
+      maxLines: 1,
+      alignment: CarbonPopupAlignment.end,
+      entries: [
+        CarbonMenuRadioGroup<RecentGroupBy>(
+          value: groupBy,
+          onChanged: (g) => ref.read(recentGroupByProvider.notifier).set(g),
+          options: [
+            for (final g in RecentGroupBy.values)
+              CarbonOption(value: g, label: _groupByWord(g)),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// First sliver of the Recent list: the title with its session count, then the
+/// grouping control, and, where the canvas has no top bar to carry them, the
+/// status badges between the two.
+///
+/// [inset] is the list's own horizontal inset, decided by the tab from its
+/// width; [wide] picks the switcher over the menu button for the same reason.
+class RecentListHeader extends ConsumerWidget {
+  const RecentListHeader({
+    super.key,
+    required this.wide,
+    required this.inset,
+    this.showSummary = true,
+  });
+
+  final bool wide;
+  final double inset;
+  final bool showSummary;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final total = ref.watch(recentSessionsProvider).length;
+    final t = CarbonTheme.of(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        inset,
+        CarbonSpacing.spacing05,
+        inset,
+        CarbonSpacing.spacing04,
+      ),
+      // Title and grouping control are both loose flex children, so at a
+      // large text size each gives way with an ellipsis instead of pushing
+      // the other off the row; the badges, when present, take the slack.
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Flexible(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  'Recent',
+                  maxLines: 1,
+                  style: t.typography.heading.copyWith(
+                    color: t.colors.textPrimary,
+                  ),
+                ),
+                const SizedBox(width: CarbonSpacing.spacing04),
+                Flexible(
+                  child: Text(
+                    total == 1 ? '1 session' : '$total sessions',
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    style: t.typography.label.copyWith(
+                      color: t.colors.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (showSummary)
+            const Expanded(
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: CarbonSpacing.spacing04,
+                ),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: RecentSessionsSummaryBadges(),
+                ),
+              ),
+            )
+          else
+            const SizedBox(width: CarbonSpacing.spacing04),
+          if (wide)
+            const RecentGroupByChips()
+          else
+            const Flexible(child: RecentGroupByMenu()),
+        ],
+      ),
     );
   }
 }

@@ -2,9 +2,7 @@ import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../constants/breakpoints.dart';
 import '../../providers/new_session_start.dart';
-import 'recent_session_row_actions.dart' show kRecentRailMinWidth;
 
 /// Finds the row while a start is in flight; absent when idle.
 const Key startingSessionRowKey = Key('starting-session-row');
@@ -12,20 +10,10 @@ const Key startingSessionRowKey = Key('starting-session-row');
 /// The phase copy, where a real Recent row prints its timestamp.
 const Key startingSessionPhaseKey = Key('starting-session-phase');
 
-/// The real row's project column width, so the project text wraps and
-/// ellipsizes at the same point either side of the moment the session lands.
-const double _railProjectWidth = 220;
-
-/// Width of the slot the phase copy occupies, where a real row puts its time.
-/// Fixed, and wider than that time slot: the copy changes length as the start
-/// advances, and a slot that sized to it would resize the title column on
-/// every phase.
-///
-/// Being wider is why the project column sits further left here than on the
-/// real row — the columns share a width, not an x. Matching the time slot
-/// instead would buy that alignment for one frame at the cost of truncating
-/// every phase name for the whole start.
-const double _railPhaseWidth = 150;
+/// Cap on the phase copy's width. The copy changes length as the start
+/// advances; the title is the part that gives, so the line never reflows from
+/// one phase to the next.
+const double _phaseMaxWidth = 150;
 
 /// The session being started right now, standing in for the Recent row it will
 /// become.
@@ -50,89 +38,41 @@ class StartingSessionRow extends ConsumerWidget {
     final progress = ref.watch(newSessionStartProgressProvider);
     if (progress == null) return const SizedBox.shrink();
 
-    final isMobile = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
     final projectText = _projectDisplayText(progress);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Measured like the real rows, on the outer width, so the placeholder
-        // never changes shape when the session it stands for lands.
-        final compact =
-            isMobile || constraints.maxWidth < kRecentRailMinWidth;
-        return KeyedSubtree(
-          key: startingSessionRowKey,
-          child: CarbonContainedListRow(
-            title:
-                '${_titleText(progress.title)}, starting, $projectText, '
-                '${phaseLabel(progress)}',
-            leading: const _StartingMark(),
-            content: compact
-                ? _MobileLayout(progress: progress)
-                : _DesktopLayout(progress: progress),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _DesktopLayout extends StatelessWidget {
-  const _DesktopLayout({required this.progress});
-
-  final NewSessionStartProgress progress;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(child: _SessionTitle(title: progress.title)),
-              const _StartingBadge(),
-              const SizedBox(width: CarbonSpacing.spacing04),
-            ],
-          ),
-        ),
-        SizedBox(
-          width: _railProjectWidth,
-          child: _ProjectLabel(name: _projectDisplayText(progress)),
-        ),
-        const SizedBox(width: CarbonSpacing.spacing04),
-        SizedBox(
-          width: _railPhaseWidth,
-          child: _PhaseLabel(label: phaseLabel(progress)),
-        ),
-      ],
-    );
-  }
-}
-
-class _MobileLayout extends StatelessWidget {
-  const _MobileLayout({required this.progress});
-
-  final NewSessionStartProgress progress;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
+    return KeyedSubtree(
+      key: startingSessionRowKey,
+      child: CarbonContainedListRow(
+        title:
+            '${_titleText(progress.title)}, starting, $projectText, '
+            '${phaseLabel(progress)}',
+        leading: const _StartingMark(),
+        content: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          spacing: CarbonSpacing.spacing01,
           children: [
-            Expanded(child: _SessionTitle(title: progress.title)),
-            const _StartingBadge(),
-            const SizedBox(width: CarbonSpacing.spacing03),
-            // Capped rather than fixed: a phone has no room to reserve the
-            // rail's full slot, and the title is the line that may give.
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: _railPhaseWidth),
-              child: _PhaseLabel(label: phaseLabel(progress)),
+            Row(
+              children: [
+                Expanded(
+                  child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _SessionTitle(title: progress.title),
+                      const _StartingBadge(),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: CarbonSpacing.spacing03),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: _phaseMaxWidth),
+                  child: _PhaseLabel(label: phaseLabel(progress)),
+                ),
+              ],
             ),
+            _OriginLabel(text: projectText),
           ],
         ),
-        const SizedBox(height: CarbonSpacing.spacing01),
-        _ProjectLabel(name: _projectDisplayText(progress)),
-      ],
+      ),
     );
   }
 }
@@ -209,25 +149,25 @@ String _projectDisplayText(NewSessionStartProgress progress) {
   return '${progress.deviceName} · ${progress.targetName}';
 }
 
-class _ProjectLabel extends StatelessWidget {
-  const _ProjectLabel({required this.name});
+class _OriginLabel extends StatelessWidget {
+  const _OriginLabel({required this.text});
 
-  final String name;
+  final String text;
 
   @override
   Widget build(BuildContext context) {
     final t = CarbonTheme.of(context);
     return Text(
-      name,
+      text,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: t.typography.code.copyWith(color: t.colors.textSecondary),
+      style: t.typography.label.copyWith(color: t.colors.textSecondary),
     );
   }
 }
 
-/// Sans, unlike the mono timestamp it stands in for: this is chrome prose
-/// about what the machine is doing, not row data.
+/// Stands in for the time a real row prints there: chrome prose about what the
+/// machine is doing, in the same style.
 class _PhaseLabel extends StatelessWidget {
   const _PhaseLabel({required this.label});
 
@@ -241,7 +181,7 @@ class _PhaseLabel extends StatelessWidget {
       key: startingSessionPhaseKey,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+      style: t.typography.label.copyWith(color: t.colors.textSecondary),
     );
   }
 }

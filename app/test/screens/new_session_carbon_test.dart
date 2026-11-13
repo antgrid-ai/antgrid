@@ -7,7 +7,10 @@ import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/new_session_content.dart';
+import 'package:antgrid/widgets/new_session/remote_access_nudge_banner.dart';
+import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_summary.dart';
 import 'package:antgrid/widgets/session_search_modal.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
@@ -211,15 +214,112 @@ void main() {
     expect(undersized, isEmpty);
   });
 
-  testScreen('the phone group-by row is not clipped to a dense height', (
+  for (final layout in _layouts) {
+    testScreen('${layout.name}: the top bar carries no group-by control', (
+      tester,
+    ) async {
+      await pump(tester, layout);
+
+      expect(tester.takeException(), isNull);
+      final bar = layout.drawer || layout.search;
+      if (!bar) return;
+      final search = find.byType(SessionSearchButton);
+      expect(search, findsOneWidget);
+      // The group-by control belongs to the list header, which scrolls with
+      // the list; nothing above the list may hold one.
+      final listTop = tester.getTopLeft(find.byType(RecentSessionsTab)).dy;
+      for (final finder in [
+        find.byType(CarbonContentSwitcher<RecentGroupBy>),
+        find.byType(CarbonMenuButton),
+      ]) {
+        for (final e in finder.evaluate()) {
+          expect(
+            tester.getTopLeft(find.byWidget(e.widget)).dy,
+            greaterThanOrEqualTo(listTop),
+          );
+        }
+      }
+    });
+  }
+
+  testScreen('the composer insets match the list on a wide canvas', (
+    tester,
+  ) async {
+    await pump(tester, _layouts[3]);
+
+    final composer = tester.getRect(find.byType(NewSessionComposer));
+    final column = tester.getRect(find.byType(RecentSessionsTab));
+    expect(composer.left - column.left, CarbonSpacing.spacing06);
+    expect(column.right - composer.right, CarbonSpacing.spacing06);
+    expect(
+      tester.view.physicalSize.height - composer.bottom,
+      CarbonSpacing.spacing05,
+    );
+  });
+
+  testScreen('the composer keeps its bottom inset where no system inset exists', (
+    tester,
+  ) async {
+    await pump(tester, _layouts[3]);
+
+    final composer = tester.getRect(find.byType(NewSessionComposer));
+    expect(
+      tester.view.physicalSize.height - composer.bottom,
+      CarbonSpacing.spacing05,
+    );
+  });
+
+  testScreen('a wide touch canvas with a gesture inset drops the bottom inset', (
+    tester,
+  ) async {
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.resetViewPadding);
+    await pump(tester, _layouts[1]);
+
+    final composer = tester.getRect(find.byType(NewSessionComposer));
+    // The route's SafeArea owns the gesture clearance; the canvas adds none.
+    expect(tester.view.physicalSize.height - composer.bottom, 0);
+  });
+
+  testScreen('the nudges share the composer inset on a wide canvas', (
+    tester,
+  ) async {
+    await pump(tester, _layouts[3]);
+
+    final column = tester.getRect(find.byType(RecentSessionsTab));
+    final padding = tester.widget<Padding>(
+      find.ancestor(
+        of: find.byType(RemoteAccessNudgeBanner),
+        matching: find.byType(Padding),
+      ).first,
+    );
+    expect(
+      padding.padding,
+      const EdgeInsets.symmetric(
+        horizontal: CarbonSpacing.spacing06 - CarbonSpacing.spacing05,
+      ),
+    );
+    expect(column.width, 800);
+  });
+
+  testScreen('the canvas column is capped at 800', (tester) async {
+    await pump(tester, _layouts[3]);
+
+    expect(tester.getSize(find.byType(RecentSessionsTab)).width, 800);
+  });
+
+  testScreen('the composer insets by spacing05 with no bottom on a phone', (
     tester,
   ) async {
     await pump(tester, _layouts[0]);
 
-    expect(tester.takeException(), isNull);
-    final switcher = find.byType(CarbonContentSwitcher<RecentGroupBy>);
-    expect(switcher, findsOneWidget);
-    expect(tester.getSize(switcher).height, greaterThanOrEqualTo(44));
+    final composer = tester.getRect(find.byType(NewSessionComposer));
+    expect(composer.left, CarbonSpacing.spacing05);
+    expect(
+      tester.view.physicalSize.width - composer.right,
+      CarbonSpacing.spacing05,
+    );
+    expect(tester.view.physicalSize.height, composer.bottom);
   });
 
   testScreen('Esc on the canvas leaves New Session', (tester) async {

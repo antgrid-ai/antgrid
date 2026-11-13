@@ -127,7 +127,7 @@ bool _actionsRevealed(WidgetTester tester) => tester
     .visible;
 
 void main() {
-  _testRow('desktop rail has no Ab widget and no separate status glyph', (
+  _testRow('desktop row has no Ab widget and no separate status glyph', (
     tester,
   ) async {
     _asMouseDesktop();
@@ -138,35 +138,53 @@ void main() {
     expect(find.byType(CarbonIconIndicator), findsNothing);
   });
 
-  _testRow('the rail falls back to stacked on the OUTER width', (
+  _testRow('the row is two lines at every width: time beside the name, '
+      'origin below it', (tester) async {
+    _asMouseDesktop();
+    for (final width in [900.0, 380.0]) {
+      await _pump(tester, _row(_session()), width: width);
+      final name = find.text('Fix auth bug');
+      final time = find.textContaining(' years ago');
+      final origin = find.text('BuildBox · antgrid');
+      // Centres, not tops: the name and the time are set in different type.
+      expect(
+        tester.getCenter(time).dy,
+        moreOrLessEquals(tester.getCenter(name).dy, epsilon: 2),
+        reason: 'time shares the name line at $width',
+      );
+      expect(
+        tester.getTopLeft(origin).dy,
+        greaterThan(tester.getBottomLeft(name).dy - 1),
+        reason: 'origin sits below the name at $width',
+      );
+      expect(
+        tester.getTopLeft(origin).dx,
+        moreOrLessEquals(tester.getTopLeft(name).dx, epsilon: 1),
+        reason: 'origin aligns under the name at $width',
+      );
+    }
+  });
+
+  _testRow('a custom launch command follows the origin on the second line', (
     tester,
   ) async {
     _asMouseDesktop();
-    await _pump(tester, _row(_session()), width: 900);
-    // Centres, not tops: the name and the project are set in different type.
+    await _pump(
+      tester,
+      _row(_session(tool: null, command: 'npm run dev')),
+      width: 900,
+    );
+    expect(find.text('npm run dev'), findsOneWidget);
     expect(
-      tester.getCenter(find.text('BuildBox · antgrid')).dy,
+      tester.getCenter(find.text('npm run dev')).dy,
       moreOrLessEquals(
-        tester.getCenter(find.text('Fix auth bug')).dy,
-        epsilon: 1,
+        tester.getCenter(find.text('BuildBox · antgrid')).dy,
+        epsilon: 2,
       ),
     );
-
-    // Past the breakpoint on the outer width but not once the row's padding
-    // and leading slot are taken off: only an outer measure keeps the rail.
-    await _pump(tester, _row(_session()), width: 600);
     expect(
-      tester.getCenter(find.text('BuildBox · antgrid')).dy,
-      moreOrLessEquals(
-        tester.getCenter(find.text('Fix auth bug')).dy,
-        epsilon: 1,
-      ),
-    );
-
-    await _pump(tester, _row(_session()), width: 540);
-    expect(
-      tester.getTopLeft(find.text('BuildBox · antgrid')).dy,
-      greaterThan(tester.getTopLeft(find.text('Fix auth bug')).dy),
+      tester.getTopLeft(find.text('npm run dev')).dy,
+      greaterThan(tester.getBottomLeft(find.text('Fix auth bug')).dy - 1),
     );
   });
 

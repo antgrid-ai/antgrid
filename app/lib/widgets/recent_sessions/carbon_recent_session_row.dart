@@ -2,7 +2,6 @@ import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../constants/breakpoints.dart';
 import '../../design/widgets/ab_agent_mark.dart';
 import '../../models/agent_work_status.dart';
 import '../../models/recent_session_row.dart';
@@ -22,11 +21,9 @@ import 'recent_sessions_summary.dart' show RecentGroupBy, workStatusLabel;
 /// One row of the Recent list: agent mark with a status dot, session name and
 /// badges, project, relative time, delete.
 ///
-/// Mounted under a Carbon scope by the tab. The desktop rail and the stacked
-/// layout are chosen from the row's OUTER width, measured outside the contained
-/// row: the row's own padding, leading slot and actions cell eat about 84px, so
-/// measuring inside would fall back to the stacked layout that much sooner than
-/// the 560 the rail was designed against.
+/// Two lines at every width: the name, badges and time, then where it ran.
+///
+/// Mounted under a Carbon scope by the tab.
 class CarbonRecentSessionRow extends ConsumerWidget {
   const CarbonRecentSessionRow({
     super.key,
@@ -47,7 +44,6 @@ class CarbonRecentSessionRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final now = ref.watch(nowMinuteProvider).value;
     final when = DateTime.fromMillisecondsSinceEpoch(row.session.lastUsedAt);
-    final isMobile = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
     final agentLabel = sessionAgentDisplayLabel(
       row.session,
       ref.watch(agentCatalogProvider),
@@ -85,78 +81,63 @@ class CarbonRecentSessionRow extends ConsumerWidget {
       deleting: deleting,
     );
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = isMobile || constraints.maxWidth < kRecentRailMinWidth;
-        final name = _SessionName(name: row.session.name);
-        final badges = <Widget>[
-          CarbonSessionIsolationBadge(session: row.session, setup: setup),
-          CarbonSessionApprovalBadge(session: row.session),
-          CarbonSessionSharedWorkspaceBadge(session: row.session),
-          CarbonSessionDeletingBadge(deleting: deleting),
-        ];
-        return CarbonContainedListRow(
-          title: title,
-          leading: _SessionMark(
-            status: status,
-            toolKey: row.session.tool,
-            label: agentLabel,
-            deleting: deleting,
-          ),
-          content: compact
-              ? _StackedContent(
-                  name: name,
-                  badges: badges,
-                  command: command,
-                  relTime: relTime,
-                  originText: originText,
-                )
-              : _RailContent(
-                  name: name,
-                  badges: badges,
-                  command: command,
-                  relTime: relTime,
-                  originText: originText,
-                ),
-          // A session being removed is neither focusable nor activatable:
-          // opening it would attach the workspace to a checkout that is going
-          // away.
-          disabled: deleting,
-          onPressed: () =>
-              openRecentSessionFromRow(context, ref.container, row),
-          // A touch user holding a badge to read its tooltip must not also
-          // open the session on release.
-          cancelOnLongPress: true,
-          revealActionsOnHover: true,
-          actions: [
-            // Kept in the tree while deleting so the rail does not shift when
-            // deletion starts, but offered to nobody.
-            Visibility(
-              visible: !deleting,
-              maintainSize: true,
-              maintainState: true,
-              maintainAnimation: true,
-              child: CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.trashCan),
-                semanticLabel: 'Delete session',
-                size: CarbonButtonSize.small,
-                onPressed: () => deleteRecentSessionWithConfirm(
-                  context,
-                  ref.container,
-                  row,
-                  dialogs: carbonSessionDeleteDialogs,
-                  onDeleted: onDeleted,
-                ),
-              ),
+    final badges = <Widget>[
+      CarbonSessionIsolationBadge(session: row.session, setup: setup),
+      CarbonSessionApprovalBadge(session: row.session),
+      CarbonSessionSharedWorkspaceBadge(session: row.session),
+      CarbonSessionDeletingBadge(deleting: deleting),
+    ];
+    return CarbonContainedListRow(
+      title: title,
+      leading: _SessionMark(
+        status: status,
+        toolKey: row.session.tool,
+        label: agentLabel,
+        deleting: deleting,
+      ),
+      content: _RowContent(
+        name: _SessionName(name: row.session.name),
+        badges: badges,
+        command: command,
+        relTime: relTime,
+        originText: originText,
+      ),
+      // A session being removed is neither focusable nor activatable:
+      // opening it would attach the workspace to a checkout that is going
+      // away.
+      disabled: deleting,
+      onPressed: () => openRecentSessionFromRow(context, ref.container, row),
+      // A touch user holding a badge to read its tooltip must not also
+      // open the session on release.
+      cancelOnLongPress: true,
+      revealActionsOnHover: true,
+      actions: [
+        // Kept in the tree while deleting so the row does not shift when
+        // deletion starts, but offered to nobody.
+        Visibility(
+          visible: !deleting,
+          maintainSize: true,
+          maintainState: true,
+          maintainAnimation: true,
+          child: CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.trashCan),
+            semanticLabel: 'Delete session',
+            size: CarbonButtonSize.small,
+            onPressed: () => deleteRecentSessionWithConfirm(
+              context,
+              ref.container,
+              row,
+              dialogs: carbonSessionDeleteDialogs,
+              onDeleted: onDeleted,
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
 
   /// The contained row excludes its content from semantics, so this title is
-  /// the row's whole accessible name: everything the badges and rail say.
+  /// the row's whole accessible name: everything the badges and both lines say.
   String _accessibleName({
     required AgentWorkStatus status,
     required String? agent,
@@ -180,10 +161,10 @@ class CarbonRecentSessionRow extends ConsumerWidget {
   }
 }
 
-/// Desktop: name and badges on the left, then project, command and time as a
-/// right rail.
-class _RailContent extends StatelessWidget {
-  const _RailContent({
+/// Name, badges and time on one line; the origin and a custom command on the
+/// line below, already aligned under the name by the row's leading slot.
+class _RowContent extends StatelessWidget {
+  const _RowContent({
     required this.name,
     required this.badges,
     required this.command,
@@ -200,80 +181,9 @@ class _RailContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = CarbonTheme.of(context);
-    return Row(
-      children: [
-        // Name and slack share the row's ONLY flexible child. A loose Flexible
-        // anywhere in the rail would dump its unused allotment at the row's
-        // END, shifting the rail left by a different amount per row. Pooling
-        // slack here keeps the rail pinned to the right edge, and the badges
-        // are measured before the name so a long name ellipsizes around them.
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(child: name),
-              ...badges,
-              const SizedBox(width: CarbonSpacing.spacing04),
-            ],
-          ),
-        ),
-        // Fixed width, not a cap: every row's project text starts at the same
-        // x however long the name column is.
-        SizedBox(
-          width: kRecentRailProjectWidth,
-          child: _ProjectLabel(name: originText),
-        ),
-        if (command != null) ...[
-          Text(
-            '  ·  ',
-            style: t.typography.code.copyWith(color: t.colors.textHelper),
-          ),
-          _CommandLabel(label: command!),
-        ],
-        const SizedBox(width: CarbonSpacing.spacing04),
-        SizedBox(
-          width: _railTimeWidth(context, _TimeLabel.style(t)),
-          child: _TimeLabel(label: relTime),
-        ),
-      ],
+    final secondary = t.typography.label.copyWith(
+      color: t.colors.textSecondary,
     );
-  }
-
-  /// The longest relative time, measured in the style and text scale it is
-  /// drawn at, so every row's time column is the same width and none of them
-  /// loses its last word. A fixed width fits only one density and scale.
-  static double _railTimeWidth(BuildContext context, TextStyle style) {
-    final painter = TextPainter(
-      text: TextSpan(text: kRecentRailLongestTime, style: style),
-      textDirection: TextDirection.ltr,
-      textScaler: MediaQuery.textScalerOf(context),
-      maxLines: 1,
-    )..layout();
-    final width = painter.width.ceilToDouble();
-    painter.dispose();
-    return width;
-  }
-}
-
-/// Phone or narrow pane: name, badges and time on one line; the project and a
-/// custom command drop below, already aligned under the name by the row's
-/// leading slot.
-class _StackedContent extends StatelessWidget {
-  const _StackedContent({
-    required this.name,
-    required this.badges,
-    required this.command,
-    required this.relTime,
-    required this.originText,
-  });
-
-  final Widget name;
-  final List<Widget> badges;
-  final String? command;
-  final String relTime;
-  final String originText;
-
-  @override
-  Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -294,18 +204,14 @@ class _StackedContent extends StatelessWidget {
           ],
         ),
         // Only a custom launch command is printed: an agent with a mark is
-        // already named at the row's left edge. It shares the second line, not
-        // the first, where it and the time left the name no room on a phone.
+        // already named at the row's left edge.
         if (originText.isNotEmpty || command != null)
           Row(
             children: [
               if (originText.isNotEmpty)
-                Flexible(child: _ProjectLabel(name: originText)),
+                Flexible(child: _OriginLabel(text: originText)),
               if (originText.isNotEmpty && command != null)
-                Text(
-                  '  ·  ',
-                  style: _TimeLabel.style(CarbonTheme.of(context)),
-                ),
+                Text(' · ', style: secondary),
               if (command != null)
                 Flexible(child: _CommandLabel(label: command!)),
             ],
@@ -332,20 +238,19 @@ class _SessionName extends StatelessWidget {
   }
 }
 
-class _ProjectLabel extends StatelessWidget {
-  const _ProjectLabel({required this.name});
+class _OriginLabel extends StatelessWidget {
+  const _OriginLabel({required this.text});
 
-  final String name;
+  final String text;
 
   @override
   Widget build(BuildContext context) {
     final t = CarbonTheme.of(context);
-    // Project and machine names are data.
     return Text(
-      name,
+      text,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: t.typography.code.copyWith(color: t.colors.textSecondary),
+      style: t.typography.label.copyWith(color: t.colors.textSecondary),
     );
   }
 }
@@ -355,18 +260,19 @@ class _TimeLabel extends StatelessWidget {
 
   final String label;
 
-  /// Mono so the right rail's timestamps line up column-tight across rows.
-  static TextStyle style(CarbonThemeData t) =>
-      t.typography.code.copyWith(color: t.colors.textHelper);
-
   @override
   Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
     return Text(
       label,
       maxLines: 1,
       softWrap: false,
       overflow: TextOverflow.ellipsis,
-      style: style(CarbonTheme.of(context)),
+      // Tabular so timestamps keep their width as the minute ticks over.
+      style: t.typography.label.copyWith(
+        color: t.colors.textSecondary,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
     );
   }
 }
@@ -396,8 +302,8 @@ class _CommandLabel extends StatelessWidget {
 /// Who is running this session, and how it is doing: the agent mark with a
 /// status dot on its corner, the way a presence dot sits on a chat avatar.
 ///
-/// One glyph answers "who, and are they waiting on me" and leaves the rail free
-/// for metadata. Without a mark (a custom launch command has no registry key
+/// One glyph answers "who, and are they waiting on me" and leaves the lines
+/// beside it free for metadata. Without a mark (a custom launch command has no registry key
 /// and a monogram of `npm run dev` would be a lie) it is the bare dot, centred
 /// in the same box so every row's name column starts at the same x.
 class _SessionMark extends StatelessWidget {

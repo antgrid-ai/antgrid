@@ -39,6 +39,7 @@ double _fullWidth(
 /// the row so it never covers the prompt.
 ///
 /// [icon] null means no leading glyph and no shedding (the agent trigger).
+/// A [mark] stands in for the glyph on such a picker.
 /// Narrow slots degrade in steps: full trigger, glyph-only overflow menu,
 /// scaled-down glyph, nothing.
 class ContextPicker extends StatelessWidget {
@@ -48,6 +49,7 @@ class ContextPicker extends StatelessWidget {
     required this.label,
     required this.field,
     required this.entries,
+    this.mark,
     this.enabled = true,
     this.attention = false,
     this.onOpenChanged,
@@ -55,6 +57,12 @@ class ContextPicker extends StatelessWidget {
   });
 
   final CarbonIcons? icon;
+
+  /// A brand mark before the label, for a picker with no [icon]. It sizes the
+  /// trigger like a glyph but never makes the picker shed to a glyph-only menu:
+  /// a mark alone does not say which value it is. Below the width that seats
+  /// both mark and label the mark is dropped, keeping the label.
+  final Widget? mark;
 
   /// The current value, drawn on the trigger.
   final String label;
@@ -75,16 +83,19 @@ class ContextPicker extends StatelessWidget {
     final t = CarbonTheme.of(context);
     final name = '$field: $label';
     final icon = this.icon;
+    final hasLeading = icon != null || mark != null;
     final glyph = icon == null
         ? null
         : CarbonIcon(icon, color: attention ? t.colors.iconInteractive : null);
 
-    Widget full() => CarbonMenuButton(
+    Widget full({bool withMark = true}) => CarbonMenuButton(
       label: label,
       kind: CarbonButtonKind.ghost,
+      // A picked value reads as a value, not as a link.
+      neutral: true,
       entries: entries,
       enabled: enabled,
-      leading: glyph,
+      leading: glyph ?? (withMark ? mark : null),
       maxLines: 1,
       preferAbove: true,
       semanticLabel: field,
@@ -115,7 +126,7 @@ class ContextPicker extends StatelessWidget {
         if (!width.isFinite) {
           return ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth: _fullWidth(t, hasIcon: icon != null, label: _labelCap),
+              maxWidth: _fullWidth(t, hasIcon: hasLeading, label: _labelCap),
             ),
             child: full(),
           );
@@ -123,14 +134,24 @@ class ContextPicker extends StatelessWidget {
         final sheds = icon != null && shedToIcon;
         // A picker that cannot shed keeps its label, scaled down from the
         // narrowest trigger that still reads, rather than overflowing.
-        final floor = _fullWidth(t, hasIcon: icon != null, label: _labelStub);
+        final floor = _fullWidth(t, hasIcon: hasLeading, label: _labelStub);
+        final markless = icon == null && mark != null;
+        final unmarkedFloor = _fullWidth(t, hasIcon: false, label: _labelStub);
+        if (markless && width < floor && width >= unmarkedFloor) {
+          return start(full(withMark: false));
+        }
         if (!sheds && width < floor) {
+          final dropMark = markless;
+          final scaleFrom = dropMark ? unmarkedFloor : floor;
           return SizedBox(
             width: width,
             height: t.controlHeight,
             child: FittedBox(
               fit: BoxFit.scaleDown,
-              child: SizedBox(width: floor, child: full()),
+              child: SizedBox(
+                width: scaleFrom,
+                child: full(withMark: !dropMark),
+              ),
             ),
           );
         }

@@ -1,3 +1,4 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,11 +30,9 @@ RecentSessionRow _row(String id) => RecentSessionRow(
   ),
 );
 
-// Mirrors the title/badges half of `_TopBar`'s Row (new_session_content.dart)
-// and `_SessionsHeader`'s wide-desktop Row (recent_sessions_tab.dart): title
-// takes an Expanded on the left, badges a Flexible on the right, so this pins
-// the shared overflow hazard both those call sites now carry inline rather
-// than through a single dedicated widget.
+// Mirrors the title/badges half of `_TopBar`'s Row (new_session_content.dart):
+// title takes an Expanded on the left, badges a Flexible on the right, so this
+// pins the overflow hazard that call site carries inline.
 Widget _wrap({
   required Map<AgentWorkStatus, int> counts,
   required int total,
@@ -100,7 +99,7 @@ void main() {
     await tester.pump();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Sessions · 17 total'), findsOneWidget);
+    expect(find.text('Sessions'), findsOneWidget);
     expect(find.text('2 needs you'), findsOneWidget);
     expect(find.text('11 done'), findsOneWidget);
   });
@@ -118,7 +117,7 @@ void main() {
     await tester.pump();
 
     expect(tester.takeException(), isNull);
-    final title = tester.getRect(find.text('Sessions · 3 total'));
+    final title = tester.getRect(find.text('Sessions'));
     final badge = tester.getRect(find.text('3 done'));
     expect(badge.left, greaterThan(title.left));
     expect(badge.center.dy, closeTo(title.center.dy, 2));
@@ -126,9 +125,9 @@ void main() {
 
   // A Wrap only wraps BETWEEN children — it still hands each one its own
   // maxWidth, so a single badge wider than that has to shrink itself. That is
-  // reachable from `_SessionsHeader` (recent_sessions_tab.dart), whose Row puts
-  // the inflexible group-by chips between two Expandeds: the chips take their
-  // full width first and leave the badges a few dozen pixels. The title already
+  // reachable from `RecentListHeader`, whose Row puts the inflexible group-by
+  // control beside the badges: it takes its full width first and leaves the
+  // badges a few dozen pixels. The title already
   // ellipsizes there, and a badge has to degrade the same way rather than paint
   // past its edge.
   testWidgets('a badge too narrow for its label ellipsizes, not overflows', (
@@ -187,10 +186,9 @@ void main() {
       expect(find.text('Status'), findsNothing);
     });
 
-    // The chips write recentGroupByProvider directly — this is the whole
-    // contract that lets RecentSessionsTab's grouping and a mount point
-    // elsewhere in the tree (the canvas top bar) agree on the current axis
-    // with no shared ancestor State between them.
+    // The chips write recentGroupByProvider directly: that is the whole
+    // contract that lets RecentSessionsTab's grouping and the header agree on
+    // the current axis with no shared ancestor State between them.
     testWidgets('picking a chip updates recentGroupByProvider', (tester) async {
       final container = ProviderContainer(
         overrides: [
@@ -218,6 +216,70 @@ void main() {
       await tester.pump();
 
       expect(container.read(recentGroupByProvider), RecentGroupBy.machine);
+    });
+  });
+
+  group('RecentGroupByMenu', () {
+    Widget host(ProviderContainer container) => UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp(
+        theme: ThemeData.dark().copyWith(
+          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+        ),
+        builder: (context, child) => AbCarbonScope(child: child!),
+        home: const Scaffold(body: Align(child: RecentGroupByMenu())),
+      ),
+    );
+
+    testWidgets('names the current grouping and hides with no sessions', (
+      tester,
+    ) async {
+      final container = ProviderContainer(
+        overrides: [recentSessionsProvider.overrideWithValue(const [])],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(host(container));
+      await tester.pump();
+      expect(find.byType(CarbonMenuButton), findsNothing);
+    });
+
+    testWidgets('the trigger is announced with the grouping it changes', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final container = ProviderContainer(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([_row('s1')]),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(host(container));
+      await tester.pump();
+
+      expect(find.bySemanticsLabel('Group by: Project'), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('picking an entry updates recentGroupByProvider', (
+      tester,
+    ) async {
+      final container = ProviderContainer(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([_row('s1')]),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(host(container));
+      await tester.pump();
+
+      expect(find.text('By project'), findsOneWidget);
+      await tester.tap(find.text('By project'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Status'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(recentGroupByProvider), RecentGroupBy.status);
+      expect(find.text('By status'), findsOneWidget);
     });
   });
 }

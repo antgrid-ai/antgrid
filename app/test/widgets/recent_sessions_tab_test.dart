@@ -11,6 +11,7 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/new_session_start.dart';
+import 'package:antgrid/providers/project_work_status.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/first_run_store.dart';
@@ -33,6 +34,25 @@ Widget _wrap(Widget child) {
     ),
   );
 }
+
+RecentSessionRow _row(String id, String name) => RecentSessionRow(
+  session: SessionEntry(
+    id: id,
+    name: name,
+    createdAt: 0,
+    lastUsedAt: 1,
+    archived: false,
+    running: false,
+  ),
+  origin: const RecentOrigin(
+    isLocal: false,
+    registrationId: 'uuidA.projA',
+    projectId: 'projA',
+    machineUuid: 'uuidA',
+    projectName: 'antgrid',
+    deviceName: 'Mac',
+  ),
+);
 
 void main() {
   testWidgets('shows empty state when there are no recent sessions', (
@@ -104,10 +124,8 @@ void main() {
 
   testWidgets('lists rows when sessions exist', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-    // Wide enough that `_SessionsHeader` renders its combined title/chips/
-    // badges row — below kMediumBreakpoint even a mouse desktop gets the
-    // canvas's own top bar instead (see `new_session_screen.dart`), and this
-    // standalone pump has no canvas above it to carry the title.
+    // Wide enough that the list header shows the switcher rather than the
+    // narrow menu button.
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -138,19 +156,21 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.textContaining('Sessions'), findsOneWidget);
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('1 session'), findsOneWidget);
     expect(find.text('Fix auth bug'), findsOneWidget);
     // Carbon end to end, apart from the agent mark.
     expect(abWidgetsInScope(tester), isEmpty);
-    // A Carbon group header in sentence case with a small count tag, and the
-    // group-by switcher with its options in sentence case.
+    // A headless card under a plain heading: the label and a bare count, no tag.
     final group = tester.widget<CarbonContainedListSliver>(
       find.byType(CarbonContainedListSliver),
     );
-    expect(group.label, 'antgrid');
-    expect(find.widgetWithText(CarbonTag, '1'), findsOneWidget);
+    expect(group.label, isNull);
+    expect(find.text('antgrid'), findsOneWidget);
+    expect(find.byType(CarbonTag), findsNothing);
     expect(find.text('Machine'), findsOneWidget);
     expect(find.text('Status'), findsOneWidget);
+    expect(find.byType(CarbonMenuButton), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -158,11 +178,10 @@ void main() {
     tester,
   ) async {
     // Mobile's search is an icon in the canvas top bar opening a full-screen
-    // modal — an inline field here cost a row of a phone screen. The group
-    // chips live in that same canvas top bar now too (new_session_content.dart),
-    // which is what `showHeader: false` says here: on a phone the canvas
-    // hoists the whole title/chips/badges row, so this list renders none of
-    // its own. Mirrors what `NewSessionContent` passes at this width.
+    // modal - an inline field here cost a row of a phone screen. The canvas
+    // top bar carries the status badges on a phone, which is what
+    // `showSummary: false` says here. Mirrors what `NewSessionContent` passes
+    // at this width.
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1.0;
@@ -191,13 +210,161 @@ void main() {
         overrides: [
           recentSessionsProvider.overrideWithValue([row]),
         ],
-        child: _wrap(const RecentSessionsTab(showHeader: false)),
+        child: _wrap(const RecentSessionsTab(showSummary: false)),
       ),
     );
     await tester.pump();
 
     expect(find.byType(SessionSearchField), findsNothing);
 
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a narrow list swaps the switcher for a Group by menu', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final container = ProviderContainer(
+      overrides: [
+        recentSessionsProvider.overrideWithValue([_row('s1', 'Fix auth bug')]),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _wrap(const RecentSessionsTab(showSummary: false)),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('1 session'), findsOneWidget);
+    expect(find.byType(CarbonContentSwitcher<RecentGroupBy>), findsNothing);
+    expect(find.text('By project'), findsOneWidget);
+
+    await tester.tap(find.text('By project'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Machine'));
+    await tester.pumpAndSettle();
+
+    expect(container.read(recentGroupByProvider), RecentGroupBy.machine);
+    expect(find.text('By machine'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('the summary badges sit in the header only with showSummary', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    Future<void> pump({required bool showSummary}) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          key: ValueKey(showSummary),
+          overrides: [
+            recentSessionsProvider.overrideWithValue([_row('s1', 'Task')]),
+            recentSessionStatusCountsProvider.overrideWithValue(const {
+              AgentWorkStatus.done: 1,
+            }),
+          ],
+          child: _wrap(RecentSessionsTab(showSummary: showSummary)),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await pump(showSummary: true);
+    expect(find.text('1 done'), findsOneWidget);
+    // Between the count and the group-by control.
+    expect(
+      tester.getTopLeft(find.text('1 done')).dx,
+      greaterThan(tester.getTopRight(find.text('1 session')).dx),
+    );
+    expect(
+      tester.getTopRight(find.text('1 done')).dx,
+      lessThan(tester.getTopLeft(find.text('Machine')).dx),
+    );
+
+    await pump(showSummary: false);
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('1 done'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('status grouping heads each group with the status indicator', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final container = ProviderContainer(
+      overrides: [
+        recentSessionsProvider.overrideWithValue([_row('s1', 'Task')]),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(recentGroupByProvider.notifier).set(RecentGroupBy.status);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.widgetWithText(CarbonIconIndicator, 'Done'), findsOneWidget);
+    expect(find.byType(CarbonTag), findsNothing);
+    expect(find.text('Task'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a wide row is two lines: time on the name line, origin below', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([_row('s1', 'Fix auth bug')]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+
+    final name = find.text('Fix auth bug');
+    final time = find.textContaining(' years ago');
+    // Grouped by project, so the origin is the machine alone, which a local
+    // row never names; use a remote origin's device to have a second line.
+    expect(time, findsOneWidget);
+    expect(
+      tester.getCenter(time).dy,
+      moreOrLessEquals(tester.getCenter(name).dy, epsilon: 2),
+    );
+    expect(find.text('Mac'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Mac')).dy,
+      greaterThan(tester.getBottomLeft(name).dy - 1),
+    );
+    // The time is at the row's end, not in a rail beside the origin.
+    expect(
+      tester.getTopLeft(time).dx,
+      greaterThan(tester.getTopRight(find.text('Mac')).dx),
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -454,6 +621,57 @@ void main() {
     expect(find.text('Connect a machine'), findsOneWidget);
     expect(find.textContaining('Turn on Remote'), findsOneWidget);
     expect(find.textContaining('No recent sessions'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('the first heading keeps its gap below a starting row', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final handle = tester.ensureSemantics();
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final container = ProviderContainer(
+      overrides: [
+        recentSessionsProvider.overrideWithValue([_row('s1', 'Task')]),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+
+    final heading = find.bySemanticsLabel('antgrid, 1 session');
+    final idleTop = tester.getTopLeft(heading).dy;
+
+    container
+        .read(newSessionStartProgressProvider.notifier)
+        .begin(
+          phase: NewSessionStartPhase.activating,
+          targetId: 'p',
+          targetName: 'antgrid',
+          deviceName: '',
+          agentLabel: 'Claude Code',
+          isolated: false,
+          title: 'fix the bug',
+        );
+    // Not pumpAndSettle: the starting row's spinner repeats forever.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final gap =
+        tester.getTopLeft(heading).dy -
+        tester.getBottomLeft(find.byKey(startingSessionRowKey)).dy;
+    expect(gap, greaterThanOrEqualTo(CarbonSpacing.spacing05));
+    expect(tester.getTopLeft(heading).dy, greaterThan(idleTop));
+
+    handle.dispose();
     debugDefaultTargetPlatformOverride = null;
   });
 

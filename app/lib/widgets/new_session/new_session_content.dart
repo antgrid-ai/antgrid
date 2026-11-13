@@ -43,10 +43,9 @@ class NewSessionContent extends ConsumerWidget {
   final VoidCallback? onOpenDrawer;
   final bool showSearchButton;
 
-  // Matches the Claude desktop conversation column. The cap covers the whole
-  // canvas (recents + composer) so the two read as one document rather than a
-  // phone layout stranded mid-window.
-  static const double _maxWidth = CarbonSpacing.spacing08 * 22;
+  // The cap covers the whole canvas (recents + composer) so the two read as one
+  // document rather than a phone layout stranded mid-window.
+  static const double _maxWidth = CarbonSpacing.spacing08 * 20;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -56,7 +55,7 @@ class NewSessionContent extends ConsumerWidget {
     // behave normally) — pressing Esc while not editing still bubbles up here.
     // Decided once here and handed BOTH to the bar and (inverted) to the list
     // below it: the fixed bar and the list's own scrolling header carry the
-    // same title/chips/badges, so exactly one may mount — and re-deriving that
+    // same status badges, so exactly one may mount — and re-deriving that
     // from platform+width in two places is how you end up with two or neither.
     final showTopBar = onOpenDrawer != null || showSearchButton;
     // The one Carbon scope for the canvas, with the Esc shortcut inside it so
@@ -127,18 +126,48 @@ class NewSessionContent extends ConsumerWidget {
                           constraints: const BoxConstraints(
                             maxWidth: _maxWidth,
                           ),
-                          child: Column(
+                          // Wide or narrow from the column's own width: the
+                          // canvas can be far narrower than the screen.
+                          child: LayoutBuilder(
+                            builder: (context, column) {
+                              final wide =
+                                  column.maxWidth >= kCompactBreakpoint;
+                              // The nudges pad themselves by spacing05; a wide
+                              // column tops that up to the list's inset.
+                              final nudgeInset = wide
+                                  ? const EdgeInsets.symmetric(
+                                      horizontal:
+                                          CarbonSpacing.spacing06 -
+                                          CarbonSpacing.spacing05,
+                                    )
+                                  : EdgeInsets.zero;
+                              // Bottom inset only without a system one:
+                              // viewPadding survives SafeArea's removePadding,
+                              // so a gesture bar still reads as non-zero here.
+                              final bottomInset =
+                                  wide &&
+                                      MediaQuery.viewPaddingOf(context).bottom ==
+                                          0
+                                  ? CarbonSpacing.spacing05
+                                  : 0.0;
+                              return Column(
                             children: [
                               // The desktop setup checklist moved to the
                               // sidebar (`FirstRunSetupSection` in
                               // projects_drawer.dart); mobile's fills
                               // RecentSessionsTab's empty slot below. Neither
                               // is mounted here any more.
-                              const RemoteAccessNudgeBanner(),
+                              Padding(
+                                padding: nudgeInset,
+                                child: const RemoteAccessNudgeBanner(),
+                              ),
                               // Self-gating too: it renders only while the
                               // composer's isolation toggle is on for a target
                               // that can actually make worktrees.
-                              const WorktreeSetupNudge(),
+                              Padding(
+                                padding: nudgeInset,
+                                child: const WorktreeSetupNudge(),
+                              ),
                               // Recents fill the canvas. RefreshIndicator keeps
                               // the old pull-to-refresh contract (inventory +
                               // viewed machine advert).
@@ -147,32 +176,39 @@ class NewSessionContent extends ConsumerWidget {
                                   onRefresh: () => _refresh(ref),
                                   color: t.colors.interactive,
                                   backgroundColor: t.layer(1),
-                                  // The scrolling header duplicates what the
-                                  // fixed top bar above already shows, so
-                                  // exactly one of the two mounts — decided
-                                  // here, where both answers are in hand.
+                                  // The list header's status badges duplicate
+                                  // the fixed top bar's, so exactly one of the
+                                  // two shows them — decided here, where both
+                                  // answers are in hand.
                                   child: RecentSessionsTab(
-                                    showHeader: !showTopBar,
+                                    showSummary: !showTopBar,
                                   ),
                                 ),
                               ),
+                              // Narrow: no bottom inset, SafeArea already
+                              // clears the gesture bar. Wide: lines up with
+                              // the recent list's inset.
                               Padding(
-                                // No bottom inset here — SafeArea (wrapping
-                                // this whole route) already reserves clearance
-                                // from the system gesture bar; stacking this on
-                                // top of it only pushed the composer further
-                                // from the edge than either alone needed to.
-                                padding: const EdgeInsets.fromLTRB(
-                                  CarbonSpacing.spacing05,
-                                  CarbonSpacing.spacing05,
-                                  CarbonSpacing.spacing05,
-                                  0,
-                                ),
+                                padding: wide
+                                    ? EdgeInsets.fromLTRB(
+                                        CarbonSpacing.spacing06,
+                                        CarbonSpacing.spacing05,
+                                        CarbonSpacing.spacing06,
+                                        bottomInset,
+                                      )
+                                    : const EdgeInsets.fromLTRB(
+                                        CarbonSpacing.spacing05,
+                                        CarbonSpacing.spacing05,
+                                        CarbonSpacing.spacing05,
+                                        0,
+                                      ),
                                 child: NewSessionComposer(
                                   onOpenFolder: () => _addProject(context, ref),
                                 ),
                               ),
                             ],
+                              );
+                            },
                           ),
                         ),
                       ),
@@ -250,10 +286,9 @@ class NewSessionContent extends ConsumerWidget {
 }
 
 /// Top bar: the mobile drawer button and the session-search icon, sharing
-/// the row with either the sessions title + group-by chips + status badges
-/// (tablet/desktop, one line) or the old combined title+badges summary line
-/// (phone width, no chips — there's no room for a third element on a phone
-/// row without overflowing).
+/// the row with either the sessions title + status badges (tablet/desktop) or
+/// the combined title+badges summary line (phone width). The group-by control
+/// lives in the recent list's own header, not here.
 ///
 /// This bar is mobile's navigation bar, which is where both platforms' search
 /// guidance puts a search icon — reachable without scrolling, and costing a
@@ -262,8 +297,7 @@ class NewSessionContent extends ConsumerWidget {
 /// (`onOpenDrawer` non-null either way), but is wide enough
 /// (`>= kCompactBreakpoint`) to get the tablet/desktop arrangement below — the
 /// bar's own width, not platform or screen width, picks the layout: the canvas
-/// can be far narrower than the screen (a desktop pane beside the sidebar), and
-/// a touch-height group-by switcher does not fit one line there.
+/// can be far narrower than the screen (a desktop pane beside the sidebar).
 ///
 /// Carries no breadcrumb — the composer's project chip already names the
 /// target, and the route is self-evidently New Session.
@@ -307,9 +341,6 @@ class _TopBar extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: CarbonSpacing.spacing04),
-              // Hides itself with no recent sessions to group — see its own doc.
-              const RecentGroupByChips(),
-              const SizedBox(width: CarbonSpacing.spacing04),
               Expanded(
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.end,
@@ -327,16 +358,6 @@ class _TopBar extends StatelessWidget {
             ],
           ],
         ),
-        // A phone has no room for the switcher on the row above — the summary
-        // line and the search icon already fill it — so it gets a row of its
-        // own rather than being dropped, which left Recent stuck on its default
-        // grouping with nothing anywhere to change it. Full width: three
-        // touch-height segments sized to the widest label do not fit a narrow
-        // phone. It hides itself when there are no sessions to group.
-        if (isPhoneWidth) ...[
-          const SizedBox(height: CarbonSpacing.spacing03),
-          const RecentGroupByChips(expand: true),
-        ],
         const SizedBox(height: CarbonSpacing.spacing03),
         SizedBox(
           height: CarbonBorders.hairline,

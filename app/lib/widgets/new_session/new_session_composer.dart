@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../design/widgets/ab_agent_mark.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../launcher/host_control_client.dart' show HostControlException;
 import '../../models/agent_descriptor.dart';
@@ -110,7 +111,13 @@ const double _statusLineMinWidth = 44;
 /// selector's slot absorbs the row slack (ellipsizing its label) instead of
 /// the desktop Enter-hint slot, and the mode trigger drops to its glyph; the
 /// agent label never drops. On touch the context row scrolls below it.
+///
 const double _composerRowRoomyMinWidth = 460;
+
+/// Row width from which the send key carries its "Start" label. The label
+/// needs a label's width more than the controls alone, so it has its own
+/// threshold instead of raising [_composerRowRoomyMinWidth] for everything.
+const double _composerRowLabelledSendMinWidth = 540;
 
 /// Flex the phase status line claims while a start runs, against the agent
 /// selector's 1. A phone's bottom row cannot seat both at their intrinsic
@@ -753,6 +760,9 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                     // ellipsizes (see _composerRowRoomyMinWidth).
                     final roomy =
                         rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
+                    final labelledSend =
+                        rowConstraints.maxWidth >=
+                        _composerRowLabelledSendMinWidth;
                     // The Enter hint is desktop-only (a soft keyboard has no
                     // meaningful Enter-to-send) but the phase line is not: a
                     // cold remote start is a 30s wait, and a phone is where it
@@ -857,7 +867,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                             Expanded(
                               child: LayoutBuilder(
                                 builder: (context, slot) =>
-                                    slot.maxWidth < _agentTriggerFloor(t)
+                                    slot.maxWidth <
+                                    _agentTriggerFloor(t)
                                     ? const SizedBox.shrink()
                                     : const Align(
                                         alignment:
@@ -895,17 +906,37 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                         if (progress != null && progress.isCancellable)
                           KeyedSubtree(
                             key: const Key('new-session-stop-button'),
-                            child: CarbonButton.iconOnly(
-                              key: const Key('new-session-send-button'),
-                              kind: CarbonButtonKind.danger,
-                              icon: const CarbonIcon(CarbonIcons.stopFilled),
-                              semanticLabel: 'Stop starting session',
-                              onPressed: () => ref
-                                  .read(
-                                    newSessionStartProgressProvider.notifier,
-                                  )
-                                  .requestCancel(),
-                            ),
+                            child: labelledSend
+                                ? CarbonButton(
+                                    key: const Key('new-session-send-button'),
+                                    label: 'Stop',
+                                    kind: CarbonButtonKind.danger,
+                                    icon: const CarbonIcon(
+                                      CarbonIcons.stopFilled,
+                                    ),
+                                    semanticLabel: 'Stop starting session',
+                                    maxLines: 1,
+                                    onPressed: () => ref
+                                        .read(
+                                          newSessionStartProgressProvider
+                                              .notifier,
+                                        )
+                                        .requestCancel(),
+                                  ).reservingWidthOf(stop: false)
+                                : CarbonButton.iconOnly(
+                                    key: const Key('new-session-send-button'),
+                                    kind: CarbonButtonKind.danger,
+                                    icon: const CarbonIcon(
+                                      CarbonIcons.stopFilled,
+                                    ),
+                                    semanticLabel: 'Stop starting session',
+                                    onPressed: () => ref
+                                        .read(
+                                          newSessionStartProgressProvider
+                                              .notifier,
+                                        )
+                                        .requestCancel(),
+                                  ),
                           )
                         else
                           Listener(
@@ -913,19 +944,33 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                                 _sendPointer = event.pointer,
                             onPointerUp: (_) => _forgetSendPress(),
                             onPointerCancel: (_) => _forgetSendPress(),
-                            child: CarbonButton.iconOnly(
-                              key: const Key('new-session-send-button'),
-                              kind: CarbonButtonKind.primary,
-                              icon: const CarbonIcon(CarbonIcons.send),
-                              semanticLabel: 'Start session',
-                              busy: starting,
-                              // Kept live while busy so the key keeps its
-                              // primary fill — working, not off; `busy`
-                              // swallows the press.
-                              onPressed: canSend
-                                  ? _onSendPressed
-                                  : (starting ? _noop : null),
-                            ),
+                            child: labelledSend
+                                ? CarbonButton(
+                                    key: const Key('new-session-send-button'),
+                                    label: 'Start',
+                                    kind: CarbonButtonKind.primary,
+                                    icon: const CarbonIcon(CarbonIcons.send),
+                                    semanticLabel: 'Start session',
+                                    busy: starting,
+                                    maxLines: 1,
+                                    // Kept live while busy so the key keeps
+                                    // its primary fill — working, not off;
+                                    // `busy` swallows the press.
+                                    onPressed: canSend
+                                        ? _onSendPressed
+                                        : (starting ? _noop : null),
+                                  ).reservingWidthOf(stop: true)
+                                : CarbonButton.iconOnly(
+                                    key: const Key('new-session-send-button'),
+                                    kind: CarbonButtonKind.primary,
+                                    icon: const CarbonIcon(CarbonIcons.send),
+                                    semanticLabel: 'Start session',
+                                    busy: starting,
+                                    // As above: live while busy.
+                                    onPressed: canSend
+                                        ? _onSendPressed
+                                        : (starting ? _noop : null),
+                                  ),
                           ),
                       ],
                     );
@@ -969,6 +1014,31 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
 }
 
 void _noop() {}
+
+extension on CarbonButton {
+  /// Lays this labelled send key over an invisible, inert copy of the other
+  /// one ([stop] picks which), so the slot is as wide as the wider of Start and
+  /// Stop at whatever font and scale is in use, and the key keeps one width
+  /// when a start begins and again when it passes the cancel boundary.
+  Widget reservingWidthOf({required bool stop}) => Stack(
+    alignment: AlignmentDirectional.centerEnd,
+    children: [
+      Visibility(
+        visible: false,
+        maintainSize: true,
+        maintainAnimation: true,
+        maintainState: true,
+        child: CarbonButton(
+          label: stop ? 'Stop' : 'Start',
+          kind: stop ? CarbonButtonKind.danger : CarbonButtonKind.primary,
+          icon: CarbonIcon(stop ? CarbonIcons.stopFilled : CarbonIcons.send),
+          maxLines: 1,
+        ),
+      ),
+      this,
+    ],
+  );
+}
 
 /// The shell-prompt marker before the editable: the terminal-native "type
 /// here" affordance, lit while the prompt has focus.
@@ -1293,9 +1363,20 @@ class _AgentSelector extends ConsumerWidget {
       ref.watch(selectedTargetProjectProvider),
     );
 
+    final label = newSessionAgentLabel(agent, detected, catalog);
+    final t = CarbonTheme.of(context);
     return ContextPicker(
       key: const Key('new-session-agent-selector'),
-      label: newSessionAgentLabel(agent, detected, catalog),
+      label: label,
+      mark: switch (agent) {
+        KnownAgent(:final toolKey) => AbAgentMark(
+          toolKey: toolKey,
+          label: label,
+          size: t.iconSize,
+          color: t.colors.iconSecondary,
+        ),
+        CustomAgent() => null,
+      },
       field: 'Agent',
       enabled: enabled,
       entries: [
@@ -1322,7 +1403,8 @@ class _AgentSelector extends ConsumerWidget {
 }
 
 /// The narrowest slot the agent trigger still reads in. It has no leading
-/// glyph, so it needs one glyph and its gap less than a picker that has one.
+/// glyph, so it needs one glyph and its gap less than a picker that has one;
+/// the brand mark is dropped below that floor-plus-mark rather than raising it.
 double _agentTriggerFloor(CarbonThemeData t) =>
     contextPickerFullMinWidth(t) - t.iconSize - CarbonSpacing.spacing03;
 
