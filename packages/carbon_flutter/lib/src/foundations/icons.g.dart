@@ -135,6 +135,100 @@ enum CarbonIcons {
   login,
   /// Carbon `download`.
   download,
+  /// Carbon `maximize`.
+  maximize,
+  /// Carbon `minimize`.
+  minimize,
+  /// Carbon `security`.
+  security,
+  /// Carbon `application--web`.
+  applicationWeb,
+  /// Carbon `cursor--1`.
+  cursor1,
+  /// Carbon `share`.
+  share,
+  /// Carbon `zoom--in`.
+  zoomIn,
+  /// Carbon `zoom--out`.
+  zoomOut,
+  /// Carbon `list--bulleted`.
+  listBulleted,
+  /// Carbon `undo`.
+  undo,
+  /// Carbon `redo`.
+  redo,
+  /// Carbon `reset`.
+  reset,
+  /// Carbon `restart`.
+  restart,
+  /// Carbon `commit`.
+  commit,
+  /// Carbon `upload`.
+  upload,
+  /// Carbon `arrow--up`.
+  arrowUp,
+  /// Carbon `arrow--down`.
+  arrowDown,
+  /// Carbon `collapse-all`.
+  collapseAll,
+  /// Carbon `expand-all`.
+  expandAll,
+  /// Carbon `notification`.
+  notification,
+  /// Carbon `password`.
+  password,
+  /// Carbon `link`.
+  link,
+  /// Carbon `up-to-top`.
+  upToTop,
+  /// Carbon `document--blank`.
+  documentBlank,
+  /// Carbon `document--unknown`.
+  documentUnknown,
+  /// Carbon `folder--open`.
+  folderOpen,
+  /// Carbon `send--alt`.
+  sendAlt,
+  /// Carbon `pen`.
+  pen,
+  /// Carbon `draw`.
+  draw,
+  /// Carbon `erase`.
+  erase,
+  /// Carbon `square--outline`.
+  squareOutline,
+  /// Carbon `circle--outline`.
+  circleOutline,
+  /// Carbon `letter--Aa`.
+  letterAa,
+  /// Carbon `time`.
+  time,
+  /// Carbon `pause`.
+  pause,
+  /// Carbon `stop`.
+  stop,
+  /// Carbon `subtract--large`.
+  subtractLarge,
+  /// Carbon `color-palette`.
+  colorPalette,
+  /// Carbon `pull-request`.
+  pullRequest,
+  /// Carbon `chevron--sort`.
+  chevronSort,
+  /// Carbon `line--thin`.
+  lineThin,
+  /// Carbon `line--thick`.
+  lineThick,
+  /// Carbon `horizontal-line--solid`.
+  horizontalLineSolid,
+  /// Carbon `string-text`.
+  stringText,
+  /// Carbon `character--upper-case`.
+  characterUpperCase,
+  /// Carbon `character--sentence-case`.
+  characterSentenceCase,
+  /// Carbon `asterisk`.
+  asterisk,
   ;
 
   /// Whether the glyph points along the reading direction and so mirrors
@@ -147,6 +241,8 @@ const Set<CarbonIcons> _mirrored = <CarbonIcons>{
   CarbonIcons.arrowRight,
   CarbonIcons.chevronLeft,
   CarbonIcons.chevronRight,
+  CarbonIcons.undo,
+  CarbonIcons.redo,
 };
 
 const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
@@ -351,5 +447,146 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   ),
   CarbonIcons.download: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M26,24v4H6V24H4v4H4a2,2,0,0,0,2,2H26a2,2,0,0,0,2-2h0V24Z'), _CarbonIconPath('M26 14 24.59 12.59 17 20.17 17 2 15 2 15 20.17 7.41 12.59 6 14 16 24 26 14z')],
+  ),
+  CarbonIcons.maximize: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M20 2 20 4 26.586 4 18 12.582 19.414 14 28 5.414 28 12 30 12 30 2 20 2z'), _CarbonIconPath('M14 19.416 12.592 18 4 26.586 4 20 2 20 2 30 12 30 12 28 5.414 28 14 19.416z')],
+  ),
+  CarbonIcons.minimize: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M4 18 4 20 10.586 20 2 28.582 3.414 30 12 21.414 12 28 14 28 14 18 4 18z'), _CarbonIconPath('M30 3.416 28.592 2 20 10.586 20 4 18 4 18 14 28 14 28 12 21.414 12 30 3.416z')],
+  ),
+  CarbonIcons.security: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M14 16.59 11.41 14 10 15.41 14 19.41 22 11.41 20.59 10 14 16.59z'), _CarbonIconPath('M16,30,9.8242,26.7071A10.9818,10.9818,0,0,1,4,17V4A2.0021,2.0021,0,0,1,6,2H26a2.0021,2.0021,0,0,1,2,2V17a10.9818,10.9818,0,0,1-5.8242,9.7071ZM6,4V17a8.9852,8.9852,0,0,0,4.7656,7.9423L16,27.7333l5.2344-2.791A8.9852,8.9852,0,0,0,26,17V4Z')],
+  ),
+  CarbonIcons.applicationWeb: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26 2H30V6H26z'), _CarbonIconPath('M26 8H30V12H26z'), _CarbonIconPath('M20 2H24V6H20z'), _CarbonIconPath('M20 8H24V12H20z'), _CarbonIconPath('M28,16v6H4V6H16V4H4A2,2,0,0,0,2,6V22a2,2,0,0,0,2,2h8v4H8v2H24V28H20V24h8a2,2,0,0,0,2-2V16ZM18,28H14V24h4Z')],
+  ),
+  CarbonIcons.cursor1: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M23,28a1,1,0,0,1-.71-.29l-6.13-6.14-3.33,5a1,1,0,0,1-1,.44,1,1,0,0,1-.81-.7l-6-20A1,1,0,0,1,6.29,5l20,6a1,1,0,0,1,.7.81,1,1,0,0,1-.44,1l-5,3.33,6.14,6.13a1,1,0,0,1,0,1.42l-4,4A1,1,0,0,1,23,28Zm0-2.41L25.59,23l-7.16-7.15,5.25-3.5L7.49,7.49l4.86,16.19,3.5-5.25Z')],
+  ),
+  CarbonIcons.share: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M23,20a5,5,0,0,0-3.89,1.89L11.8,17.32a4.46,4.46,0,0,0,0-2.64l7.31-4.57A5,5,0,1,0,18,7a4.79,4.79,0,0,0,.2,1.32l-7.31,4.57a5,5,0,1,0,0,6.22l7.31,4.57A4.79,4.79,0,0,0,18,25a5,5,0,1,0,5-5ZM23,4a3,3,0,1,1-3,3A3,3,0,0,1,23,4ZM7,19a3,3,0,1,1,3-3A3,3,0,0,1,7,19Zm16,9a3,3,0,1,1,3-3A3,3,0,0,1,23,28Z')],
+  ),
+  CarbonIcons.zoomIn: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M18 12 14 12 14 8 12 8 12 12 8 12 8 14 12 14 12 18 14 18 14 14 18 14 18 12z'), _CarbonIconPath('M21.4479,20A10.856,10.856,0,0,0,24,13,11,11,0,1,0,13,24a10.856,10.856,0,0,0,7-2.5521L27.5859,29,29,27.5859ZM13,22a9,9,0,1,1,9-9A9.01,9.01,0,0,1,13,22Z')],
+  ),
+  CarbonIcons.zoomOut: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M8 12H18V14H8z'), _CarbonIconPath('M21.4479,20A10.856,10.856,0,0,0,24,13,11,11,0,1,0,13,24a10.856,10.856,0,0,0,7-2.5521L27.5859,29,29,27.5859ZM13,22a9,9,0,1,1,9-9A9.01,9.01,0,0,1,13,22Z')],
+  ),
+  CarbonIcons.listBulleted: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M4,9a3,3 0 1,0 6,0a3,3 0 1,0 -6,0z'), _CarbonIconPath('M4,23a3,3 0 1,0 6,0a3,3 0 1,0 -6,0z'), _CarbonIconPath('M16 22H30V24H16z'), _CarbonIconPath('M16 8H30V10H16z')],
+  ),
+  CarbonIcons.undo: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M20,10H7.8149l3.5874-3.5859L10,5,4,11,10,17l1.4023-1.4146L7.8179,12H20a6,6,0,0,1,0,12H12v2h8a8,8,0,0,0,0-16Z')],
+  ),
+  CarbonIcons.redo: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M12,10H24.1851L20.5977,6.4141,22,5,28,11,22,17l-1.4023-1.4146L24.1821,12H12a6,6,0,0,0,0,12h8v2H12a8,8,0,0,1,0-16Z')],
+  ),
+  CarbonIcons.reset: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M18,28A12,12,0,1,0,6,16v6.2L2.4,18.6,1,20l6,6,6-6-1.4-1.4L8,22.2V16H8A10,10,0,1,1,18,26Z')],
+  ),
+  CarbonIcons.restart: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,18A10,10,0,1,1,16,8h6.1821l-3.5844,3.5854L20,13l6-6L20,1,18.5977,2.414,22.1851,6H16A12,12,0,1,0,28,18Z')],
+  ),
+  CarbonIcons.commit: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M30,15H21.91A5.9925,5.9925,0,0,0,10.09,15H2v2h8.09A5.9925,5.9925,0,0,0,21.91,17H30ZM16,20a4,4,0,1,1,4-4A4.0045,4.0045,0,0,1,16,20Z')],
+  ),
+  CarbonIcons.upload: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M6 18 7.41 19.41 15 11.83 15 30 17 30 17 11.83 24.59 19.41 26 18 16 8 6 18z'), _CarbonIconPath('M6,8V4H26V8h2V4a2,2,0,0,0-2-2H6A2,2,0,0,0,4,4V8Z')],
+  ),
+  CarbonIcons.arrowUp: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16 4 6 14 7.41 15.41 15 7.83 15 28 17 28 17 7.83 24.59 15.41 26 14 16 4z')],
+  ),
+  CarbonIcons.arrowDown: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M24.59 16.59 17 24.17 17 4 15 4 15 24.17 7.41 16.59 6 18 16 28 26 18 24.59 16.59z')],
+  ),
+  CarbonIcons.collapseAll: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M30,15H28V7H13V5H28a2.0023,2.0023,0,0,1,2,2Z'), _CarbonIconPath('M25,20H23V12H8V10H23a2.0023,2.0023,0,0,1,2,2Z'), _CarbonIconPath('M18,27H4a2.0023,2.0023,0,0,1-2-2V17a2.0023,2.0023,0,0,1,2-2H18a2.0023,2.0023,0,0,1,2,2v8A2.0023,2.0023,0,0,1,18,27ZM4,17v8H18.0012L18,17Z')],
+  ),
+  CarbonIcons.expandAll: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M12,10H26a2.0025,2.0025,0,0,0,2-2V4a2.0025,2.0025,0,0,0-2-2H12a2.0025,2.0025,0,0,0-2,2V5H6V2H4V25a2.0025,2.0025,0,0,0,2,2h4v1a2.0025,2.0025,0,0,0,2,2H26a2.0025,2.0025,0,0,0,2-2V24a2.0025,2.0025,0,0,0-2-2H12a2.0025,2.0025,0,0,0-2,2v1H6V17h4v1a2.0025,2.0025,0,0,0,2,2H26a2.0025,2.0025,0,0,0,2-2V14a2.0025,2.0025,0,0,0-2-2H12a2.0025,2.0025,0,0,0-2,2v1H6V7h4V8A2.0025,2.0025,0,0,0,12,10Zm0-6H26l.0012,4H12Zm0,20H26l.0012,4H12Zm0-10H26l.0012,4H12Z')],
+  ),
+  CarbonIcons.notification: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28.7071,19.293,26,16.5859V13a10.0136,10.0136,0,0,0-9-9.9492V1H15V3.0508A10.0136,10.0136,0,0,0,6,13v3.5859L3.2929,19.293A1,1,0,0,0,3,20v3a1,1,0,0,0,1,1h7v.7768a5.152,5.152,0,0,0,4.5,5.1987A5.0057,5.0057,0,0,0,21,25V24h7a1,1,0,0,0,1-1V20A1,1,0,0,0,28.7071,19.293ZM19,25a3,3,0,0,1-6,0V24h6Zm8-3H5V20.4141L7.707,17.707A1,1,0,0,0,8,17V13a8,8,0,0,1,16,0v4a1,1,0,0,0,.293.707L27,20.4141Z')],
+  ),
+  CarbonIcons.password: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M21,2a8.9977,8.9977,0,0,0-8.6119,11.6118L2,24v6H8L18.3881,19.6118A9,9,0,1,0,21,2Zm0,16a7.0125,7.0125,0,0,1-2.0322-.3022L17.821,17.35l-.8472.8472-3.1811,3.1812L12.4141,20,11,21.4141l1.3787,1.3786-1.5859,1.586L9.4141,23,8,24.4141l1.3787,1.3786L7.1716,28H4V24.8284l9.8023-9.8023.8472-.8474-.3473-1.1467A7,7,0,1,1,21,18Z'), _CarbonIconPath('M20,10a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z')],
+  ),
+  CarbonIcons.link: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M29.25,6.76a6,6,0,0,0-8.5,0l1.42,1.42a4,4,0,1,1,5.67,5.67l-8,8a4,4,0,1,1-5.67-5.66l1.41-1.42-1.41-1.42-1.42,1.42a6,6,0,0,0,0,8.5A6,6,0,0,0,17,25a6,6,0,0,0,4.27-1.76l8-8A6,6,0,0,0,29.25,6.76Z'), _CarbonIconPath('M4.19,24.82a4,4,0,0,1,0-5.67l8-8a4,4,0,0,1,5.67,0A3.94,3.94,0,0,1,19,14a4,4,0,0,1-1.17,2.85L15.71,19l1.42,1.42,2.12-2.12a6,6,0,0,0-8.51-8.51l-8,8a6,6,0,0,0,0,8.51A6,6,0,0,0,7,28a6.07,6.07,0,0,0,4.28-1.76L9.86,24.82A4,4,0,0,1,4.19,24.82Z')],
+  ),
+  CarbonIcons.upToTop: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16 14 6 24 7.4 25.4 16 16.8 24.6 25.4 26 24z'), _CarbonIconPath('M4 8H28V10H4z')],
+  ),
+  CarbonIcons.documentBlank: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M25.7,9.3l-7-7A.9078.9078,0,0,0,18,2H8A2.0059,2.0059,0,0,0,6,4V28a2.0059,2.0059,0,0,0,2,2H24a2.0059,2.0059,0,0,0,2-2V10A.9078.9078,0,0,0,25.7,9.3ZM18,4.4,23.6,10H18ZM24,28H8V4h8v6a2.0059,2.0059,0,0,0,2,2h6Z')],
+  ),
+  CarbonIcons.documentUnknown: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M7.5,28.5a1.5,1.5 0 1,0 3,0a1.5,1.5 0 1,0 -3,0z'), _CarbonIconPath('M10,25H8V21h2a2,2,0,0,0,0-4H8a2.0023,2.0023,0,0,0-2,2v.5H4V19a4.0045,4.0045,0,0,1,4-4h2a4,4,0,0,1,0,8Z'), _CarbonIconPath('M27.7,9.3l-7-7A.9085.9085,0,0,0,20,2H10A2.0058,2.0058,0,0,0,8,4v8h2V4h8v6a2.0058,2.0058,0,0,0,2,2h6V28H14v2H26a2.0058,2.0058,0,0,0,2-2V10A.9092.9092,0,0,0,27.7,9.3ZM20,10V4.4L25.6,10Z')],
+  ),
+  CarbonIcons.folderOpen: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28,8H20.8284L17.4143,4.5859A2,2,0,0,0,16,4H4A2,2,0,0,0,2,6V26a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10A2,2,0,0,0,28,8ZM8,26V14h8v6.17l-2.59-2.58L12,19l5,5,5-5-1.41-1.41L18,20.17V14a2.0025,2.0025,0,0,0-2-2H8a2.0025,2.0025,0,0,0-2,2V26H4V6H16l4,4h8v2H22v2h6V26Z')],
+  ),
+  CarbonIcons.sendAlt: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M27.71,4.29a1,1,0,0,0-1.05-.23l-22,8a1,1,0,0,0,0,1.87l9.6,3.84,3.84,9.6A1,1,0,0,0,19,28h0a1,1,0,0,0,.92-.66l8-22A1,1,0,0,0,27.71,4.29ZM19,24.2l-2.79-7L21,12.41,19.59,11l-4.83,4.83L7.8,13,25.33,6.67Z')],
+  ),
+  CarbonIcons.pen: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M27.3069,6.1069,30,3.4141,28.5859,2,25.8931,4.6929,24.8,3.6a1.9328,1.9328,0,0,0-2.8,0L4,21.6V28h6.4l18-18a1.9329,1.9329,0,0,0,0-2.8ZM9.6,26H6V22.4L23.4,5,27,8.6Z'), _CarbonIconPath('M8.136 7.5H18.863999999999997V9.5H8.136z', rotation: <double>[-45, 13.5, 8.5])],
+  ),
+  CarbonIcons.draw: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M19.14,28a3.42,3.42,0,0,1-2.42-5.85L21.86,17a1.42,1.42,0,1,0-2-2L13,21.85a3.5,3.5,0,0,1-4.85,0,3.43,3.43,0,0,1,0-4.84l8.58-8.58a1.42,1.42,0,1,0-2-2L6.41,14.7,5,13.3,13.29,5a3.43,3.43,0,0,1,4.84,4.85L9.56,18.42a1.42,1.42,0,0,0,0,2,1.45,1.45,0,0,0,2,0l6.86-6.86a3.43,3.43,0,1,1,4.85,4.84l-5.15,5.15a1.42,1.42,0,0,0,2,2l4.44-4.43L26,22.56,21.56,27A3.38,3.38,0,0,1,19.14,28Z')],
+  ),
+  CarbonIcons.erase: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M7 27H30V29H7z'), _CarbonIconPath('M27.38,10.51,19.45,2.59a2,2,0,0,0-2.83,0l-14,14a2,2,0,0,0,0,2.83L7.13,24h9.59L27.38,13.34A2,2,0,0,0,27.38,10.51ZM15.89,22H8L4,18l6.31-6.31,7.93,7.92Zm3.76-3.76-7.92-7.93L18,4,26,11.93Z')],
+  ),
+  CarbonIcons.squareOutline: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('m26,4H6c-1.1046,0-2,.8954-2,2v20c0,1.1046.8954,2,2,2h20c1.1046,0,2-.8954,2-2V6c0-1.1046-.8954-2-2-2ZM6,26V6h20v20H6Z')],
+  ),
+  CarbonIcons.circleOutline: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('m16,2c-7.732,0-14,6.268-14,14s6.268,14,14,14,14-6.268,14-14S23.732,2,16,2Zm0,26c-6.6274,0-12-5.3726-12-12s5.3726-12,12-12,12,5.3726,12,12-5.3726,12-12,12Z')],
+  ),
+  CarbonIcons.letterAa: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M23,13H18v2h5v2H19a2,2,0,0,0-2,2v2a2,2,0,0,0,2,2h6V15A2,2,0,0,0,23,13Zm0,8H19V19h4Z'), _CarbonIconPath('M13,9H9a2,2,0,0,0-2,2V23H9V18h4v5h2V11A2,2,0,0,0,13,9ZM9,16V11h4v5Z')],
+  ),
+  CarbonIcons.time: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16,30A14,14,0,1,1,30,16,14,14,0,0,1,16,30ZM16,4A12,12,0,1,0,28,16,12,12,0,0,0,16,4Z'), _CarbonIconPath('M20.59 22 15 16.41 15 7 17 7 17 15.58 22 20.59 20.59 22z')],
+  ),
+  CarbonIcons.pause: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M12,8V24H8V8h4m0-2H8A2,2,0,0,0,6,8V24a2,2,0,0,0,2,2h4a2,2,0,0,0,2-2V8a2,2,0,0,0-2-2Z'), _CarbonIconPath('M24,8V24H20V8h4m0-2H20a2,2,0,0,0-2,2V24a2,2,0,0,0,2,2h4a2,2,0,0,0,2-2V8a2,2,0,0,0-2-2Z')],
+  ),
+  CarbonIcons.stop: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M24,8V24H8V8H24m0-2H8A2,2,0,0,0,6,8V24a2,2,0,0,0,2,2H24a2,2,0,0,0,2-2V8a2,2,0,0,0-2-2Z')],
+  ),
+  CarbonIcons.subtractLarge: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M5 15 5 17 27 17 27 15 5 15z')],
+  ),
+  CarbonIcons.colorPalette: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M8,12a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z'), _CarbonIconPath('M14,9a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z'), _CarbonIconPath('M20,12a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z'), _CarbonIconPath('M21,18a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z'), _CarbonIconPath('M17,23a2,2 0 1,0 4,0a2,2 0 1,0 -4,0z'), _CarbonIconPath('M16.54,2A14,14,0,0,0,2,16a4.82,4.82,0,0,0,6.09,4.65l1.12-.31A3,3,0,0,1,13,23.24V27a3,3,0,0,0,3,3A14,14,0,0,0,30,15.46,14.05,14.05,0,0,0,16.54,2Zm8.11,22.31A11.93,11.93,0,0,1,16,28a1,1,0,0,1-1-1V23.24a5,5,0,0,0-5-5,5.07,5.07,0,0,0-1.33.18l-1.12.31A2.82,2.82,0,0,1,4,16,12,12,0,0,1,16.47,4,12.18,12.18,0,0,1,28,15.53,11.89,11.89,0,0,1,24.65,24.32Z')],
+  ),
+  CarbonIcons.pullRequest: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('m25,22.1421v-13.1421c0-2.2056-1.7944-4-4-4h-4.1719l2.5859-2.5859-1.4141-1.4141-5,5,5,5,1.4141-1.4141-2.5859-2.5859h4.1719c1.1028,0,2,.8975,2,2v13.1421c-1.7202.4473-3,1.9995-3,3.8579,0,2.2056,1.7944,4,4,4s4-1.7944,4-4c0-1.8584-1.2798-3.4106-3-3.8579Zm-1,5.8579c-1.1028,0-2-.8975-2-2s.8972-2,2-2,2,.8975,2,2-.8972,2-2,2Z'), _CarbonIconPath('m4,6c0,1.8584,1.2798,3.4106,3,3.8579v12.2842c-1.7202.447-3,1.9993-3,3.8579,0,2.2061,1.7944,4,4,4s4-1.7939,4-4c0-1.8586-1.2798-3.4109-3-3.8579v-12.2842c1.7202-.4473,3-1.9995,3-3.8579,0-2.2056-1.7944-4-4-4s-4,1.7944-4,4Zm6,20c0,1.1025-.897,2-2,2s-2-.8975-2-2c0-1.1025.897-2,2-2s2,.8975,2,2Zm0-20c0,1.103-.897,2-2,2s-2-.897-2-2c0-1.103.897-2,2-2s2,.897,2,2Z')],
+  ),
+  CarbonIcons.chevronSort: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16 28 9 21 10.41 19.59 16 25.17 21.59 19.59 23 21 16 28z'), _CarbonIconPath('M16 4 23 11 21.59 12.41 16 6.83 10.41 12.41 9 11 16 4z')],
+  ),
+  CarbonIcons.lineThin: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M5.293,25.2929L25.293,5.2929l1.4141,1.4141L6.707,26.707l-1.4141-1.4141Z')],
+  ),
+  CarbonIcons.lineThick: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M4.5,24.6506L24.6506,4.5l2.8494,2.8494L7.3494,27.5l-2.8494-2.8494Z')],
+  ),
+  CarbonIcons.horizontalLineSolid: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M2,15h28v2H2v-2Z')],
+  ),
+  CarbonIcons.stringText: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M29,22H24a2.0027,2.0027,0,0,1-2-2V14a2.0023,2.0023,0,0,1,2-2h5v2H24v6h5Z'), _CarbonIconPath('M18,12H14V8H12V22h6a2.0027,2.0027,0,0,0,2-2V14A2.0023,2.0023,0,0,0,18,12Zm-4,8V14h4v6Z'), _CarbonIconPath('M8,12H3v2H8v2H4a2,2,0,0,0-2,2v2a2,2,0,0,0,2,2h6V14A2.0023,2.0023,0,0,0,8,12Zm0,8H4V18H8Z')],
+  ),
+  CarbonIcons.characterUpperCase: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M30,23H24a2.0023,2.0023,0,0,1-2-2V11a2.002,2.002,0,0,1,2-2h6v2H24V21h6Z'), _CarbonIconPath('M20,12a3.0033,3.0033,0,0,0-3-3H12V23h5a3.0033,3.0033,0,0,0,3-3V18a2.977,2.977,0,0,0-.78-2A2.9768,2.9768,0,0,0,20,14Zm-6-1h3a1.0013,1.0013,0,0,1,1,1v2a1.0013,1.0013,0,0,1-1,1H14Zm4,9a1.0009,1.0009,0,0,1-1,1H14V17h3a1.0009,1.0009,0,0,1,1,1Z'), _CarbonIconPath('M8,9H4a2.002,2.002,0,0,0-2,2V23H4V18H8v5h2V11A2.002,2.002,0,0,0,8,9ZM4,16V11H8v5Z')],
+  ),
+  CarbonIcons.characterSentenceCase: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M29,23H24a2.0027,2.0027,0,0,1-2-2V15a2.0023,2.0023,0,0,1,2-2h5v2H24v6h5Z'), _CarbonIconPath('M18,13H14V9H12V23h6a2.0027,2.0027,0,0,0,2-2V15A2.0023,2.0023,0,0,0,18,13Zm-4,8V15h4v6Z'), _CarbonIconPath('M8,9H4a2.002,2.002,0,0,0-2,2V23H4V18H8v5h2V11A2.002,2.002,0,0,0,8,9ZM4,16V11H8v5Z')],
+  ),
+  CarbonIcons.asterisk: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28.316 13.949 27.684 12.051 17 15.612 17 4 15 4 15 15.612 4.316 12.051 3.684 13.949 14.368 17.51 7.2 27.066 8.8 28.267 16 18.667 23.2 28.267 24.8 27.066 17.632 17.51 28.316 13.949z')],
   ),
 };

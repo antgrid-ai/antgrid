@@ -179,6 +179,7 @@ class CarbonInteraction extends StatefulWidget {
     this.expanded,
     this.inMutuallyExclusiveGroup,
     this.excludeChildSemantics = false,
+    this.customSemanticsActions,
   });
 
   final CarbonInteractionBuilder builder;
@@ -262,6 +263,10 @@ class CarbonInteraction extends StatefulWidget {
   /// Drops the visual child's own semantics so only this node's [label]
   /// announces.
   final bool excludeChildSemantics;
+
+  /// Extra named actions on this node, offered by screen readers in their
+  /// actions menu.
+  final Map<CustomSemanticsAction, VoidCallback>? customSemanticsActions;
 
   bool get enabled => onPressed != null;
 
@@ -524,6 +529,7 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
       inMutuallyExclusiveGroup: widget.inMutuallyExclusiveGroup,
       onTap: enabled ? _handleTap : null,
       onLongPress: enabled ? widget.onLongPress : null,
+      customSemanticsActions: enabled ? widget.customSemanticsActions : null,
       child: Shortcuts(
         shortcuts: _shortcuts,
         // Its focusable:false node would merge into this control's node and

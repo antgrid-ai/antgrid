@@ -2,6 +2,7 @@ import 'dart:ui' show SemanticsAction;
 
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart' show RenderSliver;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -906,6 +907,151 @@ void main() {
         textScale: 2,
         size: const Size(320, 600),
       );
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('pinned header', () {
+    Widget scroll(
+      ScrollController controller, {
+      bool pinned = true,
+      String? secondLabel = 'Second',
+    }) => CustomScrollView(
+      controller: controller,
+      slivers: [
+        for (final label in ['First', secondLabel])
+          CarbonContainedListSliver(
+            label: label,
+            pinned: pinned,
+            itemCount: 30,
+            itemBuilder: (context, i) =>
+                CarbonContainedListRow(title: '$label row $i', onPressed: () {}),
+          ),
+      ],
+    );
+
+    double extentOfFirstList(WidgetTester tester) =>
+        (tester.renderObject(find.byType(SliverMainAxisGroup).first)
+                as RenderSliver)
+            .geometry!
+            .scrollExtent;
+
+    testWidgets('the first header stays at the top while its rows scroll', (
+      tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        scroll(controller),
+        size: const Size(400, 600),
+      );
+      final rest = tester.getTopLeft(find.text('First')).dy;
+      controller.jumpTo(300);
+      await tester.pump();
+      expect(tester.getTopLeft(find.text('First')).dy, rest);
+      expect(tester
+            .getTopLeft(find.text('First row 0', skipOffstage: false))
+            .dy,
+        lessThan(0));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the next list header pushes the previous one off', (
+      tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        scroll(controller),
+        size: const Size(400, 600),
+      );
+      final rest = tester.getTopLeft(find.text('First')).dy;
+      final extent = extentOfFirstList(tester);
+
+      controller.jumpTo(extent - 10);
+      await tester.pump();
+      final first = tester.getTopLeft(find.text('First')).dy;
+      final second = tester.getTopLeft(find.text('Second')).dy;
+      expect(first, lessThan(rest));
+      expect(second, closeTo(rest + 10, 0.01));
+      expect(first, lessThan(second));
+
+      controller.jumpTo(extent + 40);
+      await tester.pump();
+      expect(tester.getTopLeft(find.text('Second')).dy, rest);
+      expect(
+        find.text('First').evaluate().isEmpty ||
+            tester.getTopLeft(find.text('First')).dy < 0,
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the pinned header keeps its header semantics', (tester) async {
+      final handle = tester.ensureSemantics();
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        scroll(controller),
+        size: const Size(400, 600),
+      );
+      controller.jumpTo(300);
+      await tester.pump();
+      expect(
+        tester.getSemantics(find.text('First')),
+        isSemantics(label: 'First', isHeader: true),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('unpinned headers scroll away with their rows', (tester) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        scroll(controller, pinned: false),
+        size: const Size(400, 600),
+      );
+      final rest = tester.getTopLeft(find.text('First')).dy;
+      controller.jumpTo(300);
+      await tester.pump();
+      expect(
+        find.text('First').evaluate().isEmpty ||
+            tester.getTopLeft(find.text('First')).dy < rest,
+        isTrue,
+      );
+    });
+
+    testWidgets('the header grows with 2x text without overflow', (
+      tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await pumpCarbon(
+        tester,
+        CustomScrollView(
+          controller: controller,
+          slivers: [
+            CarbonContainedListSliver(
+              label: 'A long list heading that must wrap',
+              action: CarbonButton(label: 'Add', onPressed: () {}),
+              pinned: true,
+              itemCount: 30,
+              itemBuilder: (context, i) =>
+                  CarbonContainedListRow(title: 'Row $i', onPressed: () {}),
+            ),
+          ],
+        ),
+        size: const Size(320, 600),
+        textScale: 2,
+      );
+      final before = tester.getRect(find.text('Add'));
+      controller.jumpTo(300);
+      await tester.pump();
+      expect(tester.getRect(find.text('Add')), before);
       expect(tester.takeException(), isNull);
     });
   });

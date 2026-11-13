@@ -729,4 +729,106 @@ void main() {
       expect(rect.left, greaterThan(300));
     });
   });
+
+  group('showCarbonMenuAt', () {
+    const hostKey = ValueKey<String>('host');
+
+    Future<BuildContext> mount(WidgetTester tester) async {
+      await _pump(tester, const SizedBox.expand(key: hostKey));
+      return tester.element(find.byKey(hostKey));
+    }
+
+    Future<void> settle(WidgetTester tester) async {
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('opens with its top start corner at the point', (
+      tester,
+    ) async {
+      final context = await mount(tester);
+      showCarbonMenuAt(context, const Offset(300, 200), <CarbonMenuEntry>[
+        const CarbonMenuItem(label: 'Open link'),
+        const CarbonMenuItem(label: 'Copy address'),
+      ]);
+      await settle(tester);
+      expect(find.text('Open link'), findsOneWidget);
+      expect(find.text('Copy address'), findsOneWidget);
+      final rect = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Open link'),
+              matching: find.byType(CarbonInteraction),
+            )
+            .first,
+      );
+      expect(rect.left, closeTo(300, 2));
+      expect(rect.top, closeTo(200, 6));
+    });
+
+    testWidgets('stays inside the overlay near the trailing and bottom edges', (
+      tester,
+    ) async {
+      final context = await mount(tester);
+      showCarbonMenuAt(context, const Offset(795, 595), <CarbonMenuEntry>[
+        const CarbonMenuItem(label: 'Open link'),
+        const CarbonMenuItem(label: 'Copy address'),
+      ]);
+      await settle(tester);
+      final rect = tester.getRect(find.text('Copy address'));
+      expect(rect.right, lessThanOrEqualTo(800));
+      expect(rect.bottom, lessThanOrEqualTo(600));
+      expect(rect.left, lessThan(795));
+      expect(rect.top, lessThan(595));
+    });
+
+    testWidgets('selecting an item runs its callback and completes the future', (
+      tester,
+    ) async {
+      final context = await mount(tester);
+      final log = <String>[];
+      var closed = false;
+      showCarbonMenuAt(context, const Offset(100, 100), <CarbonMenuEntry>[
+        CarbonMenuItem(label: 'Copy', onPressed: () => log.add('copy')),
+      ]).closed.then((_) => closed = true);
+      await settle(tester);
+      expect(closed, isFalse);
+      await tester.tap(find.text('Copy'));
+      await settle(tester);
+      expect(log, ['copy']);
+      expect(closed, isTrue);
+      expect(find.text('Copy'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('an outside tap closes it and completes the future', (
+      tester,
+    ) async {
+      final context = await mount(tester);
+      var closed = false;
+      showCarbonMenuAt(context, const Offset(100, 100), <CarbonMenuEntry>[
+        const CarbonMenuItem(label: 'Copy'),
+      ]).closed.then((_) => closed = true);
+      await settle(tester);
+      await tester.tapAt(const Offset(700, 500));
+      await settle(tester);
+      expect(find.text('Copy'), findsNothing);
+      expect(closed, isTrue);
+    });
+
+    testWidgets('follows the presenting context direction', (tester) async {
+      await _pump(
+        tester,
+        const SizedBox.expand(key: hostKey),
+        dir: TextDirection.rtl,
+      );
+      final context = tester.element(find.byKey(hostKey));
+      showCarbonMenuAt(context, const Offset(400, 200), <CarbonMenuEntry>[
+        const CarbonMenuItem(label: 'Copy'),
+      ]);
+      await settle(tester);
+      final rect = tester.getRect(find.text('Copy'));
+      expect(rect.right, lessThanOrEqualTo(402));
+    });
+  });
 }

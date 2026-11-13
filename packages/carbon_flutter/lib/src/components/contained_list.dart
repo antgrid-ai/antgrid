@@ -314,6 +314,11 @@ class CarbonContainedList extends StatelessWidget {
 /// also be null (asserted): the rows, or the loading, error or empty slot,
 /// stand alone under a heading the host draws itself. The host must supply that
 /// heading for assistive technology.
+///
+/// With [pinned] the header stays at the top of the viewport while this list's
+/// rows scroll beneath it. Each list is its own group, so in a scroll view of
+/// several pinned lists a header is confined to its list and is pushed off by
+/// the next list's header, as with CSS sticky positioning in Carbon.
 class CarbonContainedListSliver extends StatelessWidget {
   const CarbonContainedListSliver({
     super.key,
@@ -327,9 +332,14 @@ class CarbonContainedListSliver extends StatelessWidget {
     this.loadingContent,
     this.errorContent,
     this.emptyContent,
+    this.pinned = false,
   }) : assert(label != null || action == null, _headlessAction);
 
   final String? label;
+
+  /// Keeps the header fixed at the start of the viewport while the rows scroll.
+  /// Has no effect without a [label].
+  final bool pinned;
   final int itemCount;
   final IndexedWidgetBuilder itemBuilder;
   final Widget? action;
@@ -352,20 +362,18 @@ class CarbonContainedListSliver extends StatelessWidget {
       emptyContent: emptyContent,
     );
     final label = this.label;
+    final header = label == null
+        ? null
+        : _header(context, label: label, action: action, variant: variant);
     return _ListScope(
       variant: variant,
       inset: inset,
       child: SliverMainAxisGroup(
         slivers: <Widget>[
-          if (label != null)
-            SliverToBoxAdapter(
-              child: _header(
-                context,
-                label: label,
-                action: action,
-                variant: variant,
-              ),
-            ),
+          if (header != null)
+            pinned
+                ? PinnedHeaderSliver(child: header)
+                : SliverToBoxAdapter(child: header),
           if (slot != null)
             SliverToBoxAdapter(child: slot)
           else

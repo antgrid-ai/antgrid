@@ -42,6 +42,12 @@ const List<CarbonOption<String>> _longLabels = <CarbonOption<String>>[
   CarbonOption(value: 'b', label: 'Resolved'),
 ];
 
+const List<CarbonOption<String>> _counts = <CarbonOption<String>>[
+  CarbonOption(value: 'files', label: 'Files'),
+  CarbonOption(value: 'git', label: 'Git', secondaryLabel: '3'),
+  CarbonOption(value: 'review', label: 'Review', secondaryLabel: '12'),
+];
+
 final List<CarbonOption<String>> _many = <CarbonOption<String>>[
   for (var i = 1; i <= 14; i++)
     CarbonOption(value: 'session$i', label: 'Session $i'),
@@ -131,6 +137,25 @@ class TabsPage extends StatelessWidget {
           ],
         ),
         const GallerySection(
+          title: 'Dismissible and secondary labels',
+          description:
+              'onClose shows a close glyph on every enabled tab and binds '
+              'Delete on the focused tab; closing never selects. A leading '
+              'widget sits before the label. Line tabs show a secondary '
+              'label inline, contained tabs stack it underneath.',
+          children: [
+            _Labelled('Contained, with status dots', _DismissDemo()),
+            _Labelled(
+              'Line, with counts',
+              _Demo(tabs: _counts),
+            ),
+            _Labelled(
+              'Contained, with secondary labels',
+              _Demo(tabs: _counts, variant: CarbonTabsVariant.contained),
+            ),
+          ],
+        ),
+        const GallerySection(
           title: 'Long labels',
           description: 'A label wider than the list wraps inside its tab.',
           children: [_Demo(tabs: _longLabels)],
@@ -207,6 +232,79 @@ class _DemoState extends State<_Demo> {
       variant: widget.variant,
       activation: widget.activation,
       onChanged: (v) => setState(() => _value = v),
+    );
+  }
+}
+
+class _StatusDot extends StatelessWidget {
+  const _StatusDot(this.color);
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+    child: const SizedBox.square(dimension: 8),
+  );
+}
+
+class _DismissDemo extends StatefulWidget {
+  const _DismissDemo();
+
+  @override
+  State<_DismissDemo> createState() => _DismissDemoState();
+}
+
+class _DismissDemoState extends State<_DismissDemo> {
+  static const _ids = <String>['claude', 'codex', 'shell', 'build'];
+  late List<String> _open = List<String>.of(_ids);
+  late String _value = _ids.first;
+
+  void _close(String id) {
+    final index = _open.indexOf(id);
+    setState(() {
+      _open = [
+        for (final o in _open)
+          if (o != id) o,
+      ];
+      if (_value == id && _open.isNotEmpty) {
+        _value = _open[index.clamp(0, _open.length - 1)];
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
+    final dots = <String, Color>{
+      'claude': colors.supportSuccess,
+      'codex': colors.supportWarning,
+      'shell': colors.supportInfo,
+      'build': colors.supportError,
+    };
+    if (_open.isEmpty) {
+      return CarbonButton(
+        label: 'Reopen tabs',
+        kind: CarbonButtonKind.tertiary,
+        onPressed: () => setState(() {
+          _open = List<String>.of(_ids);
+          _value = _ids.first;
+        }),
+      );
+    }
+    return CarbonTabs<String>(
+      variant: CarbonTabsVariant.contained,
+      value: _value,
+      tabs: [
+        for (final id in _open)
+          CarbonOption(
+            value: id,
+            label: id,
+            leading: _StatusDot(dots[id]!),
+          ),
+      ],
+      onChanged: (v) => setState(() => _value = v),
+      onClose: _close,
     );
   }
 }

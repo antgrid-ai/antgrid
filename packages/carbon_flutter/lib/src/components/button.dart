@@ -35,6 +35,15 @@ enum CarbonButtonKind {
   dangerGhost,
 }
 
+/// The fill of an icon button's badge.
+enum CarbonBadgeTone {
+  /// `support-error`, Carbon's only badge colour.
+  error,
+
+  /// `background-brand`, for a neutral count such as open items.
+  brand,
+}
+
 /// Explicit heights for [CarbonButton], from Carbon's size scale.
 ///
 /// Touch density never renders a button below the touch target whatever size
@@ -59,7 +68,8 @@ void _ignore() {}
 /// A Carbon button.
 ///
 /// * Disabled: `onPressed` null. The button is inert and leaves the focus
-///   order.
+///   order unless [focusableWhenDisabled] keeps it reachable for a wrapping
+///   tooltip.
 /// * Busy: [busy] true shows an inline spinner in place of the icon (or over
 ///   the label of a text-only button) without changing the button's size, and
 ///   swallows activation so a pending action cannot be submitted twice. The
@@ -90,11 +100,15 @@ class CarbonButton extends StatelessWidget {
     this.maxLines,
     this.leading,
     this.neutral = false,
+    this.focusableWhenDisabled = false,
   }) : assert(
          !neutral || kind == CarbonButtonKind.ghost,
          'neutral applies only to ghost buttons',
        ),
        iconSize = null,
+       selected = null,
+       badgeCount = null,
+       badgeTone = CarbonBadgeTone.error,
        hoverFill = true,
        _iconOnly = false;
 
@@ -113,7 +127,20 @@ class CarbonButton extends StatelessWidget {
     this.iconSize,
     this.hoverFill = true,
     this.expanded,
-  }) : label = null,
+    this.selected,
+    this.badgeCount,
+    this.badgeTone = CarbonBadgeTone.error,
+    this.focusableWhenDisabled = false,
+  }) : assert(
+         selected == null || kind == CarbonButtonKind.ghost,
+         'selected applies only to ghost icon buttons',
+       ),
+       assert(
+         badgeCount == null ||
+             (badgeCount >= 0 && kind == CarbonButtonKind.ghost),
+         'badgeCount is a non-negative count on ghost icon buttons',
+       ),
+       label = null,
        maxLines = null,
        leading = null,
        neutral = false,
@@ -182,6 +209,33 @@ class CarbonButton extends StatelessWidget {
   /// the focus ring still shows.
   final bool hoverFill;
 
+  /// Makes an icon-only ghost button a toggle: null (the default) is not one,
+  /// true fills it with `background-selected` as Carbon's IconButton
+  /// `isSelected` does, and either value announces the toggled state. The host
+  /// owns the state. The footprint never changes.
+  final bool? selected;
+
+  /// A badge on an icon-only ghost button, painted over the glyph's top
+  /// trailing corner without affecting layout: null shows none, 0 shows the
+  /// dot (a change with no count worth reading), a positive count shows the
+  /// number, capped at "999+". A positive count is announced after the name as
+  /// "name, count" (the count is a number, so it needs no translation); give a
+  /// [semanticLabel] that already says what the count counts if more is needed.
+  /// Carbon restricts the badge to the large size; this package allows every
+  /// size (deviation C01-badge). A disabled button shows no badge, as upstream.
+  final int? badgeCount;
+
+  /// The badge fill. Carbon's badge is always [CarbonBadgeTone.error];
+  /// [CarbonBadgeTone.brand] is for a count that reports, not alerts
+  /// (deviation C01-badge-tone).
+  final CarbonBadgeTone badgeTone;
+
+  /// Keeps a disabled button focusable and hoverable so a wrapping
+  /// [CarbonTooltip] can explain why it is unavailable to keyboard users. The
+  /// button never activates and still reports disabled to assistive
+  /// technology.
+  final bool focusableWhenDisabled;
+
   final bool _iconOnly;
 
   static const double _maxWidth = 320;
@@ -206,6 +260,9 @@ class CarbonButton extends StatelessWidget {
         ? CarbonSizes.xs
         : math.max(size?.height ?? theme.controlHeight, theme.minTarget);
     final name = semanticLabel ?? label ?? '';
+    // Upstream paints the badge only on an enabled button.
+    final count = disabled ? null : badgeCount;
+    final announced = count != null && count > 0 ? '$name, $count' : name;
     // Carbon caps a button's block padding at what a 48px button needs, so a
     // taller one keeps its label near the top instead of centring it.
     final topPinned =
@@ -224,7 +281,9 @@ class CarbonButton extends StatelessWidget {
       focusNode: focusNode,
       autofocus: autofocus,
       expanded: expanded,
-      label: name,
+      label: announced,
+      toggled: selected,
+      focusableWhenDisabled: focusableWhenDisabled,
       value: busy ? loc.loading : null,
       excludeChildSemantics: true,
       mouseCursor: busy ? SystemMouseCursors.basic : null,
@@ -248,6 +307,7 @@ class CarbonButton extends StatelessWidget {
           focused: state.focusVisible,
           iconOnly: _iconOnly,
           neutral: neutral,
+          selected: selected ?? false,
         );
         return ConstrainedBox(
           constraints: BoxConstraints(
@@ -265,7 +325,10 @@ class CarbonButton extends StatelessWidget {
             visible: state.focusVisible,
             // Outlined kinds fill on focus, so they need the inner ring too.
             onColor: _isFilled || (!disabled && style.focusFilled),
-            child: DecoratedBox(
+            child: _withBadge(
+              count,
+              height,
+              DecoratedBox(
               decoration: BoxDecoration(
                 color: style.background,
                 border: style.border == null
@@ -297,6 +360,7 @@ class CarbonButton extends StatelessWidget {
               ),
             ),
             ),
+            ),
           ),
         );
       },
@@ -311,6 +375,30 @@ class CarbonButton extends StatelessWidget {
             child: button,
           )
         : button;
+  }
+
+  // Positioned against the button box, as upstream does, so the badge sits in
+  // the same corner at every height and density.
+  Widget _withBadge(int? count, double height, Widget box) {
+    if (!_iconOnly || count == null) return box;
+    // Upstream insets the count 4px and centres the dot's 8px 10px in at 48.
+    final inset = count == 0
+        ? math.max(0.0, (height - 28) / 2)
+        : CarbonSpacing.spacing02;
+    return Stack(
+      clipBehavior: Clip.none,
+      fit: StackFit.passthrough,
+      children: [
+        box,
+        PositionedDirectional(
+          top: inset,
+          end: inset,
+          child: ExcludeSemantics(
+            child: IgnorePointer(child: _Badge(count: count, tone: badgeTone)),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _spinner(CarbonThemeData theme, _CarbonButtonStyle style) {
@@ -341,7 +429,9 @@ class CarbonButton extends StatelessWidget {
     _CarbonButtonStyle style,
     double hPad,
   ) {
-    if (_iconOnly) return _iconBox(theme, style);
+    if (_iconOnly) {
+      return _iconBox(theme, style);
+    }
 
     final Widget labelText = Text(
       label!,
@@ -419,6 +509,55 @@ class CarbonButton extends StatelessWidget {
   Widget _fill(Widget child) => Row(children: [Expanded(child: child)]);
 }
 
+class _Badge extends StatelessWidget {
+  const _Badge({required this.count, required this.tone});
+
+  final int count;
+  final CarbonBadgeTone tone;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final c = theme.colors;
+    final decoration = BoxDecoration(
+      color: switch (tone) {
+        CarbonBadgeTone.error => c.supportError,
+        CarbonBadgeTone.brand => c.backgroundBrand,
+      },
+      borderRadius: BorderRadius.circular(CarbonSpacing.spacing05),
+    );
+    if (count == 0) {
+      return DecoratedBox(
+        decoration: decoration,
+        child: const SizedBox.square(dimension: CarbonSpacing.spacing03),
+      );
+    }
+    return DecoratedBox(
+      decoration: decoration,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          minWidth: CarbonSpacing.spacing05,
+          minHeight: CarbonSpacing.spacing05,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: CarbonSpacing.spacing01,
+          ),
+          child: Center(
+            widthFactor: 1,
+            heightFactor: 1,
+            child: Text(
+              count > 999 ? '999+' : '$count',
+              maxLines: 1,
+              style: theme.typography.helper.copyWith(color: c.textOnColor),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 @immutable
 class _CarbonButtonStyle {
   const _CarbonButtonStyle({
@@ -449,6 +588,7 @@ class _CarbonButtonStyle {
     required bool focused,
     required bool iconOnly,
     bool neutral = false,
+    bool selected = false,
   }) {
     final c = theme.colors;
     Color pick(Color rest, Color hover, Color active) =>
@@ -567,6 +707,13 @@ class _CarbonButtonStyle {
         c.buttonDangerHover,
         c.textOnColor,
         c.iconOnColor,
+      ),
+      CarbonButtonKind.ghost when selected => _CarbonButtonStyle(
+        background: hovered || pressed
+            ? c.backgroundSelectedHover
+            : c.backgroundSelected,
+        foreground: c.textPrimary,
+        iconColor: c.iconPrimary,
       ),
       CarbonButtonKind.ghost => ghost(
         neutral ? c.textPrimary : c.linkPrimary,

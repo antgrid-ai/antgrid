@@ -4,6 +4,7 @@
 /// Import this library only; everything under `src/` is private.
 library;
 
+export 'src/components/accordion.dart';
 export 'src/components/breadcrumb.dart';
 export 'src/components/button.dart';
 export 'src/components/checkbox.dart';
@@ -30,6 +31,7 @@ export 'src/components/tag.dart';
 export 'src/components/text_input.dart';
 export 'src/components/toggle.dart';
 export 'src/components/tooltip.dart';
+export 'src/components/tree_view.dart';
 export 'src/foundations/colors.dart';
 export 'src/foundations/contrast.dart';
 export 'src/foundations/icons.dart'

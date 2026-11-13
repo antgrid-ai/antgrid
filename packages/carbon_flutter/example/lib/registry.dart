@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 
+import 'pages/accordion_page.dart';
 import 'pages/breadcrumb_page.dart';
 import 'pages/button_page.dart';
 import 'pages/checkbox_page.dart';
@@ -30,6 +31,7 @@ import 'pages/tag_page.dart';
 import 'pages/text_input_page.dart';
 import 'pages/toggle_page.dart';
 import 'pages/tooltip_page.dart';
+import 'pages/tree_view_page.dart';
 import 'pages/foundations/colors_page.dart';
 import 'pages/foundations/density_page.dart';
 import 'pages/foundations/icons_page.dart';
@@ -247,6 +249,18 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Progress bar',
     group: 'Components',
     builder: (_) => const ProgressBarPage(),
+  ),
+  GalleryEntry(
+    id: 'tree-view',
+    title: 'Tree view',
+    group: 'Components',
+    builder: (_) => const TreeViewPage(),
+  ),
+  GalleryEntry(
+    id: 'accordion',
+    title: 'Accordion',
+    group: 'Components',
+    builder: (_) => const AccordionPage(),
   ),
   GalleryEntry(
     id: 'settings-form',

@@ -194,6 +194,16 @@ class ButtonPage extends StatelessWidget {
               'button swallows taps and keeps focus.',
           children: [_BusyDemo()],
         ),
+        const GallerySection(
+          title: 'Toggle, badge and disabled reason',
+          description:
+              'A ghost icon button can be a toggle (selected fills it) and can '
+              'carry a badge: a dot for 0, the number otherwise, in red or, '
+              'for a neutral count, brand blue. A disabled '
+              'button stays focusable inside a tooltip so its reason is '
+              'reachable; it still never activates.',
+          children: [_IconToggleDemo()],
+        ),
         GallerySection(
           title: 'Button set',
           description:
@@ -261,6 +271,66 @@ class ButtonPage extends StatelessWidget {
               'icon; busy is added and has no Carbon equivalent; a button '
               'set stacks when its labels do not fit; icon-only buttons '
               'show their name in a tooltip.',
+        ),
+      ],
+    );
+  }
+}
+
+class _IconToggleDemo extends StatefulWidget {
+  const _IconToggleDemo();
+
+  @override
+  State<_IconToggleDemo> createState() => _IconToggleDemoState();
+}
+
+class _IconToggleDemoState extends State<_IconToggleDemo> {
+  bool _selected = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: CarbonSpacing.spacing04,
+      runSpacing: CarbonSpacing.spacing03,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.settings),
+          semanticLabel: 'Settings',
+          selected: _selected,
+          onPressed: () => setState(() => _selected = !_selected),
+        ),
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.notification),
+          semanticLabel: 'Notifications',
+          badgeCount: 4,
+          onPressed: () {},
+        ),
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.notification),
+          semanticLabel: 'Notifications',
+          badgeCount: 0,
+          onPressed: () {},
+        ),
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.notification),
+          semanticLabel: 'Notifications',
+          badgeCount: 1200,
+          onPressed: () {},
+        ),
+        CarbonButton.iconOnly(
+          icon: const CarbonIcon(CarbonIcons.applicationWeb),
+          semanticLabel: 'Open ports',
+          badgeCount: 2,
+          badgeTone: CarbonBadgeTone.brand,
+          onPressed: () {},
+        ),
+        const CarbonTooltip(
+          message: 'Nothing to commit',
+          child: CarbonButton(
+            label: 'Commit',
+            focusableWhenDisabled: true,
+          ),
         ),
       ],
     );

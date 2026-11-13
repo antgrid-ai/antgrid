@@ -56,6 +56,14 @@ node tool/generate_icons.cjs <extracted>/package > lib/src/foundations/icons.g.d
 After either, update the table above, `NOTICE`, and run `flutter test` (the
 contrast tests re-check the built-in palettes).
 
+## Icon substitutions
+
+Carbon has no regular-expression glyph, so a text label stands in for it.
+`stringText` (abc) serves as whole word, and `letterAa`,
+`characterUpperCase` or `characterSentenceCase` as match case. Only glyphs
+whose meaning follows reading direction mirror under RTL (`undo`, `redo` and
+the arrows); `send`, `sendAlt` and `launch` do not.
+
 ## Reference URLs
 
 | Foundation | Carbon reference |

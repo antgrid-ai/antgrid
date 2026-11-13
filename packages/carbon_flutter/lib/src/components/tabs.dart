@@ -59,7 +59,12 @@ enum CarbonActivationMode {
 /// scrolled into view. A label wider than the whole list wraps inside its tab.
 ///
 /// Tabs are identified by [CarbonOption.value]; a disabled option is shown but
-/// cannot be focused or selected. [CarbonOption.icon] shows after the label.
+/// cannot be focused or selected. [CarbonOption.icon] shows after the label,
+/// [CarbonOption.leading] before it.
+///
+/// [CarbonOption.secondaryLabel] shows quietly after the label on one line in
+/// line tabs, and as a second line under it in contained tabs. A tab is spoken
+/// as its [CarbonOption.semanticLabel] (or label), then the secondary label.
 class CarbonTabs<T> extends StatefulWidget {
   const CarbonTabs({
     super.key,
@@ -69,9 +74,21 @@ class CarbonTabs<T> extends StatefulWidget {
     this.variant = CarbonTabsVariant.line,
     this.activation = CarbonActivationMode.automatic,
     this.semanticLabel,
+    this.onClose,
+    this.closeLabelBuilder,
   });
 
   final List<CarbonOption<T>> tabs;
+
+  /// Makes every enabled tab dismissible. Called with the tab's value when its
+  /// close glyph is pressed or Delete is pressed on the focused tab; the host
+  /// decides whether to remove it and where selection and focus go next.
+  /// Closing never selects the tab.
+  final ValueChanged<T>? onClose;
+
+  /// Names the close action a screen reader offers on a tab, given the tab's
+  /// accessible name. Defaults to `Close name` from the localizations.
+  final String Function(String name)? closeLabelBuilder;
 
   /// The selected tab's value. A value no tab carries selects nothing.
   final T? value;
@@ -200,6 +217,11 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
       target = widget.tabs.indexWhere((t) => t.enabled);
     } else if (key == LogicalKeyboardKey.end) {
       target = widget.tabs.lastIndexWhere((t) => t.enabled);
+    } else if (key == LogicalKeyboardKey.delete && widget.onClose != null) {
+      final tab = widget.tabs[current];
+      if (!tab.enabled) return KeyEventResult.ignored;
+      widget.onClose!(tab.value);
+      return KeyEventResult.handled;
     } else {
       return KeyEventResult.ignored;
     }
@@ -396,6 +418,10 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
                             level: level,
                             height: height,
                             onSelect: () => _select(widget.tabs[i]),
+                            onClose: widget.onClose == null
+                                ? null
+                                : () => widget.onClose!(widget.tabs[i].value),
+                            closeLabelBuilder: widget.closeLabelBuilder,
                             onFocusChange: (f) =>
                                 _handleTabFocus(widget.tabs[i].value, f),
                           ),
@@ -465,7 +491,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
   }
 }
 
-class _Tab extends StatelessWidget {
+class _Tab extends StatefulWidget {
   const _Tab({
     required this.option,
     required this.selected,
@@ -476,6 +502,8 @@ class _Tab extends StatelessWidget {
     required this.height,
     required this.onSelect,
     required this.onFocusChange,
+    required this.onClose,
+    required this.closeLabelBuilder,
   });
 
   final CarbonOption<Object?> option;
@@ -491,115 +519,261 @@ class _Tab extends StatelessWidget {
   final double height;
   final VoidCallback onSelect;
   final ValueChanged<bool> onFocusChange;
+  final VoidCallback? onClose;
+  final String Function(String name)? closeLabelBuilder;
+
+  @override
+  State<_Tab> createState() => _TabState();
+}
+
+class _TabState extends State<_Tab> {
+  bool _tabHovered = false;
+  bool _closeHovered = false;
+
+  void _setTabHover(bool v) {
+    if (_tabHovered != v) setState(() => _tabHovered = v);
+  }
+
+  void _setCloseHover(bool v) {
+    if (_closeHovered != v) setState(() => _closeHovered = v);
+  }
+
+  Widget _content(CarbonThemeData theme, Color textColor, Color iconColor) {
+    final option = widget.option;
+    final contained = widget.contained;
+    final secondary = option.secondaryLabel;
+    final labelText = Text(
+      option.label,
+      style: theme.typography.control.copyWith(color: textColor),
+    );
+    // Contained tabs follow Carbon (primary when selected); line tabs stay
+    // secondary, the app's counts use.
+    final secondaryColor = !option.enabled
+        ? theme.colors.textDisabled
+        : (contained && widget.selected)
+        ? theme.colors.textPrimary
+        : theme.colors.textSecondary;
+    final Widget text;
+    if (secondary == null) {
+      text = labelText;
+    } else if (contained) {
+      text = Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          labelText,
+          Text(
+            secondary,
+            style: theme.typography.label.copyWith(color: secondaryColor),
+          ),
+        ],
+      );
+    } else {
+      text = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Flexible(child: labelText),
+          const SizedBox(width: CarbonSpacing.spacing03),
+          Text(
+            secondary,
+            style: theme.typography.control.copyWith(color: secondaryColor),
+          ),
+        ],
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (option.leading != null) ...<Widget>[
+          option.leading!,
+          const SizedBox(width: CarbonSpacing.spacing03),
+        ],
+        Flexible(child: text),
+        if (option.icon != null) ...<Widget>[
+          SizedBox(
+            width: contained
+                ? CarbonSpacing.spacing05
+                : CarbonSpacing.spacing03,
+          ),
+          IconTheme(
+            data: IconThemeData(color: iconColor, size: theme.iconSize),
+            child: option.icon!,
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// The tab's fill and rule, drawn once per region so the close target can
+  /// sit outside the tab's interaction while the strip still reads as one tab.
+  Widget _frame(
+    CarbonThemeData theme,
+    bool hovered,
+    Widget child, {
+    required bool leadingRule,
+  }) {
+    final colors = theme.colors;
+    final selected = widget.selected;
+    final enabled = widget.option.enabled;
+    final level = widget.level;
+    final Color? fill;
+    final BoxBorder border;
+    const transparent = Color(0x00000000);
+    if (widget.contained) {
+      fill = selected
+          ? theme.layer(level)
+          : hovered
+          ? _layerAccentHover(theme, level)
+          : _layerAccent(theme, level);
+      border = BorderDirectional(
+        top: BorderSide(
+          color: selected && enabled ? colors.borderInteractive : transparent,
+          width: CarbonBorders.selectedTab,
+        ),
+        start: leadingRule
+            ? BorderSide(
+                color: theme.borderStrong(level),
+                width: CarbonBorders.hairline,
+              )
+            : BorderSide.none,
+      );
+    } else {
+      fill = null;
+      border = Border(
+        bottom: BorderSide(
+          color: selected && enabled
+              ? colors.borderInteractive
+              : (hovered && enabled
+                    ? theme.borderStrong(level)
+                    : theme.borderSubtle(level)),
+          width: CarbonBorders.indicator,
+        ),
+      );
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(color: fill, border: border),
+      child: child,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
+    final option = widget.option;
     final enabled = option.enabled;
-    return CarbonInteraction(
-      onPressed: enabled ? onSelect : null,
-      focusNode: focusNode,
+    final selected = widget.selected;
+    final hovered = enabled && (_tabHovered || _closeHovered);
+    final name = option.semanticLabel ?? option.label;
+    final secondary = option.secondaryLabel;
+    final spokenName = secondary == null ? name : '$name, $secondary';
+    final Color textColor = !enabled
+        ? colors.textDisabled
+        : (selected || hovered)
+        ? colors.textPrimary
+        : colors.textSecondary;
+    final Color iconColor = enabled ? textColor : colors.iconDisabled;
+    final onClose = widget.onClose;
+    final closeLabel = (widget.closeLabelBuilder ??
+        (String n) => '${CarbonLocalizations.of(context).close} $n')(name);
+
+    final tab = CarbonInteraction(
+      onPressed: enabled ? widget.onSelect : null,
+      focusNode: widget.focusNode,
       requestFocusOnTap: true,
       requestFocusOnPress: true,
-      onFocusChange: onFocusChange,
+      onFocusChange: widget.onFocusChange,
+      onHoverChange: _setTabHover,
       button: false,
       role: SemanticsRole.tab,
-      label: option.label,
+      label: spokenName,
       selected: selected,
       excludeChildSemantics: true,
+      // A tab bar may hold only tabs, so the glyph cannot be its own node;
+      // screen readers reach closing as an action on the tab.
+      customSemanticsActions: onClose == null
+          ? null
+          : {CustomSemanticsAction(label: closeLabel): onClose},
       builder: (context, state, _) {
-        final hovered = state.hovered;
-        final Color? fill;
-        if (contained) {
-          fill = selected
-              ? theme.layer(level)
-              : hovered
-              ? _layerAccentHover(theme, level)
-              : _layerAccent(theme, level);
-        } else {
-          fill = null;
-        }
-        final Color textColor = !enabled
-            ? colors.textDisabled
-            : (selected || hovered)
-            ? colors.textPrimary
-            : colors.textSecondary;
-        final Color iconColor = enabled ? textColor : colors.iconDisabled;
-        const transparent = Color(0x00000000);
-        final BoxBorder border;
-        if (contained) {
-          border = BorderDirectional(
-            top: BorderSide(
-              color: selected && enabled ? colors.borderInteractive : transparent,
-              width: CarbonBorders.selectedTab,
-            ),
-            start: divider
-                ? BorderSide(
-                    color: theme.borderStrong(level),
-                    width: CarbonBorders.hairline,
-                  )
-                : BorderSide.none,
-          );
-        } else {
-          border = Border(
-            bottom: BorderSide(
-              color: selected && enabled
-                  ? colors.borderInteractive
-                  : (hovered && enabled
-                        ? theme.borderStrong(level)
-                        : theme.borderSubtle(level)),
-              width: CarbonBorders.indicator,
-            ),
-          );
-        }
         return ConstrainedBox(
-          constraints: BoxConstraints(minHeight: height),
-          child: CarbonFocusRing(
-            // Carbon outlines a tab on :active as well as :focus.
-            visible: state.focusVisible || state.pressed,
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: fill, border: border),
+          constraints: BoxConstraints(minHeight: widget.height),
+          child: _frame(
+            theme,
+            hovered,
+            leadingRule: widget.divider && widget.contained,
+            CarbonFocusRing(
+              // Carbon outlines a tab on :active as well as :focus.
+              visible: state.focusVisible || state.pressed,
               child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: CarbonSpacing.spacing05,
-                  vertical: CarbonSpacing.spacing03,
+                padding: EdgeInsetsDirectional.only(
+                  start: CarbonSpacing.spacing05,
+                  end: widget.onClose != null ? 0 : CarbonSpacing.spacing05,
+                  top: CarbonSpacing.spacing03,
+                  bottom: CarbonSpacing.spacing03,
                 ),
                 child: Center(
                   widthFactor: 1,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Flexible(
-                        child: Text(
-                          option.label,
-                          style: theme.typography.control.copyWith(
-                            color: textColor,
-                          ),
-                        ),
-                      ),
-                      if (option.icon != null) ...<Widget>[
-                        SizedBox(
-                          width: contained
-                              ? CarbonSpacing.spacing05
-                              : CarbonSpacing.spacing03,
-                        ),
-                        IconTheme(
-                          data: IconThemeData(
-                            color: iconColor,
-                            size: theme.iconSize,
-                          ),
-                          child: option.icon!,
-                        ),
-                      ],
-                    ],
-                  ),
+                  child: _content(theme, textColor, iconColor),
                 ),
               ),
             ),
           ),
         );
       },
+    );
+    if (onClose == null) return tab;
+
+    // 8 before the glyph, 16 after (Dismissible tab structure). Touch widens
+    // the target toward the label so the glyph keeps its 16 from the edge.
+    final closeWidth = math.max(
+      CarbonSpacing.spacing03 + 16 + CarbonSpacing.spacing05,
+      theme.minTarget,
+    );
+    Widget glyph(Color color) => SizedBox(
+      width: closeWidth,
+      child: Align(
+        alignment: AlignmentDirectional.centerEnd,
+        child: Padding(
+          padding: const EdgeInsetsDirectional.only(
+            end: CarbonSpacing.spacing05,
+          ),
+          child: CarbonIcon(CarbonIcons.close, size: 16, color: color),
+        ),
+      ),
+    );
+    final Widget close;
+    if (!enabled) {
+      close = ExcludeSemantics(
+        child: _frame(
+          theme,
+          false,
+          glyph(colors.iconDisabled),
+          leadingRule: false,
+        ),
+      );
+    } else {
+      close = ExcludeSemantics(
+        child: ExcludeFocus(
+        child: CarbonInteraction(
+          onPressed: onClose,
+          onHoverChange: _setCloseHover,
+          builder: (context, closeState, _) {
+            final active = selected || hovered || closeState.pressed;
+            return _frame(
+              theme,
+              hovered,
+              glyph(active ? colors.iconPrimary : colors.iconSecondary),
+              leadingRule: false,
+            );
+          },
+        ),
+        ),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[Flexible(child: tab), close],
     );
   }
 }

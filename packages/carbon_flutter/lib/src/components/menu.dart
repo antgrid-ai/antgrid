@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -1326,4 +1328,226 @@ class _CarbonContextMenuState extends State<CarbonContextMenu> {
       ),
     );
   }
+}
+
+/// Controls a menu opened by [showCarbonMenuAt].
+class CarbonMenuAtHandle {
+  CarbonMenuAtHandle._(this._close, this.closed);
+
+  final VoidCallback _close;
+
+  /// Completes once the menu has closed for any reason, before or after an
+  /// item's callback has run: an activated item closes the menu first and then
+  /// calls its callback.
+  final Future<void> closed;
+
+  /// Closes the menu. Hosts over a native platform view, whose clicks never
+  /// reach the outside-tap dismissal, call this on any input they observe.
+  void close() => _close();
+}
+
+/// Opens a [CarbonMenu] at [globalPosition], with [entries] supplied now rather
+/// than at build time, in the [Overlay] above [context].
+///
+/// For menus whose content is known only after the gesture that asks for them
+/// (an asynchronous lookup), or whose position comes from a pointer the
+/// widget tree cannot see. The menu's top start corner lands on the point and
+/// is clamped or flipped to stay inside the overlay, in the text direction of
+/// [context]. Theme, density, localizations and direction follow [context];
+/// the keyboard model, outside-tap, Escape and back dismissal are those of
+/// [CarbonMenu]. Focus returns to whatever held it when the menu opened.
+///
+/// The menu closes by itself when the route that presented it is popped or
+/// covered by another route, or when [context] unmounts.
+CarbonMenuAtHandle showCarbonMenuAt(
+  BuildContext context,
+  Offset globalPosition,
+  List<CarbonMenuEntry> entries, {
+  String? semanticLabel,
+  bool rootOverlay = false,
+}) {
+  final overlay = Overlay.of(context, rootOverlay: rootOverlay);
+  final overlayBox = overlay.context.findRenderObject();
+  final position = overlayBox is RenderBox && overlayBox.attached
+      ? overlayBox.globalToLocal(globalPosition)
+      : globalPosition;
+  final relay = CarbonScopeRelay.of(context);
+  final route = ModalRoute.of(context);
+  final completer = Completer<void>();
+  final closer = _PointCloser();
+  late final OverlayEntry entry;
+  var done = false;
+
+  void finish() {
+    if (done) return;
+    done = true;
+    completer.complete();
+    // The popup restores focus and unmounts after the frame that closed it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      entry.remove();
+      entry.dispose();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  entry = OverlayEntry(
+    builder: (_) => relay.wrap(
+      _PointMenu(
+        position: position,
+        entries: entries,
+        route: route,
+        host: context,
+        closer: closer,
+        semanticLabel: semanticLabel,
+        onClosed: finish,
+      ),
+    ),
+  );
+  overlay.insert(entry);
+  return CarbonMenuAtHandle._(() {
+    if (done) return;
+    final close = closer.close;
+    if (close != null) {
+      close();
+    } else {
+      finish();
+    }
+  }, completer.future);
+}
+
+class _PointCloser {
+  VoidCallback? close;
+}
+
+class _PointMenu extends StatefulWidget {
+  const _PointMenu({
+    required this.position,
+    required this.entries,
+    required this.route,
+    required this.host,
+    required this.closer,
+    required this.onClosed,
+    this.semanticLabel,
+  });
+
+  final Offset position;
+  final List<CarbonMenuEntry> entries;
+  final ModalRoute<Object?>? route;
+  final BuildContext host;
+  final _PointCloser closer;
+  final VoidCallback onClosed;
+  final String? semanticLabel;
+
+  @override
+  State<_PointMenu> createState() => _PointMenuState();
+}
+
+class _PointMenuState extends State<_PointMenu> {
+  final CarbonPopupController _controller = CarbonPopupController();
+  late final _PointPopEntry _popEntry = _PointPopEntry(_controller.close);
+  bool _popRegistered = false;
+  Animation<double>? _animation;
+  Animation<double>? _secondary;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.open();
+    _controller.addListener(_onChanged);
+    widget.closer.close = _controller.close;
+    final route = widget.route;
+    _animation = route?.animation?..addStatusListener(_onRouteStatus);
+    _secondary = route?.secondaryAnimation?..addStatusListener(_onCovered);
+    // Registering mid-build would rebuild the route's scope during this frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.isOpen) return;
+      widget.route?.registerPopEntry(_popEntry);
+      _popRegistered = true;
+      _watchHost();
+    });
+  }
+
+  // An overlay entry outlives its presenter, so an unmounted host is only
+  // noticed by looking; its unmounting always schedules the frame that looks.
+  void _watchHost() {
+    if (!mounted || !_controller.isOpen) return;
+    if (!widget.host.mounted) {
+      _controller.close();
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _watchHost());
+  }
+
+  void _onRouteStatus(AnimationStatus status) {
+    if (status == AnimationStatus.reverse ||
+        status == AnimationStatus.dismissed) {
+      _controller.close();
+    }
+  }
+
+  void _onCovered(AnimationStatus status) {
+    if (status == AnimationStatus.forward) _controller.close();
+  }
+
+  void _onChanged() {
+    if (!_controller.isOpen) widget.onClosed();
+  }
+
+  @override
+  void dispose() {
+    _animation?.removeStatusListener(_onRouteStatus);
+    _secondary?.removeStatusListener(_onCovered);
+    widget.closer.close = null;
+    if (_popRegistered) widget.route?.unregisterPopEntry(_popEntry);
+    _popEntry.dispose();
+    _controller.removeListener(_onChanged);
+    _controller.dispose();
+    widget.onClosed();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Full-size so the 1px anchor can sit at an absolute overlay position; the
+    // stack itself takes no hits, so taps elsewhere reach the page beneath.
+    return Stack(
+      fit: StackFit.expand,
+      clipBehavior: Clip.none,
+      children: <Widget>[
+        Positioned(
+          left: widget.position.dx,
+          top: widget.position.dy,
+          width: 1,
+          height: 1,
+          child: CarbonMenu(
+            controller: _controller,
+            entries: widget.entries,
+            gap: -1,
+            semanticLabel: widget.semanticLabel,
+            child: const SizedBox(width: 1, height: 1),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PointPopEntry extends PopEntry<Object?> {
+  _PointPopEntry(this._close);
+
+  final VoidCallback _close;
+
+  // Always false while registered: an open menu takes the back gesture
+  // instead of its route.
+  final ValueNotifier<bool> _canPop = ValueNotifier<bool>(false);
+
+  @override
+  ValueListenable<bool> get canPopNotifier => _canPop;
+
+  @override
+  void onPopInvokedWithResult(bool didPop, Object? result) {
+    if (!didPop) _close();
+  }
+
+  void dispose() => _canPop.dispose();
 }

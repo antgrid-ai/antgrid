@@ -17,6 +17,9 @@ class CarbonOption<T> {
     this.enabled = true,
     this.icon,
     this.description,
+    this.semanticLabel,
+    this.leading,
+    this.secondaryLabel,
   });
 
   final T value;
@@ -32,6 +35,19 @@ class CarbonOption<T> {
 
   /// Optional secondary line for components that show one.
   final String? description;
+
+  /// The accessible name, for components that use one (Tabs), when it should
+  /// differ from [label] (for instance when [label] is abbreviated). Defaults
+  /// to [label].
+  final String? semanticLabel;
+
+  /// A small widget placed before the label, for components that show one
+  /// (Tabs). Unlike [icon] it is not recolored; the host owns its colour.
+  final Widget? leading;
+
+  /// Quiet supplementary text shown with the label, for components that show
+  /// one (Tabs), such as a count.
+  final String? secondaryLabel;
 
   /// The index of the option whose [value] equals [value], or -1. Use this to
   /// resolve a committed value against a list that may no longer contain it,

@@ -1,4 +1,5 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,6 +72,7 @@ void _noop() {}
 Finder _selectedSemantics(String label) => find.text(label);
 
 void main() {
+  _tabExtensionTests();
   group('sizing and layout', () {
     testWidgets('height is 40 compact and 48 touch', (tester) async {
       final harness = await pumpCarbon(tester, const _Host(tabs: _abc));
@@ -753,4 +755,298 @@ Future<void> _shiftTab(WidgetTester tester) async {
 Future<void> _focus(WidgetTester tester, String label) async {
   Focus.of(tester.element(find.text(label))).requestFocus();
   await tester.pump();
+}
+
+class _CloseHost extends StatefulWidget {
+  const _CloseHost({
+    required this.tabs,
+    required this.closed,
+    this.selected,
+    this.variant = CarbonTabsVariant.line,
+    this.closeLabelBuilder,
+  });
+
+  final List<CarbonOption<String>> tabs;
+  final List<String> closed;
+  final List<String>? selected;
+  final CarbonTabsVariant variant;
+  final String Function(String name)? closeLabelBuilder;
+
+  @override
+  State<_CloseHost> createState() => _CloseHostState();
+}
+
+class _CloseHostState extends State<_CloseHost> {
+  String value = 'a';
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        CarbonTabs<String>(
+          tabs: widget.tabs,
+          value: value,
+          variant: widget.variant,
+          activation: CarbonActivationMode.manual,
+          onChanged: (v) {
+            widget.selected?.add(v);
+            setState(() => value = v);
+          },
+          onClose: widget.closed.add,
+          closeLabelBuilder: widget.closeLabelBuilder,
+        ),
+      ],
+    );
+  }
+}
+
+Finder _closeTarget() => find
+    .ancestor(
+      of: find.byType(CarbonIcon).first,
+      matching: find.byType(CarbonInteraction),
+    )
+    .first;
+
+void _tabExtensionTests() {
+  group('semantic label, leading and secondary label', () {
+    testWidgets('a tab is spoken as semanticLabel, falling back to label', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        const _Host(
+          tabs: [
+            CarbonOption(
+              value: 'a',
+              label: 'Git',
+              semanticLabel: 'Git changes',
+            ),
+            CarbonOption(value: 'b', label: 'Files'),
+          ],
+        ),
+      );
+      expect(
+        tester.getSemantics(find.text('Git')),
+        isSemantics(label: 'Git changes', isSelected: true),
+      );
+      expect(
+        tester.getSemantics(find.text('Files')),
+        isSemantics(label: 'Files', isSelected: false),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('leading sits before the label', (tester) async {
+      await pumpCarbon(
+        tester,
+        const _Host(
+          tabs: [
+            CarbonOption(
+              value: 'a',
+              label: 'Alpha',
+              leading: SizedBox(key: Key('dot'), width: 8, height: 8),
+            ),
+          ],
+        ),
+      );
+      final dot = tester.getRect(find.byKey(const Key('dot')));
+      final label = tester.getRect(find.text('Alpha'));
+      expect(dot.right, lessThanOrEqualTo(label.left));
+      expect(dot.center.dy, closeTo(label.center.dy, 1));
+    });
+
+    testWidgets('a line tab shows the secondary label after the name', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        const _Host(
+          tabs: [CarbonOption(value: 'a', label: 'Git', secondaryLabel: '3')],
+        ),
+      );
+      final name = tester.getRect(find.text('Git'));
+      final count = tester.getRect(find.text('3'));
+      expect(count.left, greaterThanOrEqualTo(name.right));
+      expect(count.center.dy, closeTo(name.center.dy, 1));
+      expect(
+        tester.getSemantics(find.text('Git')),
+        isSemantics(label: 'Git, 3', isSelected: true),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a contained tab stacks the secondary label under the name', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        const _Host(
+          variant: CarbonTabsVariant.contained,
+          tabs: [CarbonOption(value: 'a', label: 'Git', secondaryLabel: '3')],
+        ),
+      );
+      expect(
+        tester.getRect(find.text('3')).top,
+        greaterThanOrEqualTo(tester.getRect(find.text('Git')).bottom),
+      );
+    });
+  });
+
+  group('dismissible', () {
+    testWidgets('pressing the close glyph closes without selecting', (
+      tester,
+    ) async {
+      final closed = <String>[];
+      final selected = <String>[];
+      await pumpCarbon(
+        tester,
+        _CloseHost(tabs: _abc, closed: closed, selected: selected),
+      );
+      // One glyph per tab in order; the second belongs to Beta.
+      await tester.tap(find.byType(CarbonIcon).at(1));
+      await tester.pump();
+      expect(closed, ['b']);
+      expect(selected, isEmpty);
+    });
+
+    testWidgets('Delete closes the focused tab and does not select it', (
+      tester,
+    ) async {
+      final closed = <String>[];
+      final selected = <String>[];
+      await pumpCarbon(
+        tester,
+        _CloseHost(tabs: _abc, closed: closed, selected: selected),
+      );
+      await _focus(tester, 'Beta');
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(closed, ['b']);
+      expect(selected, isEmpty);
+    });
+
+    testWidgets('a disabled tab shows an inert close glyph', (tester) async {
+      final closed = <String>[];
+      await pumpCarbon(tester, _CloseHost(tabs: _withDisabled, closed: closed));
+      expect(find.byType(CarbonIcon), findsNWidgets(_withDisabled.length));
+      await tester.tap(find.byType(CarbonIcon).at(1), warnIfMissed: false);
+      await tester.pump();
+      expect(closed, isEmpty);
+    });
+
+    testWidgets('a slow press on the glyph neither focuses nor outlines the tab', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, _CloseHost(tabs: _abc, closed: <String>[]));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(CarbonIcon).first),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      final tabContext = tester.element(find.text('Alpha'));
+      expect(Focus.of(tabContext).hasFocus, isFalse);
+      for (final ring in tester.widgetList<CarbonFocusRing>(
+        find.byType(CarbonFocusRing),
+      )) {
+        expect(ring.visible, isFalse);
+      }
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('Delete does nothing without onClose', (tester) async {
+      final log = <String>[];
+      await pumpCarbon(tester, _Host(tabs: _abc, log: log));
+      await _focus(tester, 'Beta');
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      expect(log, isEmpty);
+      expect(find.byType(CarbonIcon), findsNothing);
+    });
+
+    testWidgets('the tab offers Close name as an action', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _CloseHost(
+          tabs: const [
+            CarbonOption(
+              value: 'a',
+              label: 'Git',
+              semanticLabel: 'Git changes',
+            ),
+          ],
+          closed: <String>[],
+        ),
+      );
+      expect(_closeActions(tester, 'Git'), ['Close Git changes']);
+      handle.dispose();
+    });
+
+    testWidgets('closeLabelBuilder overrides the action name', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        _CloseHost(
+          tabs: _abc,
+          closed: <String>[],
+          closeLabelBuilder: (n) => 'Dismiss $n',
+        ),
+      );
+      expect(_closeActions(tester, 'Alpha'), ['Dismiss Alpha']);
+      handle.dispose();
+    });
+
+    testWidgets('the close action on the tab closes it', (tester) async {
+      final handle = tester.ensureSemantics();
+      final closed = <String>[];
+      final selected = <String>[];
+      await pumpCarbon(
+        tester,
+        _CloseHost(tabs: _abc, closed: closed, selected: selected),
+      );
+      final node = tester.getSemantics(find.text('Beta'));
+      final id = node.getSemanticsData().customSemanticsActionIds!.single;
+      node.owner!.performAction(node.id, SemanticsAction.customAction, id);
+      await tester.pump();
+      expect(closed, ['b']);
+      expect(selected, isEmpty);
+      handle.dispose();
+    });
+
+    for (final variant in CarbonTabsVariant.values) {
+      testWidgets('close target meets the touch floor in ${variant.name}', (
+        tester,
+      ) async {
+        final harness = await pumpCarbon(
+          tester,
+          _CloseHost(tabs: _abc, closed: <String>[], variant: variant),
+        );
+        Size tabSize() => tester.getSize(
+          find
+              .ancestor(
+                of: find.text('Alpha'),
+                matching: find.byType(CarbonFocusRing),
+              )
+              .first,
+        );
+        expect(tester.getSize(_closeTarget()).width, greaterThanOrEqualTo(32));
+        expect(tabSize().height, 40);
+        await harness.setDensity(tester, CarbonDensity.touch);
+        final target = tester.getSize(_closeTarget());
+        expect(target.width, greaterThanOrEqualTo(48));
+        expect(target.height, greaterThanOrEqualTo(48));
+        expect(tabSize().height, 48);
+      });
+    }
+  });
+}
+
+List<String> _closeActions(WidgetTester tester, String tabText) {
+  final data = tester.getSemantics(find.text(tabText)).getSemanticsData();
+  return [
+    for (final id in data.customSemanticsActionIds ?? const <int>[])
+      CustomSemanticsAction.getAction(id)!.label!,
+  ];
 }

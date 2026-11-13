@@ -49,6 +49,15 @@ class MenuPage extends StatelessWidget {
           children: [_ContextDemo()],
         ),
         GallerySection(
+          title: 'Open at a point',
+          description:
+              'showCarbonMenuAt opens a menu at a position with entries '
+              'supplied at that moment, here after a 350 ms delay, as for '
+              'a context menu whose entries come from an asynchronous '
+              'lookup. The returned future completes when it closes.',
+          children: [_PointDemo()],
+        ),
+        GallerySection(
           title: 'Long labels',
           description: 'Rows wrap and grow; they never clip.',
           children: [_LongDemo()],
@@ -363,6 +372,75 @@ class _LongDemo extends StatelessWidget {
         ],
         child: _trigger(controller, node, label: 'Long labels'),
       ),
+    );
+  }
+}
+
+class _PointDemo extends StatefulWidget {
+  const _PointDemo();
+
+  @override
+  State<_PointDemo> createState() => _PointDemoState();
+}
+
+class _PointDemoState extends State<_PointDemo> {
+  bool _pending = false;
+  String _last = 'Nothing chosen yet';
+
+  Future<void> _open(Offset position) async {
+    if (_pending) return;
+    setState(() => _pending = true);
+    // Stands in for a lookup whose answer decides which entries to show.
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    if (!mounted) return;
+    setState(() => _pending = false);
+    await showCarbonMenuAt(context, position, [
+      CarbonMenuItem(
+        label: 'Open link',
+        onPressed: () {
+          if (mounted) setState(() => _last = 'Open link');
+        },
+      ),
+      CarbonMenuItem(
+        label: 'Copy address',
+        onPressed: () {
+          if (mounted) setState(() => _last = 'Copy address');
+        },
+      ),
+    ]).closed;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: (details) => _open(details.globalPosition),
+          child: CarbonLayerSurface(
+            border: true,
+            padding: const EdgeInsets.all(CarbonSpacing.spacing06),
+            child: SizedBox(
+              width: double.infinity,
+              child: Text(
+                _pending
+                    ? 'Looking up entries...'
+                    : 'Tap anywhere in this area',
+                style: theme.typography.body,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: CarbonSpacing.spacing03),
+        Text(
+          _last,
+          style: theme.typography.label.copyWith(
+            color: theme.colors.textSecondary,
+          ),
+        ),
+      ],
     );
   }
 }

@@ -230,6 +230,32 @@ class _ContainedListPageState extends State<ContainedListPage> {
             ),
           ],
         ),
+        GallerySection(
+          title: 'Pinned headers',
+          description:
+              'CarbonContainedListSliver(pinned: true) keeps each header at '
+              'the top while its rows scroll beneath; the next list header '
+              'pushes the previous one off. Scroll the box below.',
+          children: [
+            SizedBox(
+              height: 280,
+              child: CustomScrollView(
+                slivers: [
+                  for (final group in const ['Today', 'Yesterday', 'Earlier'])
+                    CarbonContainedListSliver(
+                      label: group,
+                      pinned: true,
+                      itemCount: 12,
+                      itemBuilder: (context, i) => CarbonContainedListRow(
+                        title: '$group session ${i + 1}',
+                        onPressed: () {},
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
         const GalleryNote(
           useWhen:
               'Showing a bounded group of related items with row actions or '

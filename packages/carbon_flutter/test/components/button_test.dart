@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
@@ -25,6 +27,11 @@ Color? _fill(WidgetTester tester) {
   );
   return (box.decoration as BoxDecoration).color;
 }
+
+Finder inside(Key key) => find.descendant(
+  of: find.byKey(key),
+  matching: find.byType(CarbonIcon),
+);
 
 void main() {
   group('sizing', () {
@@ -967,6 +974,311 @@ void main() {
         ),
       );
       expect(lines(tester), greaterThan(1));
+    });
+  });
+
+  group('icon button selected', () {
+    Widget button({bool? selected, VoidCallback? onPressed}) => _aligned(
+      CarbonButton.iconOnly(
+        key: _btn,
+        icon: const CarbonIcon(CarbonIcons.settings),
+        semanticLabel: 'Settings',
+        selected: selected,
+        onPressed: onPressed ?? () {},
+      ),
+    );
+
+    testWidgets('selected fills with background-selected, hover deepens it', (
+      tester,
+    ) async {
+      final colors = CarbonThemeData().colors;
+      await pumpCarbon(tester, button(selected: false));
+      expect(_fill(tester), isNot(colors.backgroundSelected));
+      await pumpCarbon(tester, button(selected: true));
+      expect(_fill(tester), colors.backgroundSelected);
+
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(900, 500));
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(find.byKey(_btn)));
+      await tester.pump();
+      expect(_fill(tester), colors.backgroundSelectedHover);
+    });
+
+    testWidgets('selecting does not change the footprint', (tester) async {
+      await pumpCarbon(tester, button(selected: false));
+      final before = tester.getSize(find.byKey(_btn));
+      await pumpCarbon(tester, button(selected: true));
+      expect(tester.getSize(find.byKey(_btn)), before);
+    });
+
+    testWidgets('announces the toggled state only when it is a toggle', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      for (final (selected, expected) in [
+        (true, Tristate.isTrue),
+        (false, Tristate.isFalse),
+        (null, Tristate.none),
+      ]) {
+        await pumpCarbon(tester, button(selected: selected));
+        expect(
+          tester.getSemantics(inside(_btn)).flagsCollection.isToggled,
+          expected,
+          reason: '$selected',
+        );
+      }
+      handle.dispose();
+    });
+  });
+
+  group('icon button badge', () {
+    Widget button({int? count, bool disabled = false}) => _aligned(
+      CarbonButton.iconOnly(
+        key: _btn,
+        icon: const CarbonIcon(CarbonIcons.notification),
+        semanticLabel: 'Open ports',
+        badgeCount: count,
+        onPressed: disabled ? null : () {},
+      ),
+    );
+
+    testWidgets('paints the number without changing the layout box', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, button());
+      final before = tester.getSize(find.byKey(_btn));
+      expect(find.text('2'), findsNothing);
+      await pumpCarbon(tester, button(count: 2));
+      expect(find.text('2'), findsOneWidget);
+      expect(tester.getSize(find.byKey(_btn)), before);
+      await pumpCarbon(tester, button(count: 1234));
+      expect(find.text('999+'), findsOneWidget);
+      expect(tester.getSize(find.byKey(_btn)), before);
+    });
+
+    testWidgets('zero shows a dot with no text', (tester) async {
+      await pumpCarbon(tester, button());
+      final before = tester.getSize(find.byKey(_btn));
+      await pumpCarbon(tester, button(count: 0));
+      expect(
+        find.descendant(of: find.byKey(_btn), matching: find.text('0')),
+        findsNothing,
+      );
+      expect(tester.getSize(find.byKey(_btn)), before);
+      final dot = find.descendant(
+        of: find.byKey(_btn),
+        matching: find.byWidgetPredicate(
+          (w) =>
+              w is SizedBox &&
+              w.width == CarbonSpacing.spacing03 &&
+              w.height == CarbonSpacing.spacing03,
+        ),
+      );
+      expect(dot, findsOneWidget);
+    });
+
+    testWidgets('folds a positive count into the accessible name', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, button(count: 2));
+      expect(tester.getSemantics(inside(_btn)).label, 'Open ports, 2');
+      await pumpCarbon(tester, button(count: 0));
+      expect(tester.getSemantics(inside(_btn)).label, 'Open ports');
+      await pumpCarbon(tester, button());
+      expect(tester.getSemantics(inside(_btn)).label, 'Open ports');
+      handle.dispose();
+    });
+
+    testWidgets('a disabled button shows and announces no badge', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(tester, button(count: 2, disabled: true));
+      expect(find.text('2'), findsNothing);
+      expect(tester.getSemantics(inside(_btn)).label, 'Open ports');
+      handle.dispose();
+    });
+
+    testWidgets('sits in the button corner', (tester) async {
+      await pumpCarbon(tester, button(count: 2));
+      final box = tester.getRect(find.byKey(_btn));
+      final pill = tester.getRect(
+        find
+            .ancestor(of: find.text('2'), matching: find.byType(DecoratedBox))
+            .first,
+      );
+      expect(pill.top - box.top, CarbonSpacing.spacing02);
+      expect(box.right - pill.right, CarbonSpacing.spacing02);
+    });
+
+    testWidgets('tone picks the fill; error by default', (tester) async {
+      Color fill() => (tester
+                  .widget<DecoratedBox>(
+                    find
+                        .ancestor(
+                          of: find.text('2'),
+                          matching: find.byType(DecoratedBox),
+                        )
+                        .first,
+                  )
+                  .decoration
+              as BoxDecoration)
+          .color!;
+      final colors = CarbonThemeData().colors;
+      await pumpCarbon(tester, button(count: 2));
+      expect(fill(), colors.supportError);
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonButton.iconOnly(
+            key: _btn,
+            icon: const CarbonIcon(CarbonIcons.notification),
+            semanticLabel: 'Open ports',
+            badgeCount: 2,
+            badgeTone: CarbonBadgeTone.brand,
+            onPressed: () {},
+          ),
+        ),
+      );
+      expect(fill(), colors.backgroundBrand);
+    });
+
+    testWidgets('a badge never takes the tap', (tester) async {
+      var taps = 0;
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonButton.iconOnly(
+            key: _btn,
+            icon: const CarbonIcon(CarbonIcons.notification),
+            semanticLabel: 'Open ports',
+            badgeCount: 3,
+            onPressed: () => taps++,
+          ),
+        ),
+      );
+      await tester.tap(find.text('3'));
+      expect(taps, 1);
+    });
+  });
+
+  group('disabled button with a tooltip', () {
+    const tip = 'Nothing to commit';
+
+    Widget host({
+      required bool focusable,
+      FocusNode? node,
+      bool iconOnly = false,
+    }) => Center(
+      child: CarbonTooltip(
+        message: tip,
+        showDelay: Duration.zero,
+        child: iconOnly
+            ? CarbonButton.iconOnly(
+                key: _btn,
+                icon: const CarbonIcon(CarbonIcons.settings),
+                semanticLabel: 'Settings',
+                focusNode: node,
+                focusableWhenDisabled: focusable,
+              )
+            : CarbonButton(
+                key: _btn,
+                label: 'Commit',
+                focusNode: node,
+                focusableWhenDisabled: focusable,
+              ),
+      ),
+    );
+
+    setUp(() {
+      FocusManager.instance.highlightStrategy =
+          FocusHighlightStrategy.alwaysTraditional;
+    });
+    tearDown(() {
+      FocusManager.instance.highlightStrategy =
+          FocusHighlightStrategy.automatic;
+    });
+
+    for (final iconOnly in [false, true]) {
+      testWidgets('hover shows the reason (iconOnly: $iconOnly)', (
+        tester,
+      ) async {
+        await pumpCarbon(tester, host(focusable: false, iconOnly: iconOnly));
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: const Offset(1, 1));
+        addTearDown(mouse.removePointer);
+        await mouse.moveTo(tester.getCenter(find.byKey(_btn)));
+        await tester.pump();
+        await tester.pump();
+        expect(find.text(tip), findsOneWidget);
+      });
+    }
+
+    testWidgets('keyboard focus shows the reason when focusable', (
+      tester,
+    ) async {
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await pumpCarbon(tester, host(focusable: true, node: node));
+      node.requestFocus();
+      await tester.pump();
+      await tester.pump();
+      expect(node.hasFocus, isTrue);
+      expect(find.text(tip), findsOneWidget);
+    });
+
+    testWidgets('without the opt-in a disabled button cannot be focused', (
+      tester,
+    ) async {
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await pumpCarbon(tester, host(focusable: false, node: node));
+      node.requestFocus();
+      await tester.pump();
+      await tester.pump();
+      expect(node.hasFocus, isFalse);
+      expect(find.text(tip), findsNothing);
+    });
+
+    testWidgets('long press shows the reason', (tester) async {
+      await pumpCarbon(tester, host(focusable: false));
+      await tester.longPress(find.byKey(_btn));
+      await tester.pump();
+      expect(find.text(tip), findsOneWidget);
+    });
+
+    testWidgets('stays disabled and inert while focusable', (tester) async {
+      final handle = tester.ensureSemantics();
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      var activations = 0;
+      await pumpCarbon(
+        tester,
+        Actions(
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                activations++;
+                return null;
+              },
+            ),
+          },
+          child: host(focusable: true, node: node),
+        ),
+      );
+      node.requestFocus();
+      await tester.pump();
+      expect(node.hasFocus, isTrue);
+      await tester.tap(find.byKey(_btn));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(activations, 0);
+      final data = tester.getSemantics(find.text('Commit')).getSemanticsData();
+      expect(data.flagsCollection.isEnabled, Tristate.isFalse);
+      expect(data.hasAction(SemanticsAction.tap), isFalse);
+      handle.dispose();
     });
   });
 }

@@ -281,4 +281,179 @@ void main() {
       expect(colorOf('Copy'), colors.textPrimary);
     },
   );
+
+  group('showCarbonMenuAt', () {
+    const hostKey = ValueKey<String>('host');
+
+    Future<BuildContext> mount(WidgetTester tester, {FocusNode? node}) async {
+      await pumpCarbon(
+        tester,
+        Focus(
+          focusNode: node,
+          child: const SizedBox.expand(key: hostKey),
+        ),
+        size: const Size(800, 600),
+      );
+      return tester.element(find.byKey(hostKey));
+    }
+
+    List<CarbonMenuEntry> entries(List<String> log) => <CarbonMenuEntry>[
+      CarbonMenuItem(label: 'One', onPressed: () => log.add('one')),
+      const CarbonMenuItem(label: 'Skipped'),
+      CarbonMenuItem(label: 'Three', onPressed: () => log.add('three')),
+    ];
+
+    testWidgets('arrow keys move through items and Enter activates', (
+      tester,
+    ) async {
+      final log = <String>[];
+      final context = await mount(tester);
+      showCarbonMenuAt(context, const Offset(200, 200), entries(log));
+      await tester.pump();
+      await tester.pump();
+      expect(_hasFocus(tester, 'One'), isTrue);
+      await _key(tester, LogicalKeyboardKey.arrowDown);
+      expect(_hasFocus(tester, 'Skipped'), isFalse);
+      expect(_hasFocus(tester, 'Three'), isTrue);
+      await _key(tester, LogicalKeyboardKey.enter);
+      expect(log, ['three']);
+      expect(find.text('Three'), findsNothing);
+    });
+
+    testWidgets('Escape closes it, completes the future and restores focus', (
+      tester,
+    ) async {
+      final node = FocusNode(debugLabel: 'previous');
+      addTearDown(node.dispose);
+      final context = await mount(tester, node: node);
+      node.requestFocus();
+      await tester.pump();
+      var closed = false;
+      showCarbonMenuAt(
+        context,
+        const Offset(200, 200),
+        entries(<String>[]),
+      ).closed.then((_) => closed = true);
+      await tester.pump();
+      await tester.pump();
+      expect(_hasFocus(tester, 'One'), isTrue);
+      await _key(tester, LogicalKeyboardKey.escape);
+      expect(find.text('One'), findsNothing);
+      expect(closed, isTrue);
+      expect(node.hasPrimaryFocus, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('back closes the menu instead of popping the route', (
+      tester,
+    ) async {
+      final harness = await pumpCarbon(
+        tester,
+        const SizedBox.expand(key: hostKey),
+        size: const Size(800, 600),
+      );
+      final context = tester.element(find.byKey(hostKey));
+      var closed = false;
+      showCarbonMenuAt(
+        context,
+        const Offset(200, 200),
+        entries(<String>[]),
+      ).closed.then((_) => closed = true);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('One'), findsOneWidget);
+      await harness.back(tester);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('One'), findsNothing);
+      expect(closed, isTrue);
+      expect(find.byKey(hostKey), findsOneWidget);
+    });
+
+    testWidgets('close() on the handle closes it', (tester) async {
+      final context = await mount(tester);
+      final handle = showCarbonMenuAt(
+        context,
+        const Offset(200, 200),
+        entries(<String>[]),
+      );
+      await tester.pump();
+      await tester.pump();
+      handle.close();
+      await tester.pump();
+      await tester.pump();
+      await handle.closed;
+      expect(find.text('One'), findsNothing);
+    });
+
+    testWidgets('closes when another route covers the presenting one', (
+      tester,
+    ) async {
+      final harness = await pumpCarbon(
+        tester,
+        const SizedBox.expand(key: hostKey),
+        size: const Size(800, 600),
+      );
+      final context = tester.element(find.byKey(hostKey));
+      var closed = false;
+      showCarbonMenuAt(
+        context,
+        const Offset(200, 200),
+        entries(<String>[]),
+      ).closed.then((_) => closed = true);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('One'), findsOneWidget);
+      harness.navigatorKey.currentState!.push(
+        PageRouteBuilder<void>(
+          pageBuilder: (c, a, s) => const SizedBox(key: ValueKey('next')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('One'), findsNothing);
+      expect(closed, isTrue);
+    });
+
+    testWidgets('closes when the presenting widget unmounts', (tester) async {
+      final show = ValueNotifier<bool>(true);
+      addTearDown(show.dispose);
+      await pumpCarbon(
+        tester,
+        ValueListenableBuilder<bool>(
+          valueListenable: show,
+          builder: (c, on, w) =>
+              on ? const SizedBox.expand(key: hostKey) : const SizedBox(),
+        ),
+        size: const Size(800, 600),
+      );
+      final context = tester.element(find.byKey(hostKey));
+      var closed = false;
+      showCarbonMenuAt(
+        context,
+        const Offset(200, 200),
+        entries(<String>[]),
+      ).closed.then((_) => closed = true);
+      await tester.pump();
+      await tester.pump();
+      show.value = false;
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('One'), findsNothing);
+      expect(closed, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('Escape with nothing focused beforehand closes cleanly', (
+      tester,
+    ) async {
+      final context = await mount(tester);
+      showCarbonMenuAt(context, const Offset(200, 200), entries(<String>[]));
+      await tester.pump();
+      await tester.pump();
+      await _key(tester, LogicalKeyboardKey.escape);
+      expect(find.text('One'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  });
 }
