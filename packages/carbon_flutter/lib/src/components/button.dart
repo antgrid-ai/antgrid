@@ -89,7 +89,12 @@ class CarbonButton extends StatelessWidget {
     this.expanded,
     this.maxLines,
     this.leading,
-  }) : iconSize = null,
+    this.neutral = false,
+  }) : assert(
+         !neutral || kind == CarbonButtonKind.ghost,
+         'neutral applies only to ghost buttons',
+       ),
+       iconSize = null,
        hoverFill = true,
        _iconOnly = false;
 
@@ -111,6 +116,7 @@ class CarbonButton extends StatelessWidget {
   }) : label = null,
        maxLines = null,
        leading = null,
+       neutral = false,
        expand = false,
        minWidth = null,
        _iconOnly = true;
@@ -144,6 +150,14 @@ class CarbonButton extends StatelessWidget {
 
   /// A host-owned pending flag; see the class documentation.
   final bool busy;
+
+  /// Draws a ghost label in [CarbonColors.textPrimary] at rest, hover and
+  /// press instead of the link colour. This is the colour Carbon gives an
+  /// inline dropdown's trigger: a value the user picks, which reads as a value
+  /// rather than a link. Icons keep the icon colour; fills, disabled colours
+  /// and the focus ring are unchanged. Valid only with
+  /// [CarbonButtonKind.ghost]; the icon-only form does not take it.
+  final bool neutral;
 
   /// Fills the available width with the label at the start and the icon at the
   /// end. Requires a bounded width.
@@ -233,6 +247,7 @@ class CarbonButton extends StatelessWidget {
           pressed: pressed,
           focused: state.focusVisible,
           iconOnly: _iconOnly,
+          neutral: neutral,
         );
         return ConstrainedBox(
           constraints: BoxConstraints(
@@ -433,6 +448,7 @@ class _CarbonButtonStyle {
     required bool pressed,
     required bool focused,
     required bool iconOnly,
+    bool neutral = false,
   }) {
     final c = theme.colors;
     Color pick(Color rest, Color hover, Color active) =>
@@ -553,11 +569,11 @@ class _CarbonButtonStyle {
         c.iconOnColor,
       ),
       CarbonButtonKind.ghost => ghost(
-        c.linkPrimary,
+        neutral ? c.textPrimary : c.linkPrimary,
         c.iconPrimary,
         c.backgroundHover,
         c.backgroundActive,
-        c.linkPrimaryHover,
+        neutral ? c.textPrimary : c.linkPrimaryHover,
         c.iconPrimary,
         c.backgroundHover,
         c.backgroundActive,

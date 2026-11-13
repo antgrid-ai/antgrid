@@ -701,4 +701,37 @@ void main() {
       handle.dispose();
     });
   });
+
+  group('neutral', () {
+    testWidgets('reaches the trigger it draws', (tester) async {
+      await _pump(
+        tester,
+        CarbonMenuButton(
+          label: 'Value',
+          kind: CarbonButtonKind.ghost,
+          neutral: true,
+          entries: _entries(<String>[]),
+        ),
+      );
+      expect(
+        tester.widget<CarbonButton>(find.byType(CarbonButton)).neutral,
+        isTrue,
+      );
+      expect(
+        tester.widget<Text>(find.text('Value')).style?.color,
+        CarbonThemeData().colors.textPrimary,
+      );
+    });
+
+    test('is rejected for a kind other than ghost', () {
+      expect(
+        () => CarbonMenuButton(
+          label: 'Value',
+          neutral: true,
+          entries: const <CarbonMenuEntry>[],
+        ),
+        throwsAssertionError,
+      );
+    });
+  });
 }

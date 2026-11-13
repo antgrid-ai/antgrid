@@ -665,6 +665,75 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('a null label draws no header and rows keep the fill', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        CustomScrollView(
+          slivers: [
+            CarbonContainedListSliver(
+              label: null,
+              itemCount: 2,
+              itemBuilder: (context, i) =>
+                  CarbonContainedListRow(title: 'Item $i', onPressed: () {}),
+            ),
+          ],
+        ),
+      );
+      expect(find.text('Item 0'), findsOneWidget);
+      expect(find.text('Item 1'), findsOneWidget);
+      expect(find.byWidgetPredicate((w) => w is Semantics && w.properties.header == true), findsNothing);
+      final fills = tester
+          .widgetList<DecoratedBox>(
+            find.descendant(
+              of: find.byType(CarbonContainedListRow),
+              matching: find.byType(DecoratedBox),
+            ),
+          )
+          .map((b) => (b.decoration as BoxDecoration).color);
+      final context = tester.element(find.byType(CarbonContainedListRow).first);
+      expect(
+        fills,
+        contains(CarbonTheme.of(context).layer(CarbonLayer.of(context))),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a null label still shows the loading slot', (tester) async {
+      await pumpCarbon(
+        tester,
+        CustomScrollView(
+          slivers: [
+            CarbonContainedListSliver(
+              label: null,
+              itemCount: 5,
+              status: CarbonContainedListStatus.loading,
+              itemBuilder: (context, i) =>
+                  CarbonContainedListRow(title: 'Item $i'),
+            ),
+          ],
+        ),
+      );
+      expect(find.byType(CarbonInlineLoading), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+
+    testWidgets('a null label on the box form draws only the rows', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        CarbonContainedList(
+          label: null,
+          children: [const CarbonContainedListRow(title: 'Solo')],
+        ),
+      );
+      expect(find.text('Solo'), findsOneWidget);
+      expect(find.byType(Semantics).evaluate().any((e) => (e.widget as Semantics).properties.header == true), isFalse);
+    });
+
     testWidgets('sliver form shows loading in place of rows', (tester) async {
       await pumpCarbon(
         tester,

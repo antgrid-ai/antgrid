@@ -178,8 +178,10 @@ Widget _expandable(bool open, Set<String>? controls, Widget trigger) =>
 
 /// A labelled button that opens a [CarbonMenu] of commands.
 ///
-/// For commands, not for choosing a value: a menu button has no value of its
-/// own and must not stand in for a form field. The chevron flips while the
+/// For commands. A menu button has no value of its own and is not a form
+/// field: the host owns any selection, and a trigger that names the chosen
+/// value (see [leading] and [neutral]) is a picker the host keeps in step.
+/// The chevron flips while the
 /// menu is open and the trigger announces its expanded state. [enabled] false
 /// disables the trigger.
 class CarbonMenuButton extends StatelessWidget {
@@ -199,11 +201,16 @@ class CarbonMenuButton extends StatelessWidget {
     this.triggerSemanticLabel,
     this.maxLines,
     this.leading,
+    this.neutral = false,
   }) : assert(
          kind == CarbonButtonKind.primary ||
              kind == CarbonButtonKind.tertiary ||
              kind == CarbonButtonKind.ghost,
          'Carbon menu buttons are primary, tertiary or ghost',
+       ),
+       assert(
+         !neutral || kind == CarbonButtonKind.ghost,
+         'neutral applies only to ghost menu buttons',
        );
 
   final String label;
@@ -244,6 +251,10 @@ class CarbonMenuButton extends StatelessWidget {
   /// A mark before the trigger's label; see [CarbonButton.leading].
   final Widget? leading;
 
+  /// Draws a ghost trigger's label in the primary text colour; see
+  /// [CarbonButton.neutral]. Valid only with [CarbonButtonKind.ghost].
+  final bool neutral;
+
   @override
   Widget build(BuildContext context) {
     return _MenuTrigger(
@@ -265,6 +276,7 @@ class CarbonMenuButton extends StatelessWidget {
           maxLines: maxLines,
           leading: leading,
           kind: kind,
+          neutral: neutral,
           size: size,
           // Carbon's 12rem floor on primary and tertiary triggers.
           minWidth: kind == CarbonButtonKind.ghost ? null : 192,

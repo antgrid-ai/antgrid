@@ -182,8 +182,15 @@ Widget? _slot(
   );
 }
 
+const _headlessAction =
+    'action lives in the header, so a list without a label cannot show one';
+
 /// A titled group of rows: a header with an optional action, then
 /// [CarbonContainedListRow]s.
+///
+/// A null [label] draws no header, so [action], which lives in the header,
+/// must also be null (asserted); the host draws its own heading above the list
+/// and must give assistive technology one, since the list announces none.
 ///
 /// Build the rows yourself with [children], or use [CarbonContainedList.builder]
 /// or [CarbonContainedListSliver] so large lists create rows lazily. The host
@@ -206,7 +213,8 @@ class CarbonContainedList extends StatelessWidget {
     this.loadingContent,
     this.errorContent,
     this.emptyContent,
-  }) : itemCount = null,
+  }) : assert(label != null || action == null, _headlessAction),
+       itemCount = null,
        controller = null,
        itemBuilder = null;
 
@@ -229,9 +237,10 @@ class CarbonContainedList extends StatelessWidget {
     this.errorContent,
     this.emptyContent,
     this.controller,
-  }) : children = null;
+  }) : assert(label != null || action == null, _headlessAction),
+       children = null;
 
-  final String label;
+  final String? label;
 
   /// Shown at the trailing end of the header, typically a small ghost
   /// `CarbonButton`.
@@ -261,12 +270,10 @@ class CarbonContainedList extends StatelessWidget {
       errorContent: errorContent,
       emptyContent: emptyContent,
     );
-    final header = _header(
-      context,
-      label: label,
-      action: action,
-      variant: variant,
-    );
+    final label = this.label;
+    final header = label == null
+        ? null
+        : _header(context, label: label, action: action, variant: variant);
     final Widget body;
     if (slot != null) {
       body = slot;
@@ -290,7 +297,7 @@ class CarbonContainedList extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          header,
+          ?header,
           if (children == null && slot == null) Flexible(child: body) else body,
         ],
       ),
@@ -301,6 +308,11 @@ class CarbonContainedList extends StatelessWidget {
 /// The lazy, sliver form of [CarbonContainedList] for use in a
 /// `CustomScrollView`. Rows are created only as they scroll into view, so the
 /// list may be arbitrarily long.
+///
+/// A null [label] draws no header, so [action], which lives in the header, must
+/// also be null (asserted): the rows, or the loading, error or empty slot,
+/// stand alone under a heading the host draws itself. The host must supply that
+/// heading for assistive technology.
 class CarbonContainedListSliver extends StatelessWidget {
   const CarbonContainedListSliver({
     super.key,
@@ -314,9 +326,9 @@ class CarbonContainedListSliver extends StatelessWidget {
     this.loadingContent,
     this.errorContent,
     this.emptyContent,
-  });
+  }) : assert(label != null || action == null, _headlessAction);
 
-  final String label;
+  final String? label;
   final int itemCount;
   final IndexedWidgetBuilder itemBuilder;
   final Widget? action;
@@ -338,19 +350,21 @@ class CarbonContainedListSliver extends StatelessWidget {
       errorContent: errorContent,
       emptyContent: emptyContent,
     );
+    final label = this.label;
     return _ListScope(
       variant: variant,
       inset: inset,
       child: SliverMainAxisGroup(
         slivers: <Widget>[
-          SliverToBoxAdapter(
-            child: _header(
-              context,
-              label: label,
-              action: action,
-              variant: variant,
+          if (label != null)
+            SliverToBoxAdapter(
+              child: _header(
+                context,
+                label: label,
+                action: action,
+                variant: variant,
+              ),
             ),
-          ),
           if (slot != null)
             SliverToBoxAdapter(child: slot)
           else

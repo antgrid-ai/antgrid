@@ -860,6 +860,62 @@ void main() {
     handle.dispose();
   });
 
+  group('neutral', () {
+    Color? labelColor(WidgetTester tester) =>
+        tester.widget<Text>(find.text('Value')).style?.color;
+
+    testWidgets('ghost label is textPrimary at rest and on hover', (
+      tester,
+    ) async {
+      final c = CarbonThemeData().colors;
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonButton(
+            key: _btn,
+            label: 'Value',
+            kind: CarbonButtonKind.ghost,
+            neutral: true,
+            onPressed: () {},
+          ),
+        ),
+      );
+      expect(labelColor(tester), c.textPrimary);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.byKey(_btn)));
+      await tester.pump();
+      expect(labelColor(tester), c.textPrimary);
+      expect(_fill(tester), c.backgroundHover);
+    });
+
+    testWidgets('a plain ghost label still uses the link colour', (
+      tester,
+    ) async {
+      final c = CarbonThemeData().colors;
+      await pumpCarbon(
+        tester,
+        _aligned(
+          CarbonButton(
+            key: _btn,
+            label: 'Value',
+            kind: CarbonButtonKind.ghost,
+            onPressed: () {},
+          ),
+        ),
+      );
+      expect(labelColor(tester), c.linkPrimary);
+    });
+
+    test('is rejected for a kind other than ghost', () {
+      expect(
+        () => CarbonButton(label: 'Value', neutral: true, onPressed: () {}),
+        throwsAssertionError,
+      );
+    });
+  });
+
   group('maxLines', () {
     int lines(WidgetTester tester) {
       final text = tester.renderObject<RenderParagraph>(

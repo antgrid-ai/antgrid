@@ -102,6 +102,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   with an ellipsis.
 - Button: `leading` on `CarbonButton` and `CarbonMenuButton` draws a small
   non-interactive mark, such as a status dot, before the label.
+- Button: `neutral` on `CarbonButton` and `CarbonMenuButton` draws a ghost
+  label in the primary text colour, as Carbon colours an inline dropdown's
+  trigger.
 - Menu button: `triggerSemanticLabel` names the trigger separately from the
   open menu.
 - Contained list: `CarbonContainedListRow.content` shows free-form,
@@ -123,6 +126,9 @@ gallery only; see "Verification status" in `doc/coverage.md`.
   close button's accessible name (default: localized "Close notification").
 - Toggle: the visible label is part of the tap target and shares one semantics
   node with the switch, as upstream's `<label htmlFor>` does.
+- Contained list: a null `label` on `CarbonContainedList`,
+  `CarbonContainedList.builder` and `CarbonContainedListSliver` draws no header
+  (the host supplies its own heading, including for assistive technology).
 - Contained list: `CarbonContainedListRow.onLongPress`; a long-press no longer
   also runs `onPressed` on release. `cancelOnLongPress` (also on
   `CarbonInteraction`) claims the hold without exposing a long-press action.
