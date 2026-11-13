@@ -1,6 +1,7 @@
 // The kebab's Fork carries the chosen agent to `session:fork` only for a bridge
 // that said it honours `targetTool`: an older bridge's schema would strip the
 // key and fork into the same agent while the dialog promised another.
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -9,6 +10,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/session_row.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -77,12 +79,12 @@ void main() {
         container: container,
         child: MaterialApp(
           builder: abToastHostBuilder,
-          home: Scaffold(
+          home: AbCarbonScope(child: Scaffold(
             body: SessionRow(
               entryId: _projectId,
               session: _entry(handoff: handoff),
             ),
-          ),
+          )),
         ),
       ),
     );
@@ -91,7 +93,7 @@ void main() {
   }
 
   Future<void> openFork(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('Session actions'));
+    await tester.tap(find.byType(CarbonOverflowMenu));
     // The menu resolves provider futures before it paints, which can need
     // real event-loop turns rather than fake-clock ones.
     await tester.runAsync(

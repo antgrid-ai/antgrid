@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/widgets/session_fork_dialog.dart';
 
@@ -26,19 +27,21 @@ Future<void> _open(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () async {
-              _answer = await promptSessionFork(
-                context,
-                isolatedSource: isolatedSource,
-                source: source,
-                targets: targets,
-              );
-              _answered = true;
-            },
-            child: const Text('open'),
+      home: AbCarbonScope(
+        child: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                _answer = await promptSessionFork(
+                  context,
+                  isolatedSource: isolatedSource,
+                  source: source,
+                  targets: targets,
+                );
+                _answered = true;
+              },
+              child: const Text('open'),
+            ),
           ),
         ),
       ),
@@ -70,11 +73,10 @@ void main() {
     tester,
   ) async {
     await _open(tester, isolatedSource: true);
-    // The whole reason this is a segmented control and not the confirm dialog's
-    // opt-in toggle: a mode choice has to show what it is not. Upper case
-    // because that is how AbSegmented paints every cell label.
-    expect(find.text('NEW WORKSPACE'), findsOneWidget);
-    expect(find.text('THIS WORKSPACE'), findsOneWidget);
+    // Choice tiles rather than the confirm dialog's opt-in toggle: a mode
+    // choice has to show what it is not.
+    expect(find.text('New workspace'), findsOneWidget);
+    expect(find.text('This workspace'), findsOneWidget);
   });
 
   testWidgets('a fork continues in this workspace by default', (tester) async {
@@ -107,7 +109,7 @@ void main() {
     tester,
   ) async {
     await _open(tester, isolatedSource: true);
-    await tester.tap(find.text('NEW WORKSPACE'));
+    await tester.tap(find.text('New workspace'));
     await tester.pumpAndSettle();
     // Whether uncommitted changes come along is the one thing a user cannot
     // see by looking, so the arm has to say it outright.
@@ -157,7 +159,7 @@ void main() {
 
   testWidgets('a new workspace survives an agent change', (tester) async {
     await _openWithAgents(tester);
-    await tester.tap(find.text('NEW WORKSPACE'));
+    await tester.tap(find.text('New workspace'));
     await tester.pumpAndSettle();
     await _pickClaude(tester);
     await tester.tap(find.text('Continue'));

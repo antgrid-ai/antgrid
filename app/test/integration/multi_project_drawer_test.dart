@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -65,10 +66,12 @@ void main() {
             projectStatusProvider('b').overrideWith((_) => bStatus.stream),
           ],
           child: MaterialApp(
-            home: Scaffold(
-              body: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [DrawerEntryRow(entryA), DrawerEntryRow(entryB)],
+            home: AbCarbonScope(
+              child: Scaffold(
+                body: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [DrawerEntryRow(entryA), DrawerEntryRow(entryB)],
+                ),
               ),
             ),
           ),

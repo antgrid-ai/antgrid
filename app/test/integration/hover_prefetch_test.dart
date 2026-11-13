@@ -1,8 +1,10 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -67,7 +69,9 @@ void main() {
                 projectSessionFactoryProvider.overrideWithValue(factory),
               ],
               child: MaterialApp(
-                home: Scaffold(body: DrawerEntryRow(_entry('hover-p'))),
+                home: AbCarbonScope(
+                  child: Scaffold(body: DrawerEntryRow(_entry('hover-p'))),
+                ),
               ),
             ),
           );
@@ -100,4 +104,53 @@ void main() {
       }
     },
   );
+
+  testWidgets('action hover does not cancel the prefetch', (tester) async {
+    // The row's actions sit inside its one outer hover region, so the pointer
+    // crossing onto one must not read as leaving the row.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    try {
+      var factoryCalls = 0;
+      Future<ProjectSession> factory(Ref ref, String id) async {
+        factoryCalls++;
+        throw StateError('factory-stub');
+      }
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...stores.overrides,
+            projectSessionFactoryProvider.overrideWithValue(factory),
+          ],
+          child: MaterialApp(
+            home: AbCarbonScope(
+              child: Scaffold(body: DrawerEntryRow(_entry('hover-p'))),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(gesture.removePointer);
+      await gesture.addPointer();
+
+      await gesture.moveTo(tester.getCenter(find.byType(DrawerEntryRow)));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(factoryCalls, 0);
+
+      final action = find.byWidgetPredicate(
+        (w) => w is CarbonButton && w.semanticLabel == 'New session',
+      );
+      await gesture.moveTo(tester.getCenter(action));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(
+        factoryCalls,
+        1,
+        reason: 'the timer armed on entering the row, not on the action',
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

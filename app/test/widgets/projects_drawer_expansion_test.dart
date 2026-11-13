@@ -7,10 +7,11 @@
 // directly to projectStore and the session cache to cachedSessionsStore
 // before pumpWidget, so the providers see real data without provider-level
 // mocking.
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
@@ -21,6 +22,7 @@ import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
+import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/session_row.dart';
 
@@ -114,7 +116,9 @@ void main() {
         // without hitting the network.
         currentUserProvider.overrideWith((_) async => null),
       ],
-      child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+      child: MaterialApp(
+        home: AbCarbonScope(child: Scaffold(body: ProjectsDrawer())),
+      ),
     );
   }
 
@@ -140,7 +144,7 @@ void main() {
     expect(find.byType(SessionRow), findsWidgets);
 
     // Tap the project row's title text to toggle collapse.
-    // DrawerEntryRow wraps AbListRow with onTap → collapsedDrawerIdsProvider.notifier.toggle(id).
+    // DrawerEntryRow's row presses through onPressed to collapsedDrawerIdsProvider.notifier.toggle(id).
     await tester.tap(find.text(_displayName));
     await tester.pumpAndSettle();
 
@@ -176,18 +180,32 @@ void main() {
             ),
           ),
         ],
-        child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+        child: MaterialApp(
+        home: AbCarbonScope(child: Scaffold(body: ProjectsDrawer())),
+      ),
       ),
     );
     await tester.pumpAndSettle();
 
-    final rowFinder = find.ancestor(
-      of: find.text(_machineName),
-      matching: find.byType(AbListRow),
+    final rowFinder = find
+        .ancestor(
+          of: find.text(_machineName),
+          matching: find.byType(CarbonSideNavMenu),
+        )
+        .first;
+    expect(rowFinder, findsOneWidget);
+    final band = tester.widget<CarbonSideNavMenu>(rowFinder);
+    expect(band.expanded, isFalse);
+    expect(band.hoverFill, isFalse);
+    expect(
+      band.chevron,
+      CarbonSideNavChevron.afterLabel,
+      reason: 'a band discloses beside the machine name, not at the far end',
     );
-    final row = tester.widget<AbListRow>(rowFinder);
-    expect(row.leading, isNull);
-    expect(row.title, isA<Row>());
+    expect(
+      find.ancestor(of: rowFinder, matching: find.byType(MachineDrawerHeaderRow)),
+      findsOneWidget,
+    );
     expect(find.text('Alpha'), findsNothing);
 
     await tester.tap(find.text(_machineName));
@@ -223,7 +241,9 @@ void main() {
               ),
             ),
           ],
-          child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+          child: MaterialApp(
+        home: AbCarbonScope(child: Scaffold(body: ProjectsDrawer())),
+      ),
         ),
       );
       await tester.pumpAndSettle();

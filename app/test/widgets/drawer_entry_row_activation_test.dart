@@ -1,4 +1,5 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -262,7 +263,9 @@ void main() {
       ProviderScope(
         overrides: stores.overrides,
         child: MaterialApp(
-          home: Scaffold(body: DrawerEntryRow(RemoteAgentEntry(recent))),
+          home: AbCarbonScope(
+            child: Scaffold(body: DrawerEntryRow(RemoteAgentEntry(recent))),
+          ),
         ),
       ),
     );

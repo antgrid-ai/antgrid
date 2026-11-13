@@ -1,6 +1,7 @@
 // The drawer's entries to Memory: a revealed lightbulb on local and
 // advertised-remote project rows plus a Memory nav row, which the sample
 // project keeps for its own memories.
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
@@ -168,7 +170,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: overrides(),
-        child: MaterialApp(home: home),
+        child: MaterialApp(home: AbCarbonScope(child: home)),
       ),
     );
     await tester.pumpAndSettle();
@@ -183,23 +185,43 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Finder rowOf(String label) => find.ancestor(
-    of: find.text(label),
-    matching: find.byType(HoverableDrawerRow),
+  Finder rowOf(String label) => find
+      .ancestor(of: find.text(label), matching: find.byType(CarbonSideNavMenu))
+      .first;
+
+  /// The icon button named [label]. Hidden actions stay mounted, so finding one
+  /// says nothing about whether the row shows it.
+  Finder button(String label) => find.byWidgetPredicate(
+    (w) => w is CarbonButton && w.semanticLabel == label,
+    description: 'icon button "$label"',
   );
+
+  bool shown(WidgetTester tester, Finder target) => tester
+      .widget<Visibility>(
+        find
+            .ancestor(
+              of: target,
+              matching: find.byWidgetPredicate(
+                (w) => w is Visibility && w.maintainFocusability,
+              ),
+            )
+            .first,
+      )
+      .visible;
 
   desktopTest('a local row opens the screen filtered to its project', (
     tester,
   ) async {
     final container = await pump(tester);
     await expandMachine(tester);
-    expect(find.byTooltip('$_localName memories (3)'), findsNothing);
+    expect(shown(tester, button('$_localName memories')), isFalse);
     await hoverRow(tester, find.text(_localName));
     final action = find.descendant(
       of: rowOf(_localName),
-      matching: find.byTooltip('$_localName memories (3)'),
+      matching: button('$_localName memories'),
     );
     expect(action, findsOneWidget);
+    expect(shown(tester, action), isTrue);
     await tester.tap(action);
     await tester.pumpAndSettle();
     expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
@@ -216,9 +238,10 @@ void main() {
     await hoverRow(tester, find.text(_remoteName));
     final action = find.descendant(
       of: rowOf(_remoteName),
-      matching: find.byTooltip('$_remoteName memories'),
+      matching: button('$_remoteName memories'),
     );
     expect(action, findsOneWidget);
+    expect(shown(tester, action), isTrue);
     await tester.tap(action);
     await tester.pumpAndSettle();
     final view = container.read(memoryViewProvider);
@@ -236,7 +259,7 @@ void main() {
     final sample = demoDrawerEntries().single.displayName;
     expect(find.text(sample), findsOneWidget);
     await hoverRow(tester, find.text(sample));
-    expect(find.byTooltip('New session'), findsOneWidget);
+    expect(button('New session'), findsOneWidget);
     expect(find.byType(MemoryProjectButton), findsOneWidget);
     expect(find.text('Memory'), findsOneWidget);
     // The machine total is the real host's, not the sample's.
@@ -249,12 +272,7 @@ void main() {
 
   desktopTest('the Memory nav row carries the machine total', (tester) async {
     await pump(tester);
-    final row = find.ancestor(
-      of: find.text('Memory'),
-      matching: find.byType(HoverableDrawerRow),
-    );
-    final nav = row.evaluate().isNotEmpty ? row : find.text('Memory');
-    expect(nav, findsWidgets);
+    expect(find.text('Memory'), findsWidgets);
     expect(find.text('7'), findsOneWidget);
   });
 
@@ -267,10 +285,9 @@ void main() {
       await expandMachine(tester);
       await hoverRow(tester, find.text(_localName));
       expect(
-        find.bySemanticsLabel(RegExp('^$_localName memories')),
-        findsOneWidget,
+        find.bySemanticsLabel(RegExp('^$_localName memories\$')),
+        findsWidgets,
       );
-      expect(find.bySemanticsLabel('$_localName memories'), findsOneWidget);
       expect(find.bySemanticsLabel('$_localName memories (3)'), findsNothing);
     } finally {
       handle.dispose();

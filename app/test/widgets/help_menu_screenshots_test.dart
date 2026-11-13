@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/providers/app_version.dart';
@@ -81,9 +82,11 @@ void main() {
                 debugShowCheckedModeBanner: false,
                 theme: buildAbTheme(),
                 home: const Scaffold(
-                  body: Align(
-                    alignment: Alignment.bottomLeft,
-                    child: SizedBox(width: 280, child: AccountFooter()),
+                  body: AbCarbonScope(
+                    child: Align(
+                      alignment: Alignment.bottomLeft,
+                      child: SizedBox(width: 280, child: AccountFooter()),
+                    ),
                   ),
                 ),
               ),

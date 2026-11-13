@@ -3,7 +3,7 @@
 // scheduler surface, and entering must not be undone by enterDemoMode's own
 // reset to the workspace surface. Each is pinned here on its own.
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/demo_mode.dart';
@@ -92,8 +92,10 @@ void main() {
     );
     await tester.pump();
 
-    final row = find.widgetWithText(AbListRow, 'Scheduler');
-    expect(tester.widget<AbListRow>(row).enabled, isTrue);
+    final row = find.byWidgetPredicate(
+      (w) => w is CarbonSideNavLink && w.label == 'Scheduler',
+    );
+    expect(tester.widget<CarbonSideNavLink>(row).disabled, isFalse);
 
     await tester.tap(row);
     await tester.pump();

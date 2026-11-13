@@ -1,21 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_status_tone.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_toast.dart';
-import '../design/widgets/ab_status_dot.dart';
+import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
@@ -39,24 +30,23 @@ import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
 import '../util/external_open_target.dart';
-import 'agent_work_status_dot.dart';
+import 'carbon_session_badges.dart';
+import 'carbon_session_rename_dialog.dart';
+import 'carbon_status_dot.dart';
+import 'drawer/drawer_metrics.dart' show kDrawerPanelWidth;
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
-import 'session_deleting_badge.dart';
-import 'session_memory_restart_badge.dart';
-import 'session_handler_badge.dart';
 import 'session_fork_dialog.dart';
-import 'session_isolation_badge.dart';
-import 'session_approval_badge.dart';
-import 'session_rename_dialog.dart';
-import 'session_shared_workspace_badge.dart';
+import 'session_isolation_badge.dart' show sessionIsIsolated;
 import 'session_start_refusal.dart';
 
-/// Fraction (-1..1) by which the status dot is shifted down within its leading
-/// box to sit on the title's optical centre rather than its line-box centre.
-/// ~0.45 of the 3px free half-space ≈ a 1.3px nudge — the measured gap for a
-/// 14px line at 1.2 line-height.
-const double _dotOpticalYBias = 0.45;
+/// Diameter of the status dot on a touch surface; a pointer surface takes the
+/// dot's own default.
+const double _touchDotSize = 10;
+
+/// The widest the badge cluster may grow, so the name always keeps the rest of
+/// the row; a badge squeezed past its text truncates the way a Carbon tag does.
+const double _badgeMaxWidth = kDrawerPanelWidth / 2;
 
 /// Shown when a `session:start` the user explicitly asked for gets no reply.
 /// One literal because the row tap and the kebab's Fork make the user the same
@@ -97,15 +87,15 @@ class SessionRow extends ConsumerStatefulWidget {
 }
 
 class _SessionRowState extends ConsumerState<SessionRow> {
-  // Mobile has no hover — keep the kebab visible.
-  late bool _hovered = isMobilePlatform;
-
-  // Keep kebab mounted and visible while the action menu is actively open.
+  // The action menu is open. It sits outside the row, so neither the pointer
+  // nor focus is inside the row while it is, and the actions would hide under
+  // the very menu they opened.
   bool _menuOpen = false;
 
-  // A collapsed kebab is unreachable without a pointer, so the row's own focus
-  // highlight has to reveal it too.
-  bool _focused = false;
+  // A picked action is still running: its dialog is up or its bridge call is in
+  // flight. The actions stay revealed so the context those dialogs are hosted
+  // on does not unmount with the pointer.
+  bool _actionBusy = false;
 
   // Re-entrancy latch for _activate. A cold remote project tap kicks off an
   // up-to-30s pair+promote, so a rapid double-tap would otherwise launch two
@@ -118,13 +108,35 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   TextEditingController? _editController;
   FocusNode? _editFocus;
 
+  // The row's own focus, so leaving the editor from the keyboard lands back on
+  // the row instead of on nothing.
+  final FocusNode _rowFocus = FocusNode(debugLabel: 'SessionRow');
+
   SessionEntry get session => widget.session;
 
   @override
   void dispose() {
     _editController?.dispose();
     _editFocus?.dispose();
+    _rowFocus.dispose();
     super.dispose();
+  }
+
+  void _setMenuOpen(bool open) {
+    if (mounted && _menuOpen != open) setState(() => _menuOpen = open);
+  }
+
+  void _setActionBusy(bool busy) {
+    if (mounted && _actionBusy != busy) setState(() => _actionBusy = busy);
+  }
+
+  /// Hands focus back to the row once the editor has gone. After the frame that
+  /// rebuilds the link, because the node is only attached while the link is
+  /// mounted.
+  void _refocusRow() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _rowFocus.context != null) _rowFocus.requestFocus();
+    });
   }
 
   /// Enter inline edit mode: swap the title for a focused, pre-selected
@@ -208,59 +220,45 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     }
   }
 
-  /// The leading indicator. A delete in flight owns the slot outright; then
-  /// work status owns it whenever the agent has something to say about THIS
-  /// session (working / needs you / error / unread) — it is the same dot the
-  /// Recent list shows, so one session's state reads identically wherever it
-  /// surfaces.
+  /// The leading indicator. A delete in flight owns the slot outright; otherwise
+  /// the work-status dot, the same one the Recent list shows, so one session's
+  /// state reads identically wherever it surfaces.
   ///
   /// At rest the dot says nothing at all: the same hollow idle ring whether the
-  /// session is running or stopped. Running used to fill it in the accent, which
-  /// on the default preset is off-white — so merely OPENING a session lit it up
-  /// brighter than a session that was actually doing something, and the brightest
-  /// dot in the sidebar was the one you were already looking at. Liveness is not
-  /// a status: what the row exists to report is what the agent wants from you,
-  /// and a session at rest wants nothing.
-  Widget _leadingDot(AgentWorkStatus work, {required bool deleting}) {
-    final key = ValueKey('session-status-dot-${session.id}');
-    // Outranks both arms below: work status is about what a live agent is
-    // doing, and this one is being taken apart.
+  /// session is running or stopped. Liveness is not a status: what the row
+  /// exists to report is what the agent wants from you, and a session at rest
+  /// wants nothing.
+  ///
+  /// Working and needs-you dots pulse, which Recent's static dots do not: the
+  /// drawer is the one always-visible place, and a dot that stops moving when an
+  /// agent is waiting on you stops being noticed there.
+  Widget _leading(
+    CarbonThemeData t,
+    AgentWorkStatus work, {
+    required bool deleting,
+  }) {
+    // Outranks the dot: work status is about what a live agent is doing, and
+    // this one is being taken apart.
     if (deleting) {
-      return AbLoadingDot(
+      return CarbonSpinner(
         key: ValueKey('session-deleting-dot-${session.id}'),
-        // One step up from the status dot it replaces: the pulse spends most of
-        // its cycle smaller than its nominal size, so matching dotSizeSm would
-        // read as a fainter indicator than the one it took over from.
-        size: AbTokens.dotSizeMd,
+        size: t.iconSize,
       );
     }
-    if (work != AgentWorkStatus.done) {
-      return AgentWorkStatusDot(key: key, status: work);
-    }
-    return AbStatusDot(
-      key: key,
-      // Archived is the one at-rest distinction worth drawing: it is a
-      // lifecycle end, not a pause. Otherwise the agent-at-rest gray, dimmer
-      // than `neutral` (textSecondary) so the ring recedes instead of reading
-      // as a lit indicator — not `muted`, which is de-emphasized TEXT.
-      tone: session.archived ? AbStatusTone.disabled : AbStatusTone.agentIdle,
-      size: AbDotSize.sm,
-      style: AbDotStyle.hollow,
+    return CarbonWorkStatusDot(
+      key: ValueKey('session-status-dot-${session.id}'),
+      status: work,
+      pulse:
+          work == AgentWorkStatus.working || work == AgentWorkStatus.attention,
+      size: t.isTouch ? _touchDotSize : null,
+      // A ring shows the row's own fill (rest, hover or selected) through it.
+      hollowFill: t.colors.background.withValues(alpha: 0),
     );
-  }
-
-  void _onEnter(PointerEnterEvent _) {
-    if (isMobilePlatform) return;
-    if (!_hovered && mounted) setState(() => _hovered = true);
-  }
-
-  void _onExit(PointerExitEvent _) {
-    if (isMobilePlatform) return;
-    if (_hovered && mounted) setState(() => _hovered = false);
   }
 
   @override
   Widget build(BuildContext context) {
+    final t = CarbonTheme.of(context);
     final activeId = ref.watch(activeSessionIdProvider);
     final selected =
         ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.workspace &&
@@ -294,138 +292,111 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       });
     }
 
-    // The drawer's one indent step is spent here, between a project row and
-    // its sessions — machine headers are bands and cost none, so this is the
-    // whole depth budget of the tree.
-    //
-    // Split so the selection fill gets breathing room before the status dot
-    // without shifting the dot's screen position: all but the last space6 sits
-    // on the outer Padding (which also keeps the L/R strips non-hover-reactive),
-    // and the last space6 is the row's own horizontalPadding.
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerSessionIndent - AbTokens.space6,
-        0,
-        AbTokens.space6,
-        0,
+    if (deleting && _menuOpen) {
+      // The menu unmounts with the actions and the package reports no close for
+      // that, so a refused delete would otherwise leave the kebab pinned open.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _setMenuOpen(false));
+    }
+
+    final leading = _leading(t, work, deleting: deleting);
+    if (_editing && !deleting) return _buildEditingRow(context, t, leading);
+
+    // The live list's answer, never `session.setup`: a row for a project that
+    // isn't focused is served from the persisted cache, which carries no setup
+    // state at all.
+    final setup = ref.watch(sessionSetupProvider(session.id));
+    final handlerPending = watchSessionHandlerPending(
+      ref,
+      widget.entryId,
+      session.id,
+    );
+    final lacksMemory = watchSessionStartedWithoutMemory(
+      ref,
+      widget.entryId,
+      session,
+    );
+
+    // The link hides its content from semantics, so every badge's state has to
+    // be in the name or it is silent to a screen reader.
+    final spoken = sessionSpokenName(
+      name: session.name,
+      status: work,
+      bypassesApprovals: session.approvalPolicy == 'bypass',
+      isolation: sessionIsolationSpoken(session, setup),
+      sharedWorkspace: session.sharedWorkspace,
+      deleting: deleting,
+      extras: [
+        if (handlerPending > 0) 'Handler waiting on $handlerPending',
+        if (lacksMemory) 'started without Memory',
+      ],
+    );
+
+    return CarbonSideNavLink(
+      label: spoken,
+      leading: leading,
+      current: selected,
+      // A session being removed is neither focusable nor activatable: opening
+      // it would attach the workspace to a checkout that is going away.
+      disabled: deleting,
+      focusNode: _rowFocus,
+      // A touch user holding a badge to read its tooltip must not also open the
+      // session on release.
+      cancelOnLongPress: true,
+      onPressed: () => detached(
+        'SessionRow',
+        'session activate failed',
+        () => _activate(context, ref.container),
       ),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: _onEnter,
-        onExit: _onExit,
-        child: AbListRow(
-          leadingGapOverride: AbTokens.drawerSessionLeadingGap,
-          leading: SizedBox(
-            width: AbTokens.drawerSessionLeadingSlot,
-            height: AbTokens.drawerLeadingSlot,
-            // Bias the dot slightly below its box centre. Row-centring lines up
-            // the dot with the title's line-box centre, but the visible glyphs
-            // of a text line sit a hair lower (the font reserves more space
-            // above the baseline than below), so a geometrically-centred dot
-            // reads as too high. The small downward nudge matches the optical
-            // centre of the text.
-            child: Align(
-              alignment: const Alignment(0, _dotOpticalYBias),
-              child: _leadingDot(work, deleting: deleting),
-            ),
+      // Desktop: double-click a running session (in any warm project) to rename
+      // it inline. A single press stays instant, so wiring this on many rows
+      // costs no latency.
+      onDoublePressed: (isMobilePlatform || deleting || !canRename)
+          ? null
+          : _enterEdit,
+      content: Text(session.name),
+      // The badges are the row's status marks: they sit in the trailing slot the
+      // session menu swaps into on hover, as every other drawer row's marks do.
+      trailing: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: _badgeMaxWidth),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final badge in <Widget>[
+                CarbonSessionIsolationBadge(session: session, setup: setup),
+                CarbonSessionApprovalBadge(session: session),
+                CarbonSessionSharedWorkspaceBadge(session: session),
+                CarbonSessionHandlerBadge(
+                  entryId: widget.entryId,
+                  sessionId: session.id,
+                ),
+                CarbonSessionMemoryRestartBadge(
+                  entryId: widget.entryId,
+                  session: session,
+                ),
+                CarbonSessionDeletingBadge(deleting: deleting),
+              ])
+                Flexible(child: badge),
+            ],
           ),
-          title: (_editing && !deleting)
-              ? _buildEditor()
-              : Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        session.name,
-                        // The payload of the drawer, and so still its largest
-                        // text — but at fontMd against the project row's
-                        // fontSm, not fontBody at textPrimary, which made every
-                        // session outshout the project containing it. The
-                        // active row is the one thing in the panel that goes
-                        // primary.
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontMd,
-                          fontWeight: selected
-                              ? FontWeight.w500
-                              : FontWeight.normal,
-                          color: selected
-                              ? context.antgrid.textPrimary
-                              : context.antgrid.textSecondary,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    SessionIsolationBadge(
-                      session: session,
-                      // The live list's answer, never `session.setup`: a row
-                      // for a project that isn't focused is served from the
-                      // persisted cache, which carries no setup state at all.
-                      setup: ref.watch(sessionSetupProvider(session.id)),
-                    ),
-                    SessionApprovalBadge(session: session),
-                    SessionSharedWorkspaceBadge(session: session),
-                    SessionHandlerBadge(
-                      entryId: widget.entryId,
-                      sessionId: session.id,
-                    ),
-                    SessionMemoryRestartBadge(
-                      entryId: widget.entryId,
-                      session: session,
-                    ),
-                    SessionDeletingBadge(deleting: deleting),
-                  ],
-                ),
-          // Hover-only kebab (always visible on mobile touch devices). Does
-          // not take trailing width when unhovered, leaving the full width
-          // for session titles. Kept mounted while the menu is open.
-          // Hidden entirely while deleting rather than partly disabled: every
-          // item on it (start/stop/rename/archive/delete, and the
-          // working-directory rows pointing into a checkout that is going away)
-          // acts on a session being removed.
-          trailing:
-              ((_hovered || _menuOpen || _focused) && !_editing && !deleting)
-              ? AbRowTrailingCell(
-                  child: _SessionMenu(
-                    entryId: widget.entryId,
-                    session: session,
-                    rowContext: context,
-                    onMenuOpened: () {
-                      if (mounted) setState(() => _menuOpen = true);
-                    },
-                    onMenuClosed: () {
-                      if (mounted) setState(() => _menuOpen = false);
-                    },
-                  ),
-                )
-              : null,
-          selected: selected,
-          enabled: !deleting,
-          contentFloor: AbRowContentFloor.touchRow,
-          onFocusChange: (v) {
-            if (mounted) setState(() => _focused = v);
-          },
-          selectionStyle: AbRowSelection.surface,
-          hoverable: true,
-          density: AbRowDensity.sm,
-          horizontalPadding: AbTokens.space6,
-          verticalPadding: 1,
-          // Small vertical margin so adjacent rows don't touch.
-          margin: const EdgeInsets.symmetric(vertical: 1),
-          // Disable activation while editing so taps stay in the field.
-          onTap: (_editing || deleting)
-              ? null
-              : () => detached(
-                  'SessionRow',
-                  'session activate failed',
-                  () => _activate(context, ref.container),
-                ),
-          // Desktop: double-tap a running session (in any warm project) to
-          // rename it inline. The row's SerialTap recognizer keeps single-tap
-          // selection instant, so wiring this on many rows costs no latency.
-          onDoubleTap: (isMobilePlatform || _editing || deleting || !canRename)
-              ? null
-              : _enterEdit,
         ),
-      ),
+      ],
+      keepActionsRevealed: _menuOpen || _actionBusy,
+      // Gone entirely while deleting rather than partly disabled: every item on
+      // it (start/stop/rename/archive/delete, and the working-directory rows
+      // pointing into a checkout that is going away) acts on a session being
+      // removed.
+      actions: deleting
+          ? const <Widget>[]
+          : [
+              _SessionMenu(
+                entryId: widget.entryId,
+                session: session,
+                rowContext: context,
+                onOpenChanged: _setMenuOpen,
+                onActionBusy: _setActionBusy,
+              ),
+            ],
     );
   }
 
@@ -535,16 +506,44 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   void _showFocusedSessionSurface(ProviderContainer ref) =>
       _showSessionSurface(ref, session.id);
 
-  /// Inline rename field. Enter (onSubmitted) and blur (onFocusChange)
-  /// commit; Escape (intercepted by the wrapping [Focus]) cancels.
+  /// The row while its name is being edited: the link's frame, inset and
+  /// leading slot, with the editor where the name was.
   ///
-  /// Deliberately a borderless, collapsed field — not [AbTextField] —
-  /// matching the title [Text]'s font metrics, so swapping it in keeps the
-  /// row height (anchored by the row's own content floor) stable while
-  /// expanding to the full title width. The selected-row fill and the accent
-  /// cursor signal edit mode; a bordered box (`rowHeightSm`, 32px) would grow
-  /// the row. The global `inputDecorationTheme` fills + outlines fields, so
-  /// every border state is neutralised here.
+  /// Not the link itself: a link hides its content from semantics and sits
+  /// under its press target, and an editor is neither.
+  Widget _buildEditingRow(
+    BuildContext context,
+    CarbonThemeData t,
+    Widget leading,
+  ) {
+    final scope = CarbonSideNavScope.of(context);
+    return ColoredBox(
+      color: t.colors.backgroundSelected,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: t.minTarget),
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(
+            start: scope.inset + scope.depth * scope.stepFor(t),
+            end: scope.endInset,
+          ),
+          child: Row(
+            children: [
+              SizedBox.square(
+                dimension: t.iconSize,
+                child: Center(child: leading),
+              ),
+              const SizedBox(width: CarbonSpacing.spacing03),
+              Expanded(child: _buildEditor()),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Inline rename field. Enter (onSubmitted) and blur (onFocusChange)
+  /// commit; Escape (intercepted by the wrapping [Focus]) cancels. Enter and
+  /// Escape hand focus back to the row; a blur leaves it where the user put it.
   Widget _buildEditor() {
     return Focus(
       canRequestFocus: false,
@@ -554,6 +553,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
             event.logicalKey == LogicalKeyboardKey.escape) {
           // Escape cancels: leave edit mode without saving.
           _exitEdit();
+          _refocusRow();
           return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
@@ -561,27 +561,15 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       onFocusChange: (hasFocus) {
         if (!hasFocus) _commitDetached();
       },
-      child: TextField(
+      child: CarbonTextInput(
         controller: _editController,
         focusNode: _editFocus,
-        maxLines: 1,
-        onSubmitted: (_) => _commitDetached(),
-        style: AbTokens.sansStyle(
-          height: 1.2,
-          color: context.antgrid.textPrimary,
-        ),
-        cursorColor: context.antgrid.accent,
-        cursorWidth: 1.5,
-        decoration: const InputDecoration(
-          isCollapsed: true,
-          isDense: true,
-          filled: false,
-          border: InputBorder.none,
-          enabledBorder: InputBorder.none,
-          focusedBorder: InputBorder.none,
-          disabledBorder: InputBorder.none,
-          contentPadding: EdgeInsets.zero,
-        ),
+        bare: true,
+        semanticLabel: 'Session name',
+        onSubmitted: (_) {
+          _commitDetached();
+          _refocusRow();
+        },
       ),
     );
   }
@@ -603,6 +591,7 @@ void _showSessionSurface(ProviderContainer ref, String sessionId) {
         ),
       );
 }
+
 
 enum _SessionAction { start, stop, fork, rename, archive, delete }
 
@@ -629,167 +618,130 @@ final class _CopyPath extends _SessionMenuChoice {
   const _CopyPath();
 }
 
+
 class _SessionMenu extends ConsumerWidget {
   final String entryId;
   final SessionEntry session;
 
   /// The row's own context, which outlives this menu. Delete hosts its dialogs
-  /// and toasts here rather than on the kebab: arming the in-flight mark hides
-  /// the kebab, so a refusal arriving afterwards (uncommitted changes, unpushed
-  /// commits, a held directory) would find the kebab's context unmounted and
-  /// end with nothing on screen.
+  /// and toasts here rather than on the trigger: arming the in-flight mark
+  /// removes the menu, so a refusal arriving afterwards (uncommitted changes,
+  /// unpushed commits, a held directory) would find the trigger's context
+  /// unmounted and end with nothing on screen.
   final BuildContext rowContext;
-  final VoidCallback? onMenuOpened;
-  final VoidCallback? onMenuClosed;
+  final ValueChanged<bool> onOpenChanged;
+  final ValueChanged<bool> onActionBusy;
 
   const _SessionMenu({
     required this.entryId,
     required this.session,
     required this.rowContext,
-    this.onMenuOpened,
-    this.onMenuClosed,
+    required this.onOpenChanged,
+    required this.onActionBusy,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Builder(
-      builder: (anchor) {
-        // Explicit destiny: the menu chain awaits dialogs and bridge RPCs, and
-        // an unhandled rejection from a fire-and-forget `void` call would land
-        // outside any build() as a fatal.
-        void open() => detached(
-          'SessionRow',
-          'session menu failed',
-          () => _openMenu(anchor, ref.container),
-        );
-        // The parent row drives single/double tap through a
-        // [SerialTapGestureRecognizer] that eagerly claims the gesture arena on
-        // pointer-up (to keep single-tap selection instant). A plain button
-        // [TapGestureRecognizer] defers to the arena sweep, so it loses that
-        // race and the kebab never opened — the row's single-tap fired instead.
-        // Match the row from the kebab's own (deeper) recognizer: it accepts
-        // first, so the kebab wins and the row's recognizer is rejected. The
-        // inner button keeps a non-null onTap for keyboard/a11y activation.
-        return RawGestureDetector(
-          gestures: <Type, GestureRecognizerFactory>{
-            SerialTapGestureRecognizer:
-                GestureRecognizerFactoryWithHandlers<
-                  SerialTapGestureRecognizer
-                >(
-                  // Primary button only, matching the TapGestureRecognizer this
-                  // replaces — a right-click shouldn't open the menu.
-                  () => SerialTapGestureRecognizer(
-                    allowedButtonsFilter: (b) => b == kPrimaryButton,
-                  ),
-                  (r) {
-                    // Only the first tap opens; a 2nd tap (count > 1) is dropped
-                    // rather than re-opening the just-opened menu.
-                    r.onSerialTapUp = (d) {
-                      if (d.count == 1) open();
-                    };
-                  },
-                ),
-          },
-          child: AbIconButton(
-            icon: AbIcons.more,
-            tooltip: 'Session actions',
-            onTap: open,
-          ),
-        );
-      },
-    );
-  }
+    // Working-directory rows are offered only for a checkout on THIS device:
+    // both resolve their path over the loopback control plane
+    // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
+    // which can only answer about projects this machine hosts. Asked about a
+    // remote machine's project it spawns a host and refuses — and the window it
+    // could not open would have been on a machine the user is not sitting at.
+    //
+    // Gated on what the local project store holds, never on whether the id
+    // looks remote: an id absent from it (a remote project, a machine, the
+    // demo) loses the rows, so a source of remote entries added later is
+    // excluded without this line being revisited. A probe still loading or
+    // failed degrades to no rows rather than a menu that never opens.
+    final local = ref.watch(entryIsLocalCheckoutProvider(entryId)).value ?? false;
+    final targets = local
+        ? (ref.watch(externalOpenTargetsProvider).value ??
+              const <ExternalOpenTarget>[])
+        : const <ExternalOpenTarget>[];
 
-  Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
-    onMenuOpened?.call();
-    try {
-      // Working-directory rows are offered only for a checkout on THIS device:
-      // both resolve their path over the loopback control plane
-      // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
-      // which can only answer about projects this machine hosts. Asked about a
-      // remote machine's project it spawns a host and refuses — and the window it
-      // could not open would have been on a machine the user is not sitting at.
-      //
-      // Gated on what the local project store holds, never on whether the id
-      // looks remote: an id absent from it (a remote project, a machine, the
-      // demo) loses the rows, so a source of remote entries added later is
-      // excluded without this line being revisited. A failed probe degrades to no
-      // rows rather than a menu that never opens.
-      final local = await ref
-          .read(entryIsLocalCheckoutProvider(entryId).future)
-          .catchError((_) => false);
-      final targets = local
-          ? await ref
-                .read(externalOpenTargetsProvider.future)
-                .catchError((_) => const <ExternalOpenTarget>[])
-          : const <ExternalOpenTarget>[];
-      if (!anchor.mounted) return;
-      final anchorRect = abMenuAnchorRect(anchor);
-      if (anchorRect == null) return;
-      final choice = await showAbMenu<_SessionMenuChoice>(
-        context: anchor,
-        anchorRect: anchorRect,
-        width: 200,
-        bounds: MenuBoundsScope.maybeOf(anchor),
-        entries: [
-          AbMenuItem(
-            label: session.running ? 'Stop' : 'Start',
-            value: _RowAction(
+    // Each pick runs detached: the chain awaits dialogs and bridge RPCs, and an
+    // unhandled rejection from a fire-and-forget `void` call would land outside
+    // any build() as a fatal. The container is taken here, not read from `ref`
+    // after the menu has closed.
+    VoidCallback pick(_SessionMenuChoice choice) {
+      final container = ref.container;
+      return () => detached(
+        'SessionRow',
+        'session menu failed',
+        () => _run(context, container, choice),
+      );
+    }
+
+    return CarbonOverflowMenu(
+      semanticLabel: 'Actions for ${session.name}',
+      size: CarbonButtonSize.extraSmall,
+      onOpenChanged: onOpenChanged,
+      entries: [
+        CarbonMenuItem(
+          label: session.running ? 'Stop' : 'Start',
+          onPressed: pick(
+            _RowAction(
               session.running ? _SessionAction.stop : _SessionAction.start,
             ),
           ),
-          if (session.forkSupported)
-            AbMenuItem(
-              label: 'Fork session',
-              value: const _RowAction(_SessionAction.fork),
-              // Greyed rather than dropped: `forkSupported` answers whether the
-              // AGENT can be forked, which is a permanent fact about the tool,
-              // while having something to fork is a fact about this session that
-              // its first turn fixes. Hiding the row for the second would teach
-              // the user the tool cannot do it at all.
-              //
-              // What the bridge actually reads is a native conversation id or the
-              // live terminal's scrollback, and both
-              // inputs are already on the wire — so this mirrors the precondition
-              // rather than asking for it. Drift costs a refusal the branch below
-              // now reports, never a silence.
-              enabled: session.running || session.agentSessionId != null,
-              disabledReason:
-                  'This session has nothing to fork yet. Start it and let the '
-                  'agent reply first.',
-            ),
-          const AbMenuItem(
-            label: 'Rename',
-            value: _RowAction(_SessionAction.rename),
+        ),
+        if (session.forkSupported)
+          CarbonMenuItem(
+            label: 'Fork session',
+            // Disabled rather than dropped: `forkSupported` answers whether the
+            // AGENT can be forked, which is a permanent fact about the tool,
+            // while having something to fork is a fact about this session that
+            // its first turn fixes. Hiding the row for the second would teach
+            // the user the tool cannot do it at all.
+            //
+            // What the bridge actually reads is a native conversation id or the
+            // live terminal's scrollback, and both inputs are already on the
+            // wire — so this mirrors the precondition rather than asking for
+            // it. Drift costs a refusal the branch below reports, never a
+            // silence.
+            onPressed: session.running || session.agentSessionId != null
+                ? pick(const _RowAction(_SessionAction.fork))
+                : null,
           ),
-          const AbMenuItem(
-            label: 'Archive',
-            value: _RowAction(_SessionAction.archive),
-          ),
-          if (targets.isNotEmpty) ...[
-            const AbMenuDivider(),
-            for (final target in targets)
-              AbMenuItem(
-                label: target.label,
-                icon: target.icon,
-                value: _OpenExternally(target),
-              ),
-            const AbMenuItem(
-              label: 'Copy path',
-              icon: AbIcons.copy,
-              value: _CopyPath(),
+        CarbonMenuItem(
+          label: 'Rename',
+          onPressed: pick(const _RowAction(_SessionAction.rename)),
+        ),
+        CarbonMenuItem(
+          label: 'Archive',
+          onPressed: pick(const _RowAction(_SessionAction.archive)),
+        ),
+        if (targets.isNotEmpty) ...[
+          const CarbonMenuDivider(),
+          for (final target in targets)
+            CarbonMenuItem(
+              label: target.label,
+              onPressed: pick(_OpenExternally(target)),
             ),
-          ],
-          const AbMenuDivider(),
-          const AbMenuItem(
-            label: 'Delete',
-            value: _RowAction(_SessionAction.delete),
-            danger: true,
+          CarbonMenuItem(
+            label: 'Copy path',
+            onPressed: pick(const _CopyPath()),
           ),
         ],
-      );
-      if (choice == null || !anchor.mounted) return;
+        const CarbonMenuDivider(),
+        CarbonMenuItem(
+          label: 'Delete',
+          kind: CarbonMenuItemKind.danger,
+          onPressed: pick(const _RowAction(_SessionAction.delete)),
+        ),
+      ],
+    );
+  }
 
+  Future<void> _run(
+    BuildContext anchor,
+    ProviderContainer ref,
+    _SessionMenuChoice choice,
+  ) async {
+    if (!anchor.mounted) return;
+    onActionBusy(true);
+    try {
       // The working-directory rows resolve their path over the loopback control
       // plane, so unlike every other row they must not warm the session service.
       switch (choice) {
@@ -812,7 +764,7 @@ class _SessionMenu extends ConsumerWidget {
           await _runRowAction(anchor, ref, action);
       }
     } finally {
-      onMenuClosed?.call();
+      onActionBusy(false);
     }
   }
 
@@ -949,7 +901,7 @@ class _SessionMenu extends ConsumerWidget {
             _forksInFlight.remove(forkKey);
           }
         case _SessionAction.rename:
-          final name = await promptSessionRename(anchor, session.name);
+          final name = await showCarbonSessionRename(anchor, session.name);
           if (name != null && name.trim().isNotEmpty) {
             await svc.rename(session.id, name.trim());
           }
@@ -1006,6 +958,7 @@ class _SessionMenu extends ConsumerWidget {
     final markKey = sessionDeleteKey(entryId, capturedId);
     final result = await confirmAndDeleteSession(
       context: context,
+      dialogs: carbonSessionDeleteDialogs,
       sessionName: session.name,
       checkoutKind: session.checkoutKind,
       sharedWorkspace: session.sharedWorkspace,

@@ -1,20 +1,13 @@
 // app/lib/widgets/projects_drawer.dart
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
+import '../design/ab_carbon.dart';
 import 'docked_column.dart';
-import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_tap_target.dart';
+import 'drawer/drawer_metrics.dart';
 import '../models/drawer_entry.dart';
 import '../screens/memory_screen.dart' show openMemoryScreen;
 import '../models/session_entry.dart';
@@ -107,60 +100,59 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
     // looking straight at.
     final entries = ref.watch(drawerEntriesProvider);
 
-    return MenuBoundsScope(
-      child: Container(
-        width: 288,
-        // Clipped because [DockedColumn] never squeezes its header: on a
-        // window too short for even that, a truncated sidebar beats chrome
-        // bleeding over the workspace beside it.
-        clipBehavior: Clip.hardEdge,
-        decoration: BoxDecoration(
-          color: context.antgrid.bgDeep,
-          border: Border(
-            right: BorderSide(color: context.antgrid.borderDefault),
-          ),
-        ),
-        // Not a Column: on a first run the chrome below the list is ~300px of
-        // fixed height, which a short window cannot pay for — and a Flex
-        // answers that by asserting, because its non-flex children are laid out
-        // unbounded. Here the list yields first and the setup section scrolls
-        // inside its own slot, so no height can overflow.
-        child: DockedColumn(
-          // Keeps a strip of the list on screen however short the window gets;
-          // otherwise a tall checklist leaves the sidebar showing no projects at
-          // all. Borrowed from the token scale as a floor rather than measured
-          // off a row — it answers how much list is worth keeping, not how tall
-          // any one row is.
-          //
-          // Scaled all the same, because the rows it holds room for are: a band
-          // floors on [AbIconButton.boxExtent] (24 x scale plus padding), so
-          // above UI Size ~1.15 a fixed 44 falls short of the FIRST row and the
-          // strip stops containing a whole one. On a phone a band is 44 of
-          // content plus its 4 of margin, so even at 1.0 the strip holds a
-          // little under one row. The dock pays for it, and the dock scrolls.
-          minBodyExtent: MediaQuery.textScalerOf(
-            context,
-          ).scale(AbTokens.rowHeightLg),
-          header: _TopChrome(
-            onRefresh: _refreshBusy ? null : _refreshFromButton,
-          ),
-          body: _Body(entries: entries, refreshKey: _refreshKey),
-          // Docked here, not on the New Session canvas: the drawer is the only
-          // desktop surface mounted on both routes, and the last setup steps
-          // are performed from inside a session.
-          dock: const _SetupDock(),
-          // Both are permanent affordances, so neither may be scrolled out of
-          // reach — the update row in particular stays pending until the app
-          // restarts (see update_row.dart). The account footer is declared last
-          // so it is the last BUDGETED slot to give up a pixel; only the
-          // unbudgeted header outranks it.
-          // Neither belongs to a machine-less demo: the footer's account row
-          // fetches the user, the subscription and the pricing catalogue, and
-          // the update row's only action leaves for the store.
-          pinned: ref.watch(demoModeProvider)
-              ? const []
-              : const [UpdateRow(), _Footer()],
-        ),
+    final demo = ref.watch(demoModeProvider);
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) {
+          final t = CarbonTheme.of(context);
+          return ClipRect(
+            // Clipped because [DockedColumn] never squeezes its header: on a
+            // window too short for even that, a truncated sidebar beats chrome
+            // bleeding over the workspace beside it.
+            child: CarbonSideNav(
+              width: kDrawerPanelWidth,
+              endBorder: true,
+              // Every row's trailing cell centres on the rail this inset
+              // defines, so the refresh, status marks and row actions share
+              // one vertical line.
+              endInset: kDrawerRailInset,
+              // Not a Column: on a first run the chrome below the list is
+              // ~300px of fixed height, which a short window cannot pay for —
+              // and a Flex answers that by asserting, because its non-flex
+              // children are laid out unbounded. Here the list yields first and
+              // the setup section scrolls inside its own slot, so no height can
+              // overflow.
+              child: DockedColumn(
+                // Keeps a strip of the list on screen however short the window
+                // gets; otherwise a tall checklist leaves the sidebar showing
+                // no projects at all. A full target is the smallest slice that
+                // still holds a whole row on either density, and Carbon rows
+                // do not grow with the text scale, so it needs no scaling.
+                minBodyExtent: t.minTarget,
+                header: _TopChrome(
+                  onRefresh: _refreshBusy ? null : _refreshFromButton,
+                ),
+                body: _Body(entries: entries, refreshKey: _refreshKey),
+                // Docked here, not on the New Session canvas: the drawer is the
+                // only desktop surface mounted on both routes, and the last
+                // setup steps are performed from inside a session.
+                dock: const _SetupDock(),
+                // Both are permanent affordances, so neither may be scrolled
+                // out of reach — the update row in particular stays pending
+                // until the app restarts (see update_row.dart). The account
+                // footer is declared last so it is the last BUDGETED slot to
+                // give up a pixel; only the unbudgeted header outranks it.
+                // Neither belongs to a machine-less demo: the footer's account
+                // row fetches the user, the subscription and the pricing
+                // catalogue, and the update row's only action leaves for the
+                // store.
+                pinned: demo
+                    ? const []
+                    : const [UpdateRow(), AccountFooter()],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -188,7 +180,8 @@ class _TopChrome extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _NavActions(),
-        _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
+        const CarbonSideNavDivider(),
+        _ProjectsHeader(onRefresh: onRefresh),
       ],
     );
   }
@@ -269,84 +262,37 @@ class _NavActions extends ConsumerWidget {
           )
         : null;
 
-    Widget navigationRow({
-      required String label,
-      required String icon,
-      required bool selected,
-      required VoidCallback onTap,
-      bool enabled = true,
-      Widget? trailing,
-    }) {
-      Widget row = AbListRow(
-        title: Text(label, style: AbTokens.sansStyle()),
-        leading: AbIcon(
-          icon,
-          size: AbTokens.iconButtonGlyph,
-          color: context.antgrid.textSecondary,
-        ),
-        density: AbRowDensity.sm,
-        horizontalPadding: AbTokens.space8,
-        selected: selected,
-        selectionStyle: AbRowSelection.surface,
-        hoverable: true,
-        enabled: enabled,
-        trailing: trailing,
-        onTap: enabled ? onTap : null,
-      );
-      if (isMobilePlatform) {
-        row = ConstrainedBox(
-          constraints: const BoxConstraints(
-            minHeight: AbTokens.touchControlMin,
-          ),
-          child: row,
-        );
-      }
-      return Semantics(selected: selected, enabled: enabled, child: row);
-    }
-
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerGutter,
-        AbTokens.drawerGutter,
-        AbTokens.drawerGutter,
-        AbTokens.space4,
-      ),
-      child: SizedBox(
-        width: double.infinity,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            navigationRow(
-              label: 'New Session',
-              icon: AbIcons.add,
-              selected: surface == WorkbenchSurface.newSession,
-              onTap: () => enterNewSession(ref.container),
-            ),
-            const SizedBox(height: AbTokens.space4),
-            navigationRow(
-              label: 'Scheduler',
-              icon: AbIcons.calendar,
-              selected: surface == WorkbenchSurface.scheduler,
-              onTap: openScheduler,
-            ),
-            const SizedBox(height: AbTokens.space4),
-            navigationRow(
-              label: 'Memory',
-              icon: AbIcons.lightbulb,
-              selected: surface == WorkbenchSurface.memory,
-              onTap: openMemory,
-              trailing: memoryCount != null && memoryCount > 0
-                  ? Text(
-                      '$memoryCount',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: context.antgrid.textMuted,
-                      ),
-                    )
-                  : null,
-            ),
-          ],
-        ),
+      padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          CarbonSideNavLink(
+            label: 'New session',
+            icon: CarbonIcons.add,
+            current: surface == WorkbenchSurface.newSession,
+            onPressed: () => enterNewSession(ref.container),
+          ),
+          CarbonSideNavLink(
+            label: 'Scheduler',
+            icon: CarbonIcons.calendar,
+            current: surface == WorkbenchSurface.scheduler,
+            onPressed: openScheduler,
+          ),
+          CarbonSideNavLink(
+            label: 'Memory',
+            icon: CarbonIcons.idea,
+            current: surface == WorkbenchSurface.memory,
+            onPressed: openMemory,
+            trailing: [
+              if (memoryCount != null && memoryCount > 0)
+                CarbonTag(
+                  label: '$memoryCount',
+                  size: CarbonTagSize.small,
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -359,16 +305,13 @@ class _NavActions extends ConsumerWidget {
 /// actually holds are unknown until the row is expanded, and asking would open
 /// a control-plane socket per machine at drawer build. Nothing in the drawer
 /// counts its own contents any more: the panel is scanned for the one row that
-/// needs the user, which is what the attention dots are for. (Memory is the one
-/// exception; see `_DrawerEntryTrailing`.)
-class _GroupLabel extends ConsumerWidget {
-  const _GroupLabel({required this.label, required this.onRefresh});
+/// needs the user, which is what the attention dots are for.
+class _ProjectsHeader extends ConsumerWidget {
+  const _ProjectsHeader({required this.onRefresh});
 
   /// Raises the list's [RefreshIndicator] — see
   /// [_ProjectsDrawerState._refreshFromButton]. Null while one is still up.
   final Future<void> Function()? onRefresh;
-
-  final String label;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -383,36 +326,37 @@ class _GroupLabel extends ConsumerWidget {
     final refreshing = demo
         ? false
         : ref.watch(accountAgentsProvider).isLoading;
+    final t = CarbonTheme.of(context);
+    final scope = CarbonSideNavScope.of(context);
     return Padding(
-      // On mobile the refresh button's 44pt target sets the header's height, so
-      // the vertical padding it would otherwise add is dropped.
-      padding: EdgeInsets.fromLTRB(
-        AbTokens.drawerGutter,
-        isMobilePlatform ? 0 : AbTokens.space10,
-        AbTokens.drawerGutter,
-        isMobilePlatform ? 0 : AbTokens.space6,
+      padding: EdgeInsetsDirectional.only(
+        start: scope.inset,
+        end: scope.endInset,
       ),
-      // On desktop a section header's height is its type + padding and the
-      // refresh button is inline chrome inside it.
-      child: AbCompactTapTargets(
-        fullHeightTargets: isMobilePlatform,
+      // A full target tall, so on touch the 44pt refresh button sets the
+      // header's height and on desktop the header is one compact row.
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: t.minTarget),
         child: Row(
           children: [
-            Text(
-              label,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
-                letterSpacing: 1.4,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Semantics(
+                header: true,
+                child: Text(
+                  'Projects',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: t.typography.heading.copyWith(
+                    color: t.colors.textPrimary,
+                  ),
+                ),
               ),
             ),
-            const Spacer(),
             if (!demo)
-              AbIconButton(
-                icon: AbIcons.refresh,
-                tone: AbIconButtonTone.muted,
-                tooltip: 'Refresh',
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.renew),
+                semanticLabel: 'Refresh',
+                size: CarbonButtonSize.extraSmall,
                 // Goes through the indicator rather than calling
                 // [refreshDrawer] directly: it runs the SAME handler the pull
                 // gesture does and animates the same spinner, so a tap and a
@@ -421,7 +365,7 @@ class _GroupLabel extends ConsumerWidget {
                 // Disabled on either in-flight signal: an inventory fetch (so
                 // a double-tap can't stack redundant /account/agents requests)
                 // or an indicator the button itself raised.
-                onTap: refreshing || onRefresh == null
+                onPressed: refreshing || onRefresh == null
                     ? null
                     : () => detached(
                         'ProjectsDrawer',
@@ -433,15 +377,6 @@ class _GroupLabel extends ConsumerWidget {
         ),
       ),
     );
-  }
-}
-
-class _Footer extends ConsumerWidget {
-  const _Footer();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return const AccountFooter();
   }
 }
 
@@ -478,8 +413,10 @@ class _Body extends ConsumerWidget {
           );
         }
       },
-      color: context.antgrid.accent,
-      backgroundColor: context.antgrid.bgElevated,
+      // Material's indicator has no Carbon counterpart, so it only borrows
+      // Carbon's colours.
+      color: CarbonTheme.of(context).colors.interactive,
+      backgroundColor: CarbonTheme.of(context).layer(1),
       child: _list(context, ref),
     );
   }
@@ -493,27 +430,44 @@ class _Body extends ConsumerWidget {
       //
       // A scrollable (not a bare Center) so the pull-to-refresh gesture works
       // with zero rows — overscroll needs something scrollable to grab.
+      final t = CarbonTheme.of(context);
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
-            child:
-                // Mobile has no local folders — this drawer fills from machines
-                // on the account, so point there (the New Session canvas
-                // carries the full connect steps).
-                isMobilePlatform
-                ? const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Connect a machine to see its projects here.',
-                  )
-                // Desktop's real entry point is a local folder; offer it
-                // in place instead of describing where else to find it.
-                : const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Open a folder to get started.',
-                    action: OpenFolderButton(),
+            padding: const EdgeInsets.symmetric(
+              horizontal: CarbonSpacing.spacing05,
+              vertical: CarbonSpacing.spacing06,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'No projects yet',
+                  style: t.typography.heading.copyWith(
+                    color: t.colors.textPrimary,
                   ),
+                ),
+                const SizedBox(height: CarbonSpacing.spacing03),
+                Text(
+                  // Mobile has no local folders — this drawer fills from
+                  // machines on the account, so point there (the New Session
+                  // canvas carries the full connect steps). Desktop's real
+                  // entry point is a local folder; offer it in place instead
+                  // of describing where else to find it.
+                  isMobilePlatform
+                      ? 'Connect a machine to see its projects here.'
+                      : 'Open a folder to get started.',
+                  style: t.typography.body.copyWith(
+                    color: t.colors.textSecondary,
+                  ),
+                ),
+                if (!isMobilePlatform) ...[
+                  const SizedBox(height: CarbonSpacing.spacing05),
+                  const OpenFolderButton(),
+                ],
+              ],
+            ),
           ),
         ],
       );
@@ -525,13 +479,32 @@ class _Body extends ConsumerWidget {
     // folder appended after them by `applyDrawerOrder`) would otherwise open a
     // second, identically-labelled "This machine".
     final firstLocal = entries.indexWhere((e) => e.kind == EntryKind.local);
+    final t = CarbonTheme.of(context);
+    final navScope = CarbonSideNavScope.of(context);
     return ReorderableListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.only(bottom: AbTokens.space4),
+      padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing02),
       buildDefaultDragHandles: false,
       itemCount: entries.length,
-      proxyDecorator: (child, _, _) =>
-          Material(color: context.antgrid.bgElevated, child: child),
+      // The dragged row is lifted into the navigator's overlay, outside the
+      // drawer's Carbon theme and side-nav scope, so both are provided again.
+      proxyDecorator: (child, _, _) => AbCarbonScope(
+        child: CarbonSideNavScope(
+          inset: navScope.inset,
+          endInset: navScope.endInset,
+          nestStep: navScope.nestStep,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: t.layer(1),
+              border: Border.all(
+                color: t.borderSubtle(1),
+                width: CarbonBorders.hairline,
+              ),
+            ),
+            child: child,
+          ),
+        ),
+      ),
       onReorderItem: (from, to) {
         final ids = entries.map((e) => e.id).toList(growable: false);
         // The persist call is fire-and-forget by design — the in-memory state
@@ -552,10 +525,10 @@ class _Body extends ConsumerWidget {
         // keeps working exactly as it did: drag the first local project and
         // the band simply follows it. A LEGACY per-project remote row
         // (compound id, so `machineUuid` is null) is not local and opens no
-        // band — it keeps its own REMOTE chip instead.
+        // band — it keeps its own remote tag instead.
         showLocalBand: i == firstLocal,
         // Every band but the first gets a hairline above it; the first already
-        // has the PROJECTS label.
+        // has the Projects header.
         showRule: i > 0,
       ),
     );
@@ -670,30 +643,33 @@ class _EntryWithSessions extends ConsumerWidget {
 /// offline, and empty states so the machine subtree always says *something*
 /// rather than collapsing to nothing.
 ///
-/// [indent] is the depth of the rows this hint STANDS IN FOR, which is not
-/// always the depth of the row above it: under a project it replaces session
-/// rows ([AbTokens.drawerSessionIndent]), under a machine band it replaces
-/// project rows, which sit at the gutter.
-Widget _machineHint(
-  BuildContext context,
-  String text, {
-  double indent = AbTokens.drawerSessionIndent,
-}) {
+/// It takes the depth of the rows it STANDS IN FOR from the enclosing side-nav
+/// scope, which is not always the depth of the row above it: under a project it
+/// sits in the nested scope its session rows use, under a machine band it
+/// replaces project rows, which sit at the panel's own inset.
+Widget _machineHint(BuildContext context, String text) {
+  final t = CarbonTheme.of(context);
   return Padding(
-    padding: EdgeInsets.fromLTRB(
-      indent,
-      AbTokens.space2,
-      AbTokens.drawerGutter,
-      AbTokens.space4,
+    padding: EdgeInsetsDirectional.fromSTEB(
+      _hintInset(context, alignToTitle: true),
+      CarbonSpacing.spacing02,
+      CarbonSpacing.spacing05,
+      CarbonSpacing.spacing03,
     ),
     child: Text(
       text,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontXs,
-        color: context.antgrid.textMuted,
-      ),
+      style: t.typography.helper.copyWith(color: t.colors.textHelper),
     ),
   );
+}
+
+/// Where a row at the enclosing scope's depth starts: its leading slot, or its
+/// title when [alignToTitle] skips that slot.
+double _hintInset(BuildContext context, {required bool alignToTitle}) {
+  final t = CarbonTheme.of(context);
+  final scope = CarbonSideNavScope.of(context);
+  final start = scope.inset + scope.depth * scope.stepFor(t);
+  return alignToTitle ? start + drawerNestStep(t) : start;
 }
 
 /// The advertised project tree of a remote machine, fetched lazily once its
@@ -713,29 +689,30 @@ class _MachineProjects extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final stateAsync = ref.watch(controlPlaneStateProvider(machineUuid));
     // Everything here stands in for the machine's PROJECT rows, which sit at
-    // the gutter like a local project — not at session depth.
+    // the panel's own inset like a local project — not at session depth.
     return stateAsync.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.fromLTRB(
-          AbTokens.drawerGutter,
-          AbTokens.space6,
-          AbTokens.drawerGutter,
-          AbTokens.space6,
+      loading: () => Padding(
+        padding: EdgeInsetsDirectional.fromSTEB(
+          _hintInset(context, alignToTitle: false),
+          CarbonSpacing.spacing03,
+          CarbonSpacing.spacing05,
+          CarbonSpacing.spacing03,
         ),
-        child: Align(alignment: Alignment.centerLeft, child: AbLoading()),
+        child: const Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: CarbonInlineLoading(
+            status: CarbonInlineLoadingStatus.active,
+            description: 'Loading projects…',
+          ),
+        ),
       ),
-      error: (_, _) => _machineHint(
-        context,
-        'Machine offline',
-        indent: AbTokens.drawerGutter,
-      ),
+      error: (_, _) => _machineHint(context, 'Machine offline'),
       data: (state) {
         final projects = state.projects;
         if (projects.isEmpty) {
           return _machineHint(
             context,
             emptyAdvertHint(state.remoteAccessEnabled),
-            indent: AbTokens.drawerGutter,
           );
         }
         return Column(
@@ -805,52 +782,69 @@ class _ProjectSessions extends ConsumerWidget {
     final sessions = ref
         .watch(sessionsForEntryProvider(regId))
         .whereVisibleInDrawer();
-    if (sessions.isNotEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final s in sessions)
-            SessionRow(key: ValueKey(s.id), entryId: regId, session: s),
-        ],
-      );
-    }
-    return fetch.when(
-      loading: () => _machineHint(context, 'Loading sessions…'),
-      // A control-plane error (NOT_ALLOWED / timeout) is recoverable — make it a
-      // tap to re-run the peek rather than a dead end.
-      error: (_, _) => _RetryHint(
-        text: 'Could not load sessions — tap to retry.',
-        onTap: () => ref.invalidate(drawerProjectSessionsProvider(regId)),
-      ),
-      data: (_) => _machineHint(context, 'No sessions yet.'),
+    return _underProject(
+      context,
+      (nested) => sessions.isNotEmpty
+          ? _sessionRows(regId, sessions)
+          : fetch.when(
+              loading: () => _machineHint(nested, 'Loading sessions…'),
+              // A control-plane error (NOT_ALLOWED / timeout) is recoverable —
+              // make it a retry rather than a dead end.
+              error: (_, _) => _RetryHint(
+                onRetry: () =>
+                    ref.invalidate(drawerProjectSessionsProvider(regId)),
+              ),
+              data: (_) => _machineHint(nested, 'No sessions yet.'),
+            ),
     );
   }
 }
 
-/// Tappable variant of [_machineHint] for a recoverable error under a project
-/// row. Plain [GestureDetector] (no Material ripple/ink) per the design rules.
+/// The recoverable-error variant of [_machineHint] under a project row, with a
+/// real Retry button.
 class _RetryHint extends StatelessWidget {
-  final String text;
-  final VoidCallback onTap;
-  const _RetryHint({required this.text, required this.onTap});
+  final VoidCallback onRetry;
+  const _RetryHint({required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
-    final hint = _machineHint(context, text);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      // A recoverable error's only affordance is this tap, so on touch it gets
-      // the same minimum target as the rows around it.
-      child: isMobilePlatform
-          ? ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: AbTokens.rowHeightLg),
-              child: Align(alignment: Alignment.centerLeft, child: hint),
-            )
-          : hint,
+    return Padding(
+      // At the session rows' leading slot rather than their title: the
+      // indicator is the row's glyph.
+      padding: EdgeInsetsDirectional.fromSTEB(
+        _hintInset(context, alignToTitle: false),
+        CarbonSpacing.spacing02,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing03,
+      ),
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: CarbonInlineLoading(
+          status: CarbonInlineLoadingStatus.error,
+          description: 'Could not load sessions',
+          onRetry: onRetry,
+        ),
+      ),
     );
   }
 }
+
+/// Renders [child] one nesting level deeper than the project row above it, so
+/// session rows and their hints inset under the project title while the project
+/// row itself stays the one widget its drag listener wraps.
+Widget _underProject(BuildContext context, WidgetBuilder builder) =>
+    CarbonSideNavScope.nested(
+      context: context,
+      child: Builder(builder: builder),
+    );
+
+Widget _sessionRows(String entryId, List<SessionEntry> sessions) => Column(
+  crossAxisAlignment: CrossAxisAlignment.stretch,
+  children: [
+    for (final s in sessions)
+      SessionRow(key: ValueKey(s.id), entryId: entryId, session: s),
+  ],
+);
 
 /// Branches on whether `projectId` matches the currently-live project (active
 /// local folder selection OR connected remote agent): see
@@ -869,12 +863,6 @@ class SessionsList extends ConsumerWidget {
         .watch(sessionsForEntryProvider(projectId))
         .whereVisibleInDrawer();
     // No wrapper Padding — session rows own their own gutter.
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final s in sessions)
-          SessionRow(key: ValueKey(s.id), entryId: projectId, session: s),
-      ],
-    );
+    return _underProject(context, (_) => _sessionRows(projectId, sessions));
   }
 }

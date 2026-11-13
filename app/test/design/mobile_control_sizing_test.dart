@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
@@ -17,6 +18,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/widgets/command_output_overlay.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
+import 'package:antgrid/widgets/carbon_choice_tile.dart';
 import 'package:antgrid/widgets/session_fork_dialog.dart';
 
 import 'test_harness.dart';
@@ -80,11 +82,13 @@ Future<void> _openFork(WidgetTester tester) async {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => promptSessionFork(context, isolatedSource: true),
-            child: const Text('open'),
+      home: AbCarbonScope(
+        child: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => promptSessionFork(context, isolatedSource: true),
+              child: const Text('open'),
+            ),
           ),
         ),
       ),
@@ -95,23 +99,32 @@ Future<void> _openFork(WidgetTester tester) async {
 }
 
 void main() {
-  group('fork dialog workspace switch', () {
-    testWidgets('desktop: hugs its labels, left-aligned as before', (
-      tester,
-    ) async {
+  group('fork dialog workspace choice', () {
+    testWidgets('desktop: two tiles, both inside the dialog', (tester) async {
       await _openFork(tester);
+      final tiles = find.byType(CarbonChoiceTile);
+      expect(tiles, findsNWidgets(2));
       final label = tester.getRect(find.text('Workspace'));
-      final seg = tester.getRect(find.byType(AbSegmented<String>));
-      expect(seg.left, label.left);
-      expect(seg.width, lessThan(label.width));
+      for (final tile in tiles.evaluate()) {
+        final rect = tester.getRect(find.byWidget(tile.widget));
+        expect(rect.left, greaterThanOrEqualTo(label.left));
+        expect(rect.height, greaterThanOrEqualTo(32));
+      }
+      expect(tester.takeException(), isNull);
     }, variant: _windows);
 
-    testWidgets('phone: spans the dialog without overflowing', (tester) async {
+    testWidgets('phone: tiles are 44 targets and never overflow', (
+      tester,
+    ) async {
       _phone(tester);
       await _openFork(tester);
-      final label = tester.getRect(find.text('Workspace'));
-      final seg = tester.getRect(find.byType(AbSegmented<String>));
-      expect(seg.width, label.width);
+      final tiles = find.byType(CarbonChoiceTile);
+      expect(tiles, findsNWidgets(2));
+      for (final tile in tiles.evaluate()) {
+        final rect = tester.getRect(find.byWidget(tile.widget));
+        expect(rect.height, greaterThanOrEqualTo(44));
+        expect(rect.right, lessThanOrEqualTo(360));
+      }
       expect(tester.takeException(), isNull);
     }, variant: _android);
   });

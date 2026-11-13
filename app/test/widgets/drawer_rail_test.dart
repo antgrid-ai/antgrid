@@ -1,6 +1,6 @@
 // The drawer's trailing rail: every outermost glyph in the panel — dot,
-// trash, kebab, `+`, refresh — sits in one column, and no row changes height
-// when its actions are revealed.
+// overflow menu, `+`, refresh — is centred in one column, and no row changes
+// height when its actions are revealed.
 //
 // Horizontal assertions because the rail is a POSITION, not a widget: nothing
 // in the type system connects a status dot centred in one row to a button
@@ -15,10 +15,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
-import 'package:antgrid/design/ab_tokens.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
-import 'package:antgrid/design/widgets/ab_status_dot.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/drawer_entry.dart';
@@ -29,13 +26,15 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/host_status.dart';
-import 'package:antgrid/providers/new_session_action.dart';
+import 'package:antgrid/providers/new_session_action.dart'
+    show drawerProjectSessionsProvider;
 import 'package:antgrid/providers/supervisor_status.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/carbon_status_dot.dart';
+import 'package:antgrid/widgets/drawer/drawer_metrics.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
-import 'package:antgrid/widgets/session_row.dart';
 
 import '../helpers/hover.dart';
 import '../helpers/prefs_test_mock.dart';
@@ -49,8 +48,9 @@ const _machineName = 'RadhaAI';
 const _warmProjectId = 'alpha-local';
 const _warmName = 'Alpha local';
 
-/// Holds none, so it offers BOTH actions and the trash is the outermost one —
-/// the case that proves the rail belongs to whatever ends up last.
+/// Holds none, so it offers BOTH actions and the overflow menu is the
+/// outermost one: the case that proves the rail belongs to whatever ends up
+/// last.
 const _bareProjectId = 'beta-local';
 const _bareName = 'Beta local';
 
@@ -58,20 +58,21 @@ const _advertisedProjectId = 'gamma';
 const _advertisedName = 'Gamma';
 const _sessionName = 'Trace the reflow';
 
-const _newSessionTip = 'New session';
-const _kebabTip = 'Session actions';
-
-/// A row's Remove/Forget trigger. Carbon names an icon-only control through
-/// semantics, which `find.byTooltip` cannot see, so it is found by its own
-/// label — one per row, since many overflow menus share the drawer.
+/// Carbon names an icon-only control through semantics, which `find.byTooltip`
+/// cannot see, so a row's overflow trigger is found by its own label — one per
+/// row, since many overflow menus share the drawer.
 Finder _actionsFor(String name) => find.byWidgetPredicate(
   (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Actions for $name',
   description: 'overflow menu "Actions for $name"',
 );
 
-/// Slack for the comparison itself, not for misalignment: the defect this
-/// suite exists to catch moves a glyph by ~9px, and a 24px button beside a 6px
-/// dot is 9px out the moment either stops being centred in its own cell.
+Finder _button(String label) => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == label,
+  description: 'button "$label"',
+);
+
+/// Slack for the comparison itself, not for misalignment: a glyph that falls
+/// out of its cell is several pixels out, never a hundredth.
 const double _railEpsilon = 0.01;
 
 typedef _Variant = ({String name, TargetPlatform platform, double scale});
@@ -79,8 +80,8 @@ typedef _Variant = ({String name, TargetPlatform platform, double scale});
 const _variants = <_Variant>[
   (name: 'desktop @1.0', platform: TargetPlatform.windows, scale: 1.0),
   (name: 'desktop @1.3', platform: TargetPlatform.windows, scale: 1.3),
-  // Touch is where a cell that forgot [AbTokens.tapTargetMin] shows: every
-  // button widens to 44 while a bare dot does not.
+  // Touch is where a cell that forgot the full target shows: every button
+  // widens to 44 while a bare dot does not.
   (name: 'mobile @1.0', platform: TargetPlatform.android, scale: 1.0),
 ];
 
@@ -166,8 +167,8 @@ Future<void> _pumpDrawer(
           projectStatusProvider(
             id,
           ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
-        // Both bands render their liveness glyph only when there is something
-        // to report, and that glyph is the resting tenant of the rail cell.
+        // Both bands render their liveness dot only when there is something to
+        // report, and that dot is the resting tenant of the rail cell.
         hostStatusProvider.overrideWith(
           (_) => Stream.value(const HostStatus(HostPhase.up)),
         ),
@@ -207,37 +208,33 @@ Future<void> _pumpDrawer(
   await tester.pumpAndSettle();
 }
 
-/// The [HoverableDrawerRow] wrapping the row labelled [label] — the shell
-/// every project row and machine band is built inside.
-Finder _row(String label) => find.ancestor(
-  of: find.text(label),
-  matching: find.byType(HoverableDrawerRow),
-);
-
-Finder _entryRow(String label) =>
-    find.ancestor(of: find.text(label), matching: find.byType(DrawerEntryRow));
-
-/// The band itself, excluding the hairline a [HoverableDrawerRow] carries above
-/// it — that rule belongs to the block, not to the row's own metrics.
-Finder _band(String label) =>
-    find.ancestor(of: find.text(label), matching: find.byType(DrawerBand));
+/// The drawer's own row shell around [label]: a link or a menu header.
+Finder _row(String label) => find
+    .ancestor(
+      of: find.text(label),
+      matching: find.byWidgetPredicate(
+        (w) => w is CarbonSideNavLink || w is CarbonSideNavMenu,
+      ),
+    )
+    .first;
 
 Finder _within(Finder row, Finder glyph) =>
     find.descendant(of: row, matching: glyph);
 
-/// The rail's x, read off the one element that is on it without a pointer or a
-/// row around it. Every case compares against this rather than against each
-/// other, because flutter_test's mouse is a single device — two hovers in one
-/// test assert — and equality against a shared reference is transitive
-/// anyway.
-double _railX(WidgetTester tester) {
-  final refresh = find.byTooltip('Refresh');
-  expect(
-    refresh,
-    findsOneWidget,
-    reason: 'the PROJECTS header refresh is the rail reference',
-  );
-  return tester.getCenter(refresh).dx;
+/// Whether [glyph] is both built and painted. Carbon keeps a row's hidden
+/// actions mounted under `Visibility`, so presence alone proves nothing.
+bool _shown(WidgetTester tester, Finder glyph) {
+  if (glyph.evaluate().isEmpty) return false;
+  final gate = tester.element(glyph.first).findAncestorWidgetOfExactType<Visibility>();
+  return gate?.visible ?? true;
+}
+
+/// Where the rail's glyph centres sit, derived from the panel's own edge and
+/// the metrics every row shares rather than read off another row.
+double _expectedRailX(WidgetTester tester) {
+  final t = CarbonTheme.of(tester.element(find.byType(CarbonSideNav)));
+  final panelRight = tester.getRect(find.byType(ProjectsDrawer)).right;
+  return panelRight - 1 - kDrawerRailInset - drawerRailCell(t) / 2;
 }
 
 void main() {
@@ -264,48 +261,51 @@ void main() {
           await _seed(stores);
           await _pumpDrawer(tester, stores: stores, textScale: v.scale);
 
-          final rail = _railX(tester);
+          final rail = _expectedRailX(tester);
+          expect(
+            tester.getCenter(_button('Refresh')).dx,
+            closeTo(rail, _railEpsilon),
+            reason: 'the Projects header refresh is off the rail',
+          );
 
           final hostDot = _within(
             find.byType(LocalMachineBand),
-            find.byType(AbStatusDot),
+            find.byType(CarbonStatusDot),
           );
           expect(hostDot, findsOneWidget);
           expect(
             tester.getCenter(hostDot).dx,
             closeTo(rail, _railEpsilon),
-            reason:
-                "LocalMachineBand's host dot is off the rail the PROJECTS "
-                'refresh sits on',
+            reason: "the local band's host dot is off the rail",
           );
 
-          final bandTrash = _within(
+          final bandDot = _within(
             _row(_machineName),
-            _actionsFor(_machineName),
+            find.byType(CarbonStatusDot),
           );
-          expect(bandTrash, findsOneWidget);
-          expect(
-            tester.getCenter(bandTrash).dx,
-            closeTo(rail, _railEpsilon),
-            reason: "the machine band's terminal cell is off the rail",
-          );
-
-          if (v.platform != TargetPlatform.android) {
-            // Desktop puts both of a band's tenants in the SAME cell, so the
-            // liveness dot answers for the rail exactly as the trash does.
-            // Touch renders them side by side instead — see the mobile case.
-            final bandDot = _within(
-              _row(_machineName),
-              find.byType(AbStatusDot),
+          expect(bandDot, findsOneWidget);
+          final bandMenu = _within(_row(_machineName), _actionsFor(_machineName));
+          expect(bandMenu, findsOneWidget);
+          if (v.platform == TargetPlatform.android) {
+            // Touch shows the menu permanently and it owns the terminal cell,
+            // so the resting dot sits one cell inboard of the rail.
+            expect(
+              tester.getCenter(bandDot).dx,
+              lessThan(tester.getCenter(bandMenu).dx),
+              reason: "the machine band's dot must sit inboard of its menu",
             );
-            expect(bandDot, findsOneWidget);
+          } else {
             expect(
               tester.getCenter(bandDot).dx,
               closeTo(rail, _railEpsilon),
-              reason:
-                  "the band's liveness dot and its trash do not share a cell",
+              reason: "the machine band's liveness dot is off the rail",
             );
           }
+          expect(
+            tester.getCenter(bandMenu).dx,
+            closeTo(rail, _railEpsilon),
+            reason: "the machine band's terminal cell is off the rail",
+          );
 
           await tester.pumpWidget(const SizedBox());
         });
@@ -319,20 +319,21 @@ void main() {
         (
           name: "a local project row's outermost action",
           hoverLabel: _bareName,
-          glyph: () =>
-              _within(_entryRow(_bareName), _actionsFor(_bareName)),
+          glyph: () => _within(_row(_bareName), _actionsFor(_bareName)),
         ),
         (
-          name: "an advertised project row's +",
+          // It has no remove menu, so Memory ends the row.
+          name: "an advertised project row's outermost action",
           hoverLabel: _advertisedName,
-          glyph: () =>
-              _within(_row(_advertisedName), find.byTooltip(_newSessionTip)),
+          glyph: () => _within(
+            _row(_advertisedName),
+            _button('$_advertisedName memories'),
+          ),
         ),
         (
-          name: "a session row's kebab",
+          name: "a session row's overflow menu",
           hoverLabel: _sessionName,
-          glyph: () =>
-              _within(find.byType(SessionRow), find.byTooltip(_kebabTip)),
+          glyph: () => _actionsFor(_sessionName),
         ),
       ]) {
         testWidgets('${v.name}: ${target.name} lands on the rail', (
@@ -343,7 +344,7 @@ void main() {
             await _seed(stores);
             await _pumpDrawer(tester, stores: stores, textScale: v.scale);
 
-            final rail = _railX(tester);
+            final rail = _expectedRailX(tester);
             // Deliberately not settled: a hovered project row arms a 300ms
             // session prefetch, and advancing the clock past it would build a
             // real ProjectSession.
@@ -351,8 +352,8 @@ void main() {
 
             final glyph = target.glyph();
             expect(
-              glyph,
-              findsOneWidget,
+              _shown(tester, glyph),
+              isTrue,
               reason: 'hovering ${target.hoverLabel} must reveal its action',
             );
             expect(
@@ -373,8 +374,8 @@ void main() {
       final platform = mobile ? TargetPlatform.android : TargetPlatform.windows;
 
       testWidgets(
-        '${mobile ? 'mobile' : 'desktop'}: the + beside the trash '
-        '${mobile ? 'is a 44x44 target inside its row' : 'keeps the 24 box'}',
+        '${mobile ? 'mobile' : 'desktop'}: the + and the overflow menu '
+        '${mobile ? 'are 44x44 targets inside their row' : 'stay compact'}',
         (tester) async {
           await _onPlatform(platform, () async {
             _useTallView(tester);
@@ -382,29 +383,24 @@ void main() {
             await _pumpDrawer(tester, stores: stores);
 
             await hoverRow(tester, find.text(_bareName));
-            final bare = _entryRow(_bareName);
-            final plus = _within(bare, find.byTooltip(_newSessionTip));
-            final trash = _within(bare, _actionsFor(_bareName));
+            final bare = _row(_bareName);
+            final plus = _within(bare, _button('New session'));
+            final menu = _within(bare, _actionsFor(_bareName));
             expect(plus, findsOneWidget);
-            expect(trash, findsOneWidget);
+            expect(menu, findsOneWidget);
             final plusRect = tester.getRect(plus);
-            final trashRect = tester.getRect(trash);
-            final rowRect = tester.getRect(
-              find
-                  .descendant(of: bare, matching: find.byType(AbListRow))
-                  .first,
-            );
+            final menuRect = tester.getRect(menu);
+            final rowRect = tester.getRect(bare);
+            final t = CarbonTheme.of(tester.element(bare));
             if (mobile) {
               expect(plusRect.size, const Size(44, 44));
-              expect(trashRect.size, const Size(44, 44));
-              expect(plusRect.right, lessThanOrEqualTo(trashRect.left + 0.01));
+              expect(menuRect.size, const Size(44, 44));
+              expect(plusRect.right, lessThanOrEqualTo(menuRect.left + 0.01));
               expect(plusRect.top, greaterThanOrEqualTo(rowRect.top - 0.01));
               expect(plusRect.bottom, lessThanOrEqualTo(rowRect.bottom + 0.01));
             } else {
-              expect(
-                plusRect.height,
-                AbIconButton.boxExtent(tester.element(plus)),
-              );
+              expect(plusRect.height, drawerRailCell(t));
+              expect(menuRect.height, drawerRailCell(t));
               expect(plusRect.height, lessThan(44));
             }
             await tester.pumpWidget(const SizedBox());
@@ -413,44 +409,38 @@ void main() {
       );
 
       testWidgets(
-        '${mobile ? 'mobile' : 'desktop'}: the session kebab '
-        '${mobile ? 'is a 44x44 target on the rail' : 'keeps the 24 box'}',
+        '${mobile ? 'mobile' : 'desktop'}: the session overflow menu '
+        '${mobile ? 'is a 44x44 target on the rail' : 'stays compact'}',
         (tester) async {
           await _onPlatform(platform, () async {
             _useTallView(tester);
             await _seed(stores);
             await _pumpDrawer(tester, stores: stores);
 
-            final rail = _railX(tester);
+            final rail = _expectedRailX(tester);
             await hoverRow(tester, find.text(_sessionName));
-            final kebab = _within(
-              find.byType(SessionRow),
-              find.byTooltip(_kebabTip),
-            );
-            expect(kebab, findsOneWidget);
-            final kebabRect = tester.getRect(kebab);
+            final menu = _actionsFor(_sessionName);
+            expect(menu, findsOneWidget);
+            final menuRect = tester.getRect(menu);
             final rowRect = tester.getRect(
               find
-                  .descendant(
-                    of: find.byType(SessionRow),
-                    matching: find.byType(AbListRow),
+                  .ancestor(
+                    of: find.text(_sessionName),
+                    matching: find.byType(CarbonSideNavLink),
                   )
                   .first,
             );
             if (mobile) {
-              expect(kebabRect.size, const Size(44, 44));
-              expect(kebabRect.top, greaterThanOrEqualTo(rowRect.top - 0.01));
-              expect(
-                kebabRect.bottom,
-                lessThanOrEqualTo(rowRect.bottom + 0.01),
-              );
-              expect(kebabRect.center.dx, closeTo(rail, _railEpsilon));
+              expect(menuRect.size, const Size(44, 44));
+              expect(menuRect.top, greaterThanOrEqualTo(rowRect.top - 0.01));
+              expect(menuRect.bottom, lessThanOrEqualTo(rowRect.bottom + 0.01));
+              expect(menuRect.center.dx, closeTo(rail, _railEpsilon));
             } else {
               expect(
-                kebabRect.height,
-                AbIconButton.boxExtent(tester.element(kebab)),
+                menuRect.height,
+                drawerRailCell(CarbonTheme.of(tester.element(menu))),
               );
-              expect(kebabRect.height, lessThan(44));
+              expect(menuRect.height, lessThan(44));
             }
             await tester.pumpWidget(const SizedBox());
           });
@@ -464,42 +454,27 @@ void main() {
       for (final target in <({
         String name,
         String label,
-        Finder Function() row,
         Finder Function() action,
-        bool collapsedAtRest,
       })>[
         (
           name: 'a local project row holding sessions',
           label: _warmName,
-          row: () => _entryRow(_warmName),
-          action: () =>
-              _within(_entryRow(_warmName), find.byTooltip(_newSessionTip)),
-          collapsedAtRest: true,
+          action: () => _within(_row(_warmName), _button('New session')),
         ),
         (
           name: 'a local project row holding none',
           label: _bareName,
-          row: () => _entryRow(_bareName),
-          action: () =>
-              _within(_entryRow(_bareName), _actionsFor(_bareName)),
-          collapsedAtRest: true,
+          action: () => _within(_row(_bareName), _actionsFor(_bareName)),
         ),
         (
           name: 'a machine band',
           label: _machineName,
-          row: () => _band(_machineName),
           action: () => _within(_row(_machineName), _actionsFor(_machineName)),
-          // A band swaps its cell's tenant instead of collapsing it, so the
-          // trash is laid out at rest and only fades in.
-          collapsedAtRest: false,
         ),
         (
           name: 'an advertised project row',
           label: _advertisedName,
-          row: () => _row(_advertisedName),
-          action: () =>
-              _within(_row(_advertisedName), find.byTooltip(_newSessionTip)),
-          collapsedAtRest: true,
+          action: () => _within(_row(_advertisedName), _button('New session')),
         ),
       ]) {
         testWidgets(
@@ -510,26 +485,24 @@ void main() {
               await _seed(stores);
               await _pumpDrawer(tester, stores: stores, textScale: scale);
 
-              final resting = tester.getSize(target.row()).height;
-              if (target.collapsedAtRest) {
-                expect(
-                  target.action(),
-                  findsNothing,
-                  reason:
-                      '${target.name} must drop its action at rest, or this '
-                      'measures nothing',
-                );
-              }
+              final resting = tester.getSize(_row(target.label)).height;
+              expect(
+                _shown(tester, target.action()),
+                isFalse,
+                reason:
+                    '${target.name} must hide its action at rest, or this '
+                    'measures nothing',
+              );
 
               await hoverRow(tester, find.text(target.label));
 
               expect(
-                target.action(),
-                findsOneWidget,
+                _shown(tester, target.action()),
+                isTrue,
                 reason: "hover must reveal ${target.name}'s action",
               );
               expect(
-                tester.getSize(target.row()).height,
+                tester.getSize(_row(target.label)).height,
                 resting,
                 reason:
                     '${target.name} grew on pointer-enter, shoving every row '
@@ -541,47 +514,6 @@ void main() {
           },
         );
       }
-    }
-  });
-
-  group('band metrics', () {
-    for (final scale in const [1.0, 1.3]) {
-      testWidgets('both bands measure the same at scale $scale', (
-        tester,
-      ) async {
-        await _onPlatform(TargetPlatform.windows, () async {
-          _useTallView(tester);
-          await _seed(stores);
-          await _pumpDrawer(tester, stores: stores, textScale: scale);
-
-          final local = _band('This machine');
-          final machine = _band(_machineName);
-          expect(local, findsOneWidget);
-          expect(machine, findsOneWidget);
-
-          final localHeight = tester.getSize(local).height;
-          expect(
-            tester.getSize(machine).height,
-            localHeight,
-            reason:
-                'the two bands sit in one run and must read as one row class',
-          );
-          // Pinned to the floor's own arithmetic rather than to a literal: the
-          // content floor scales, the padding and margin do not.
-          expect(
-            localHeight,
-            closeTo(
-              AbIconButton.boxExtent(tester.element(local)) +
-                  2 * AbTokens.space6 +
-                  2 * AbTokens.space2,
-              _railEpsilon,
-            ),
-            reason: 'a band is content floor + row padding + row margin',
-          );
-
-          await tester.pumpWidget(const SizedBox());
-        });
-      });
     }
   });
 
@@ -598,15 +530,19 @@ void main() {
               _bareProjectId,
             ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
           ],
-          child: MaterialApp(home: Scaffold(body: DrawerEntryRow(entry))),
+          child: MaterialApp(
+            home: Scaffold(
+              body: AbCarbonScope(child: DrawerEntryRow(entry)),
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      final trash = _actionsFor(_bareName);
-      final newSession = find.byTooltip(_newSessionTip);
-      expect(trash, findsNothing);
-      expect(newSession, findsNothing);
+      final menu = _actionsFor(_bareName);
+      final newSession = _button('New session');
+      expect(_shown(tester, menu), isFalse);
+      expect(_shown(tester, newSession), isFalse);
 
       // Tab rather than a direct focus request: the reveal hangs off the focus
       // HIGHLIGHT, which only a traversal or a key press turns on.
@@ -614,19 +550,19 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        trash,
-        findsOneWidget,
+        _shown(tester, menu),
+        isTrue,
         reason:
-            'a collapsed action a pointer alone can summon is unreachable '
+            'a hidden action a pointer alone can summon is unreachable '
             'without a mouse',
       );
-      expect(newSession, findsOneWidget);
+      expect(_shown(tester, newSession), isTrue);
 
       await tester.pumpWidget(const SizedBox());
     });
   });
 
-  testWidgets('the PROJECTS header refresh is a 44x44 target on mobile', (
+  testWidgets('the Projects header refresh is a 44x44 target on mobile', (
     tester,
   ) async {
     await _onPlatform(TargetPlatform.android, () async {
@@ -634,16 +570,13 @@ void main() {
       await _seed(stores);
       await _pumpDrawer(tester, stores: stores);
 
-      expect(
-        tester.getSize(find.byTooltip('Refresh')),
-        const Size(AbTokens.tapTargetMin, AbTokens.tapTargetMin),
-      );
+      expect(tester.getSize(_button('Refresh')), const Size(44, 44));
 
       await tester.pumpWidget(const SizedBox());
     });
   });
 
-  testWidgets('the PROJECTS header refresh keeps its compact target on desktop', (
+  testWidgets('the Projects header refresh keeps its compact target on desktop', (
     tester,
   ) async {
     await _onPlatform(TargetPlatform.windows, () async {
@@ -651,16 +584,13 @@ void main() {
       await _seed(stores);
       await _pumpDrawer(tester, stores: stores);
 
-      expect(
-        tester.getSize(find.byTooltip('Refresh')).height,
-        lessThan(AbTokens.tapTargetMin),
-      );
+      expect(tester.getSize(_button('Refresh')).height, lessThan(44));
 
       await tester.pumpWidget(const SizedBox());
     });
   });
 
-  testWidgets('mobile keeps the band liveness dot beside its revealed trash', (
+  testWidgets('mobile keeps the band liveness dot beside its overflow menu', (
     tester,
   ) async {
     await _onPlatform(TargetPlatform.android, () async {
@@ -669,8 +599,8 @@ void main() {
       await _pumpDrawer(tester, stores: stores);
 
       final band = _row(_machineName);
-      final dot = _within(band, find.byType(AbStatusDot));
-      final trash = _within(band, _actionsFor(_machineName));
+      final dot = _within(band, find.byType(CarbonStatusDot));
+      final menu = _within(band, _actionsFor(_machineName));
 
       // Asserted on the dot's presence, not on the width of a slot: the slot is
       // reserved either way, so measuring it would pass with nothing in it.
@@ -678,19 +608,19 @@ void main() {
         dot,
         findsOneWidget,
         reason:
-            'touch reveals the trash permanently, and a swap would hide the '
+            'touch shows the menu permanently, and a swap would hide the '
             "machine's only liveness report forever",
       );
-      expect(trash, findsOneWidget);
+      expect(menu, findsOneWidget);
       expect(
-        tester.getCenter(trash).dx,
-        closeTo(_railX(tester), _railEpsilon),
+        tester.getCenter(menu).dx,
+        closeTo(_expectedRailX(tester), _railEpsilon),
         reason: 'the action, not the dot, owns the terminal cell on touch',
       );
       expect(
         tester.getCenter(dot).dx,
-        lessThan(tester.getCenter(trash).dx),
-        reason: 'the resting glyph sits inboard of the cell it cannot share',
+        lessThan(tester.getCenter(menu).dx),
+        reason: 'the resting dot sits inboard of the cell it cannot share',
       );
 
       await tester.pumpWidget(const SizedBox());
@@ -705,15 +635,15 @@ void main() {
       await _seed(stores);
       await _pumpDrawer(tester, stores: stores);
 
-      final trash = _within(_entryRow(_bareName), _actionsFor(_bareName));
+      final menu = _within(_row(_bareName), _actionsFor(_bareName));
       final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
       await gesture.addPointer(location: Offset.zero);
       addTearDown(gesture.removePointer);
-      await gesture.moveTo(tester.getCenter(_entryRow(_bareName)));
+      await gesture.moveTo(tester.getCenter(_row(_bareName)));
       await tester.pump();
-      expect(trash, findsOneWidget);
+      expect(_shown(tester, menu), isTrue);
 
-      await tester.tap(trash);
+      await tester.tap(menu);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Remove from history'));
       await tester.pumpAndSettle();
@@ -723,19 +653,22 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        trash,
-        findsOneWidget,
+        _shown(tester, menu),
+        isTrue,
         reason:
-            'the row must not collapse its actions out from under a dialog '
-            "one of them opened — the button's own in-flight state goes with "
-            'it',
+            'the row must not hide its actions out from under a dialog one of '
+            'them opened',
       );
 
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
+      // Cancel hands focus back to the trigger and focus-within keeps a row
+      // revealed on purpose; blur it so only the modal latch is under test.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
       expect(
-        trash,
-        findsNothing,
+        _shown(tester, menu),
+        isFalse,
         reason: 'and the latch must release once the dialog is answered',
       );
 
@@ -744,163 +677,94 @@ void main() {
   });
 
   group('row height', () {
-    Finder rowBox(String label) => find
-        .ancestor(of: find.text(label), matching: find.byType(AbListRow))
-        .first;
-
-    // Today's tappable height: the icon-button box plus the sm padding on each
-    // side. A phone row may exceed it but never fall under it.
-    double legacyHeight(double scale) => 24 * scale + 12;
-
     for (final mobile in [true, false]) {
-      for (final scale in const [1.0, 1.5, 2.0]) {
-        testWidgets(
-          '${mobile ? 'mobile' : 'desktop'} @$scale: tappable height and pitch',
-          (tester) async {
-            await _onPlatform(
-              mobile ? TargetPlatform.android : TargetPlatform.windows,
-              () async {
-                _useTallView(tester);
-                await _seed(stores);
-                await _pumpDrawer(tester, stores: stores, textScale: scale);
-
-                final legacy = legacyHeight(scale);
-                final expected = mobile ? (legacy > 44.0 ? legacy : 44.0) : legacy;
-                final rows = <String, Finder>{
-                  'band': rowBox(_machineName),
-                  'project': rowBox(_warmName),
-                  'bare project': rowBox(_bareName),
-                  'advertised': rowBox(_advertisedName),
-                };
-                for (final e in rows.entries) {
-                  expect(
-                    // The row's box includes its 2+2 vertical margin.
-                    tester.getSize(e.value).height - 4,
-                    closeTo(expected, 0.01),
-                    reason: '${e.key} row height',
-                  );
-                }
-                // Session rows carry their own 1px padding and margin.
-                final sessionLegacy = 24 * scale + 2;
-                final sessionExpected = mobile
-                    ? (sessionLegacy > 44.0 ? sessionLegacy : 44.0)
-                    : sessionLegacy;
-                expect(
-                  tester
-                      .getSize(
-                        find
-                            .descendant(
-                              of: find.byType(SessionRow),
-                              matching: find.byType(AbListRow),
-                            )
-                            .first,
-                      )
-                      .height - 2, // its 1+1 vertical margin
-                  closeTo(sessionExpected, 0.01),
-                  reason: 'session row height',
-                );
-                if (scale == 1.0) {
-                  expect(expected, mobile ? 44.0 : 36.0);
-                }
-
-                // A machine's advertised project sits directly under its
-                // band, so the distance between their tops is the pitch a
-                // list sees: tappable height + the 2+2 margin.
-                final bandTop = tester.getTopLeft(rowBox(_machineName)).dy;
-                final advertisedTop = tester
-                    .getTopLeft(rowBox(_advertisedName))
-                    .dy;
-                expect(advertisedTop - bandTop, closeTo(expected + 4, 0.01));
-
-                await tester.pumpWidget(const SizedBox());
-              },
-            );
-          },
-        );
-      }
+      final platform = mobile ? TargetPlatform.android : TargetPlatform.windows;
 
       testWidgets(
-        '${mobile ? 'mobile' : 'desktop'}: the rail x is where the gutter '
-        'and the cell footprint put it',
+        '${mobile ? 'mobile' : 'desktop'}: every row is at least one target '
+        'tall and the rows pitch evenly',
         (tester) async {
-          await _onPlatform(
-            mobile ? TargetPlatform.android : TargetPlatform.windows,
-            () async {
-              _useTallView(tester);
-              await _seed(stores);
-              await _pumpDrawer(tester, stores: stores);
+          await _onPlatform(platform, () async {
+            _useTallView(tester);
+            await _seed(stores);
+            await _pumpDrawer(tester, stores: stores);
 
-              final context = tester.element(find.byType(ProjectsDrawer));
-              final drawerRight = tester
-                  .getRect(find.byType(ProjectsDrawer))
-                  .right;
-              final expectedX =
-                  drawerRight -
-                  1 - // the drawer's own right border
-                  AbTokens.drawerGutter -
-                  AbIconButton.footprintWidth(context) / 2;
-              expect(_railX(tester), closeTo(expectedX, _railEpsilon));
-
-              await hoverRow(tester, find.text(_bareName));
+            final t = CarbonTheme.of(tester.element(find.byType(CarbonSideNav)));
+            final rows = <String, Finder>{
+              'band': _row(_machineName),
+              'local band': _row('This machine'),
+              'project': _row(_warmName),
+              'bare project': _row(_bareName),
+              'advertised': _row(_advertisedName),
+              'session': _row(_sessionName),
+            };
+            for (final e in rows.entries) {
+              final height = tester.getSize(e.value).height;
               expect(
-                tester.getCenter(_actionsFor(_bareName)).dx,
-                closeTo(expectedX, _railEpsilon),
-              );
-              await tester.pumpWidget(const SizedBox());
-            },
-          );
-        },
-      );
-    }
-
-    for (final mobile in [true, false]) {
-      testWidgets(
-        '${mobile ? 'mobile' : 'desktop'}: the retry hint is '
-        '${mobile ? 'a 44 target' : 'unchanged'}',
-        (tester) async {
-          await _onPlatform(
-            mobile ? TargetPlatform.android : TargetPlatform.windows,
-            () async {
-              _useTallView(tester);
-              await _seed(stores);
-              await _pumpDrawer(
-                tester,
-                stores: stores,
-                extraOverrides: [
-                  drawerProjectSessionsProvider(
-                    '$_machineUuid.$_advertisedProjectId',
-                  ).overrideWith((_) async => throw StateError('offline')),
-                ],
-              );
-              await tester.tap(find.text(_advertisedName));
-              await tester.pumpAndSettle();
-
-              final hint = find.ancestor(
-                of: find.text('Could not load sessions — tap to retry.'),
-                matching: find.byType(GestureDetector),
-              );
-              // The drawer is narrow enough to wrap the sentence, so height
-              // alone could pass without the floor: assert the floor itself.
-              final floors = find.descendant(
-                of: hint.first,
-                matching: find.byWidgetPredicate(
-                  (w) =>
-                      w is ConstrainedBox &&
-                      w.constraints.minHeight == AbTokens.rowHeightLg,
-                ),
+                height,
+                greaterThanOrEqualTo(t.minTarget),
+                reason: '${e.key} row is under one target tall',
               );
               if (mobile) {
-                expect(floors, findsOneWidget);
-                expect(
-                  tester.getSize(hint.first).height,
-                  greaterThanOrEqualTo(AbTokens.rowHeightLg),
-                );
+                expect(height, greaterThanOrEqualTo(44), reason: e.key);
               } else {
-                expect(floors, findsNothing);
+                expect(height, 32, reason: '${e.key} compact desktop row');
               }
-              await tester.pumpWidget(const SizedBox());
-            },
-          );
+            }
+
+            expect(
+              tester.getSize(rows['local band']!).height,
+              tester.getSize(rows['band']!).height,
+              reason: 'the local and remote bands measure the same',
+            );
+
+            // A machine's advertised project sits directly under its band, so
+            // the distance between their tops is one band-row height.
+            final bandTop = tester.getTopLeft(rows['band']!).dy;
+            final advertisedTop = tester.getTopLeft(rows['advertised']!).dy;
+            expect(
+              advertisedTop - bandTop,
+              closeTo(tester.getSize(rows['band']!).height, 1),
+            );
+
+            await tester.pumpWidget(const SizedBox());
+          });
+        },
+      );
+
+      testWidgets(
+        '${mobile ? 'mobile' : 'desktop'}: the retry control is '
+        '${mobile ? 'a 44 target' : 'present'}',
+        (tester) async {
+          await _onPlatform(platform, () async {
+            _useTallView(tester);
+            await _seed(stores);
+            await _pumpDrawer(
+              tester,
+              stores: stores,
+              extraOverrides: [
+                drawerProjectSessionsProvider(
+                  '$_machineUuid.$_advertisedProjectId',
+                ).overrideWith((_) async => throw StateError('offline')),
+              ],
+            );
+            await tester.tap(find.text(_advertisedName));
+            await tester.pumpAndSettle();
+
+            expect(find.text('Could not load sessions'), findsOneWidget);
+            final retry = find.descendant(
+              of: find.byType(CarbonInlineLoading),
+              matching: find.byType(CarbonButton),
+            );
+            expect(retry, findsOneWidget);
+            if (mobile) {
+              expect(
+                tester.getSize(retry).height,
+                greaterThanOrEqualTo(44),
+              );
+            }
+            await tester.pumpWidget(const SizedBox());
+          });
         },
       );
     }

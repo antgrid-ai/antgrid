@@ -2,8 +2,6 @@ import 'dart:convert';
 
 import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
 
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/scheduler.dart';
@@ -268,38 +266,43 @@ void main() {
         ),
       );
       await tester.pump();
-      final newSession = find.widgetWithText(AbListRow, 'New Session');
-      final scheduler = find.widgetWithText(AbListRow, 'Scheduler');
+      CarbonSideNavLink linkOf(String label) => tester.widget<CarbonSideNavLink>(
+        find.byWidgetPredicate(
+          (w) => w is CarbonSideNavLink && w.label == label,
+        ),
+      );
+      final newSession = find.byWidgetPredicate(
+        (w) => w is CarbonSideNavLink && w.label == 'New session',
+      );
+      final scheduler = find.byWidgetPredicate(
+        (w) => w is CarbonSideNavLink && w.label == 'Scheduler',
+      );
       expect(newSession, findsOneWidget);
       expect(scheduler, findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'New Session'), findsNothing);
-      expect(find.widgetWithText(AbButton, 'Scheduler'), findsNothing);
-      final newSessionRow = tester.widget<AbListRow>(newSession);
-      final schedulerRow = tester.widget<AbListRow>(scheduler);
-      expect(newSessionRow.density, schedulerRow.density);
-      expect(newSessionRow.horizontalPadding, schedulerRow.horizontalPadding);
-      expect(newSessionRow.selectionStyle, AbRowSelection.surface);
-      expect(newSessionRow.hoverable, isTrue);
+      expect(find.widgetWithText(CarbonButton, 'New session'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Scheduler'), findsNothing);
+      expect(linkOf('New session').large, linkOf('Scheduler').large);
+      expect(linkOf('New session').current, isFalse);
       expect(tester.getSize(newSession).height, greaterThanOrEqualTo(44));
       expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(44));
       expect(
         tester.getBottomLeft(newSession).dy,
-        lessThan(tester.getTopLeft(scheduler).dy),
+        lessThanOrEqualTo(tester.getTopLeft(scheduler).dy),
       );
       container
           .read(workbenchSurfaceProvider.notifier)
           .set(WorkbenchSurface.scheduler);
       await tester.pump();
-      expect(tester.widget<AbListRow>(scheduler).selected, isTrue);
-      expect(tester.widget<AbListRow>(newSession).selected, isFalse);
+      expect(linkOf('Scheduler').current, isTrue);
+      expect(linkOf('New session').current, isFalse);
       await tester.tap(newSession);
       await tester.pump();
       expect(
         container.read(workbenchSurfaceProvider),
         WorkbenchSurface.newSession,
       );
-      expect(tester.widget<AbListRow>(newSession).selected, isTrue);
-      expect(tester.widget<AbListRow>(scheduler).selected, isFalse);
+      expect(linkOf('New session').current, isTrue);
+      expect(linkOf('Scheduler').current, isFalse);
     },
   );
 

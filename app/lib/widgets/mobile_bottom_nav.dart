@@ -33,7 +33,7 @@ class MobileBottomNav extends ConsumerWidget {
   /// The focused session's, not the project's: the Handler tab renders one
   /// session, so a badge counting the rest would name a number that tab cannot
   /// account for. A sibling session speaks on its own drawer row instead
-  /// (`SessionHandlerBadge`).
+  /// (`CarbonSessionHandlerBadge`).
   final Map<WorkspaceView, int> badges;
 
   @override

@@ -4,6 +4,7 @@
 // on the default preset), so the brightest indicator in the sidebar was the one
 // session the user was already looking at. Liveness is not a status.
 import 'package:antgrid/design/ab_status_tone.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -14,6 +15,7 @@ import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/agent_work_status_dot.dart';
+import 'package:antgrid/widgets/carbon_status_dot.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -76,10 +78,9 @@ void main() {
   group('SessionRow leading dot', () {
     /// Pumps the row with [status] published on the same per-session advert map
     /// a real bridge fills, so the dot is reached the way production reaches it.
-    Future<AbStatusDot> pumpDot(
+    Future<CarbonWorkStatusDot> pumpDot(
       WidgetTester tester, {
       required bool running,
-      bool archived = false,
       AgentWorkStatus? status,
     }) async {
       final transport = FakeAgentTransport();
@@ -111,63 +112,74 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            home: Scaffold(
-              body: SessionRow(
-                entryId: _projectId,
-                session: _entry(running: running, archived: archived),
+            home: AbCarbonScope(
+              child: Scaffold(
+                body: SessionRow(
+                  entryId: _projectId,
+                  session: _entry(running: running),
+                ),
               ),
             ),
           ),
         ),
       );
-      await tester.pumpAndSettle();
-      // The slot holds either the bare fallback dot or an AgentWorkStatusDot
-      // wrapping one, so match the keyed widget itself as well as its subtree.
-      return tester.widget<AbStatusDot>(
-        find.descendant(
-          of: find.byKey(const ValueKey('session-status-dot-$_sessionId')),
-          matching: find.byType(AbStatusDot),
-          matchRoot: true,
-        ),
+      // Not pumpAndSettle: a working or needs-you dot pulses forever.
+      await tester.pump();
+      await tester.pump();
+      return tester.widget<CarbonWorkStatusDot>(
+        find.byKey(const ValueKey('session-status-dot-$_sessionId')),
       );
     }
 
     // The regression these two share: `running` used to mean a filled accent
     // dot, so opening a session lit it brighter than one that was actually
-    // doing something. Split so each pumps once — a second pumpWidget in one
+    // doing something. Split so each pumps once; a second pumpWidget in one
     // test leaves the first tree's riverpod dispose timer pending.
-    testWidgets('a visited, running, idle session is the hollow idle dot', (
+    testWidgets('a visited, running, idle session is the still idle dot', (
       tester,
     ) async {
       final dot = await pumpDot(tester, running: true);
-      expect(dot.style, AbDotStyle.hollow);
-      expect(dot.tone, AbStatusTone.agentIdle);
+      expect(dot.status, AgentWorkStatus.done);
+      expect(dot.pulse, isFalse);
     });
 
     testWidgets('an untouched session paints the same thing', (tester) async {
       final dot = await pumpDot(tester, running: false);
-      expect(dot.style, AbDotStyle.hollow);
-      expect(dot.tone, AbStatusTone.agentIdle);
+      expect(dot.status, AgentWorkStatus.done);
+      expect(dot.pulse, isFalse);
     });
 
-    testWidgets('archived is the one at-rest distinction still drawn', (
+    testWidgets('an unread answer takes the slot back, standing still', (
       tester,
     ) async {
-      final dot = await pumpDot(tester, running: false, archived: true);
-      expect(dot.tone, AbStatusTone.disabled);
-      expect(dot.style, AbDotStyle.hollow);
-    });
-
-    testWidgets('an unread answer takes the slot back', (tester) async {
-      // Not the fallback dot: the work status owns the slot the moment the
-      // agent has something to say, and an unheard answer is something to say.
       final dot = await pumpDot(
         tester,
         running: true,
         status: AgentWorkStatus.unread,
       );
-      expect(dot.tone, AbStatusTone.unread);
-      expect(dot.style, AbDotStyle.filled);
+      expect(dot.status, AgentWorkStatus.unread);
+      expect(dot.pulse, isFalse);
+    });
+
+    testWidgets('a working session pulses', (tester) async {
+      final dot = await pumpDot(
+        tester,
+        running: true,
+        status: AgentWorkStatus.working,
+      );
+      expect(dot.status, AgentWorkStatus.working);
+      expect(dot.pulse, isTrue);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a session that needs you pulses', (tester) async {
+      final dot = await pumpDot(
+        tester,
+        running: true,
+        status: AgentWorkStatus.attention,
+      );
+      expect(dot.pulse, isTrue);
+      await tester.pumpWidget(const SizedBox());
     });
   });
 }

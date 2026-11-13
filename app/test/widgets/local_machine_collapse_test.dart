@@ -9,6 +9,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
@@ -110,7 +111,9 @@ void main() {
           ),
         ),
       ],
-      child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+      child: MaterialApp(
+        home: AbCarbonScope(child: Scaffold(body: ProjectsDrawer())),
+      ),
     );
   }
 

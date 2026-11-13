@@ -1,22 +1,11 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
-import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
 import '../design/widgets/ab_agent_mark.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_dialog.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_scrollbar.dart';
-import '../design/widgets/ab_segmented.dart';
-import '../design/widgets/ab_separator.dart';
-import '../design/widgets/ab_touch_sizing.dart';
-import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show agentsCheckingCopy, agentsUnlistedCopy;
+import 'carbon_choice_tile.dart';
 
 /// The two workspaces a fork can run in, spelled the way `session:fork` spells
 /// them, so nothing has to translate between the control the user touched and
@@ -39,26 +28,29 @@ typedef SessionForkTarget = ({String tool, String label});
 
 typedef _TargetsAnswer = ({List<SessionForkTarget> targets, bool failed});
 
+
 /// Asks which workspace, and optionally which agent, a fork of this session
 /// should run in. Returns null if the user cancelled or dismissed.
 ///
-/// A segmented control rather than [AbConfirmDialog]'s opt-in toggle: that
-/// toggle is documented for "a second consequence the user may accept alongside
-/// the primary one — never for restating the primary action", and this is not a
-/// consequence to accept but the choice itself. Both alternatives have to be
-/// legible without touching anything, which is what [AbSegmented] exists for.
+/// Two choice tiles rather than a confirmation's opt-in toggle: a toggle is for
+/// a second consequence the user may accept alongside the primary one, and this
+/// is not a consequence to accept but the choice itself. Both alternatives, and
+/// what each does to uncommitted work, have to be legible without touching
+/// anything.
+///
+/// [context] must sit under a Carbon scope.
 ///
 /// [isolatedSource] is what "this workspace" MEANS, and it changes the promise
 /// rather than the wording: sharing an isolated session's checkout puts two
 /// agents somewhere only they can see, while sharing a main-tree session's puts
 /// the fork where every ordinary session already lives.
 ///
-/// The agent row appears whenever [source] is given, which a caller does only
+/// The agent list appears whenever [source] is given, which a caller does only
 /// for a bridge that can hand off to another agent: against any other, offering
-/// the row would fork silently into the same one. Whether a session can hand
+/// the list would fork silently into the same one. Whether a session can hand
 /// off is known up front and whether its machine has another agent is not, so
-/// the row never waits on [targets] to exist; the dialog opens at once and
-/// the agent list fills in when [targets] answers.
+/// the list never waits on [targets] to exist; the dialog opens at once and
+/// the agents fill in when [targets] answers.
 Future<SessionForkChoice?> promptSessionFork(
   BuildContext context, {
   required bool isolatedSource,
@@ -68,8 +60,8 @@ Future<SessionForkChoice?> promptSessionFork(
   // The dialog attaches its handler when it first builds; a route that never
   // does would leave a failed lookup to the zone as an uncaught error.
   targets?.ignore();
-  return showDialog<SessionForkChoice>(
-    context: context,
+  return showCarbonModal<SessionForkChoice>(
+    context,
     builder: (_) => _SessionForkDialog(
       isolatedSource: isolatedSource,
       source: source,
@@ -103,8 +95,6 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   // Null until [_SessionForkDialog.targets] answers.
   _TargetsAnswer? _answer;
 
-  final _agentScroll = ScrollController();
-
   @override
   void initState() {
     super.initState();
@@ -120,12 +110,6 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
 
   void _answered(_TargetsAnswer answer) {
     if (mounted) setState(() => _answer = answer);
-  }
-
-  @override
-  void dispose() {
-    _agentScroll.dispose();
-    super.dispose();
   }
 
   bool get _showAgentRow => widget.source != null;
@@ -159,170 +143,99 @@ class _SessionForkDialogState extends State<_SessionForkDialog> {
   // Inline rather than behind a dropdown: the list is short, picking is one
   // tap, and a lookup still running shows where the answer will land instead
   // of inside a menu the user has to open to find out.
-  Widget _agentList(BuildContext context) {
-    final colors = context.antgrid;
+  Widget _agentList(CarbonThemeData t) {
     final note = _agentNote;
-    final touchMin = AbTouchSizing.extentOf(context);
-    return Container(
+    return Column(
       key: const Key('fork-agent-selector'),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        border: Border.all(color: colors.borderDefault),
-        borderRadius: AbTokens.borderRadius5,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // The one part of the dialog that gives way on a short screen: the
-          // workspace choice and the buttons below it must stay in view, and a
-          // row cut part-way plus the thumb say the list goes on.
-          Flexible(
-            child: AbScrollbar(
-              controller: _agentScroll,
-              child: SingleChildScrollView(
-                controller: _agentScroll,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final t in _known)
-                      Semantics(
-                        inMutuallyExclusiveGroup: true,
-                        selected: t.tool == _tool,
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(minHeight: touchMin),
-                          child: AbListRow(
-                            density: AbRowDensity.sm,
-                            selected: t.tool == _tool,
-                            selectionStyle: AbRowSelection.surface,
-                            leading: AbAgentMark(
-                              toolKey: t.tool,
-                              label: t.label,
-                              size: AbTokens.space16,
-                              color: t.tool == _tool
-                                  ? colors.textPrimary
-                                  : null,
-                            ),
-                            title: Text(t.label),
-                            trailing: t.tool == _tool
-                                ? AbIcon(
-                                    AbIcons.check,
-                                    size: AbTokens.iconButtonGlyph,
-                                    color: colors.accent,
-                                  )
-                                : null,
-                            onTap: () => setState(() => _tool = t.tool),
-                          ),
-                        ),
-                      ),
-                  ],
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        CarbonContainedList(
+          label: null,
+          variant: CarbonContainedListVariant.disclosed,
+          children: [
+            for (final agent in _known)
+              CarbonContainedListRow(
+                title: agent.label,
+                selected: agent.tool == _tool,
+                leading: AbAgentMark(
+                  toolKey: agent.tool,
+                  label: agent.label,
+                  size: t.iconSize,
+                  color: t.colors.iconSecondary,
                 ),
+                onPressed: () => setState(() => _tool = agent.tool),
               ),
-            ),
-          ),
-          if (note != null) ...[
-            const AbSeparator.horizontal(),
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AbTokens.space12,
-                vertical: AbTokens.space8,
-              ),
-              child: Text(
-                note,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: colors.textMuted,
-                ),
-              ),
-            ),
           ],
+        ),
+        if (note != null) ...[
+          const SizedBox(height: CarbonSpacing.spacing02),
+          Text(
+            note,
+            style: t.typography.label.copyWith(color: t.colors.textSecondary),
+          ),
         ],
-      ),
+      ],
     );
   }
 
-  /// What the CURRENT pick does to the user's work, in one line. Whether
-  /// uncommitted changes come along is the one thing a user cannot see by
-  /// looking, so every line says it.
-  String get _consequence => switch (_workspace) {
+  /// What a pick does to the user's work, in one line. Whether uncommitted
+  /// changes come along is the one thing a user cannot see by looking, so every
+  /// choice says it.
+  String _consequence(String workspace) => switch (workspace) {
     forkWorkspaceCurrent when widget.isolatedSource =>
-      "Same files as this session, uncommitted changes included.",
-    forkWorkspaceCurrent =>
-      'Your main directory, uncommitted changes included.',
+      'Same files as this session, uncommitted changes included.',
+    forkWorkspaceCurrent => 'Your main directory, uncommitted changes included.',
     _ => 'Starts from the last commit, without uncommitted changes.',
   };
 
   @override
   Widget build(BuildContext context) {
-    final label = AbTokens.sansStyle(
-      fontSize: AbTokens.fontSm,
-      fontWeight: FontWeight.w600,
-    );
-    return Dialog(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 380),
-        child: Padding(
-          padding: const EdgeInsets.all(AbTokens.space16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+    final t = CarbonTheme.of(context);
+    final label = t.typography.label.copyWith(color: t.colors.textSecondary);
+    return CarbonModal(
+      title: 'Fork session',
+      size: CarbonModalSize.xs,
+      body: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_showAgentRow) ...[
+            Text('Agent', style: label),
+            const SizedBox(height: CarbonSpacing.spacing03),
+            _agentList(t),
+            const SizedBox(height: CarbonSpacing.spacing05),
+          ],
+          Text('Workspace', style: label),
+          const SizedBox(height: CarbonSpacing.spacing03),
+          Wrap(
+            spacing: CarbonSpacing.spacing03,
+            runSpacing: CarbonSpacing.spacing03,
             children: [
-              abDialogTitle('Fork session', onClose: _cancel),
-              const SizedBox(height: AbTokens.space12),
-              if (_showAgentRow) ...[
-                Text('Agent', style: label),
-                const SizedBox(height: AbTokens.space6),
-                Flexible(child: _agentList(context)),
-                const SizedBox(height: AbTokens.space16),
-              ],
-              Text('Workspace', style: label),
-              const SizedBox(height: AbTokens.space6),
-              // Left-aligned rather than stretched: [AbSegmented]'s own Row is
-              // `mainAxisSize.min`, so the surrounding Column's stretch hands it
-              // tight constraints it cannot use. Phones span the dialog instead,
-              // because their larger label text no longer fits the hugging
-              // width of a 346px dialog.
-              Align(
-                alignment: Alignment.centerLeft,
-                child: AbSegmented<String>(
-                  expand: isMobilePlatform,
-                  segments: const [
-                    AbSegment(
-                      value: forkWorkspaceCurrent,
-                      label: 'This workspace',
-                    ),
-                    AbSegment(value: forkWorkspaceCopy, label: 'New workspace'),
-                  ],
-                  selected: _workspace,
-                  onSelect: (v) => setState(() => _workspace = v),
+              for (final (value, name) in const [
+                (forkWorkspaceCurrent, 'This workspace'),
+                (forkWorkspaceCopy, 'New workspace'),
+              ])
+                CarbonChoiceTile(
+                  label: name,
+                  detail: _consequence(value),
+                  selected: _workspace == value,
+                  onPressed: () => setState(() => _workspace = value),
                 ),
-              ),
-              const SizedBox(height: AbTokens.space6),
-              Text(
-                _consequence,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: context.antgrid.textMuted,
-                ),
-              ),
-              const SizedBox(height: AbTokens.space16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  AbButton(label: 'Cancel', onTap: _cancel),
-                  const SizedBox(width: AbTokens.space8),
-                  AbButton(
-                    label: _crossAgent ? 'Continue' : 'Fork',
-                    variant: AbButtonVariant.primary,
-                    onTap: _confirm,
-                  ),
-                ],
-              ),
             ],
           ),
-        ),
+        ],
       ),
+      actions: [
+        CarbonModalAction(
+          label: 'Cancel',
+          kind: CarbonButtonKind.secondary,
+          onPressed: _cancel,
+        ),
+        CarbonModalAction(
+          label: _crossAgent ? 'Continue' : 'Fork',
+          onPressed: _confirm,
+        ),
+      ],
     );
   }
 }

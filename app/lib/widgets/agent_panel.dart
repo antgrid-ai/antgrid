@@ -878,7 +878,7 @@ class HandlerHeaderControl extends ConsumerWidget {
     // pill is one label and cannot name two sessions, and the tab it opens
     // renders only the focused one, so a merged count would send the user
     // somewhere that cannot account for it. What the siblings get instead is a
-    // count on their own drawer rows (`SessionHandlerBadge`) — the surface
+    // count on their own drawer rows (`CarbonSessionHandlerBadge`) — the surface
     // that survives whatever is in focus.
     final otherPending =
         state.pendingEscalations - (session?.pendingEscalations ?? 0);

@@ -2,12 +2,14 @@
 // bridge's answer arrives after the menu that asked is gone. A refusal must
 // still reach the user — as the force-delete question for uncommitted work, as
 // a toast for everything else — rather than ending with nothing on screen.
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/widgets/session_row.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,9 +62,9 @@ void main() {
         container: container,
         child: MaterialApp(
           builder: abToastHostBuilder,
-          home: const Scaffold(
+          home: AbCarbonScope(child: Scaffold(
             body: SessionRow(entryId: _projectId, session: _isolated),
-          ),
+          )),
         ),
       ),
     );
@@ -70,13 +72,13 @@ void main() {
     return transport;
   }
 
-  /// Kebab → Delete → confirm. Ends with the request sent and the row marked
+  /// Kebab to Delete to confirm. Ends with the request sent and the row marked
   /// as deleting, which pulses forever — so no pumpAndSettle past this point.
   Future<String> confirmDelete(
     WidgetTester tester,
     FakeAgentTransport transport,
   ) async {
-    await tester.tap(find.byTooltip('Session actions'));
+    await tester.tap(find.byType(CarbonOverflowMenu));
     // The menu resolves provider futures before it paints, which can need
     // real event-loop turns rather than fake-clock ones.
     await tester.runAsync(
@@ -92,8 +94,8 @@ void main() {
 
     // The precondition the fix exists for: the kebab that opened the menu is
     // gone by the time the bridge answers.
-    expect(find.byTooltip('Session actions'), findsNothing);
-    expect(find.text('DELETING'), findsOneWidget);
+    expect(find.byType(CarbonOverflowMenu), findsNothing);
+    expect(find.text('Deleting'), findsOneWidget);
 
     return transport.sent.lastWhere(
           (m) => m['type'] == 'session:delete',

@@ -13,9 +13,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/design/ab_tokens.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -25,6 +22,7 @@ import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/drawer/drawer_metrics.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -82,6 +80,34 @@ class _HasSession extends Notifier<bool> {
 }
 
 final _hasSession = NotifierProvider<_HasSession, bool>(_HasSession.new);
+
+/// The row's trailing actions stay mounted while hidden, so "revealed" is the
+/// state of the cell that wraps them, not whether a button can be found.
+bool _newSessionRevealed(WidgetTester tester) {
+  final button = find.byWidgetPredicate(
+    (w) => w is CarbonButton && w.semanticLabel == 'New session',
+    description: 'the New session button',
+  );
+  final cell = find.ancestor(
+    of: button,
+    matching: find.byWidgetPredicate(
+      (w) => w is Visibility && w.maintainFocusability && w.maintainSize,
+    ),
+  );
+  return tester.widget<Visibility>(cell.first).visible;
+}
+
+/// Whether the remove trigger's cell is shown, which is what a hover latch
+/// holds: the trigger itself stays mounted whether or not it is.
+bool _removeRevealed(WidgetTester tester) {
+  final cell = find.ancestor(
+    of: _actionsFor(_projectName),
+    matching: find.byWidgetPredicate(
+      (w) => w is Visibility && w.maintainFocusability && w.maintainSize,
+    ),
+  );
+  return tester.widget<Visibility>(cell.first).visible;
+}
 
 Finder _actionsFor(String name) => find.byWidgetPredicate(
   (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Actions for $name',
@@ -153,10 +179,12 @@ void main() {
               data: MediaQuery.of(
                 context,
               ).copyWith(textScaler: TextScaler.linear(textScale)),
-              child: Scaffold(
-                body: Align(
-                  alignment: Alignment.topLeft,
-                  child: SizedBox(width: 300, child: DrawerEntryRow(entry)),
+              child: AbCarbonScope(
+                child: Scaffold(
+                  body: Align(
+                    alignment: Alignment.topLeft,
+                    child: SizedBox(width: 300, child: DrawerEntryRow(entry)),
+                  ),
                 ),
               ),
             ),
@@ -171,7 +199,19 @@ void main() {
     final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await gesture.addPointer(location: Offset.zero);
     addTearDown(gesture.removePointer);
-    await gesture.moveTo(tester.getCenter(find.byType(DrawerEntryRow)));
+    // The title, not the row's middle: under touch density the actions fill
+    // the row's end and the middle lands on one, whose tooltip would then sit
+    // over the menu the test opens next and swallow its item tap.
+    await gesture.moveTo(
+      tester.getCenter(
+        find
+            .descendant(
+              of: find.byType(DrawerEntryRow),
+              matching: find.byType(Text),
+            )
+            .first,
+      ),
+    );
     await tester.pump();
     return gesture;
   }
@@ -282,7 +322,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(item, findsOneWidget, reason: 'the menu closed under the pointer');
-      expect(trigger, findsOneWidget, reason: 'the row un-revealed its action');
+      expect(
+        _removeRevealed(tester),
+        isTrue,
+        reason: 'the row un-revealed its action',
+      );
     });
 
     testWidgets('the row stays revealed in every frame of menu to modal', (
@@ -307,9 +351,9 @@ void main() {
       for (var i = 0; i < 40; i++) {
         await tester.pump(const Duration(milliseconds: 16));
         expect(
-          trigger,
-          findsOneWidget,
-          reason: 'trigger unmounted in frame $i of the hand-off',
+          _removeRevealed(tester),
+          isTrue,
+          reason: 'trigger hidden in frame $i of the hand-off',
         );
       }
       expect(find.text('Remove $_projectName?'), findsOneWidget);
@@ -317,8 +361,8 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(
-        trigger,
-        findsOneWidget,
+        _removeRevealed(tester),
+        isTrue,
         reason:
             'focus returned to the trigger, which keeps the row revealed once '
             'the latch is released',
@@ -375,8 +419,8 @@ void main() {
         await gesture.moveTo(const Offset(150, 400));
         await tester.pumpAndSettle();
         expect(
-          find.byTooltip('New session'),
-          findsNothing,
+          _newSessionRevealed(tester),
+          isFalse,
           reason: 'the latch outlived the trigger that took it',
         );
       } finally {
@@ -498,7 +542,7 @@ void main() {
   });
 
   group('footprint', () {
-    testWidgets('touch @2.0: the trigger stays a 44 square in a taller cell', (
+    testWidgets('touch @2.0: the trigger stays a 44 square in a 44 cell', (
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -509,7 +553,7 @@ void main() {
           find.byKey(const ValueKey('drawer-remove-cell')),
         );
         final trigger = tester.getRect(_actionsFor(_projectName));
-        expect(cell.height, greaterThan(44));
+        expect(cell.size, const Size(44, 44));
         expect(trigger.size, const Size(44, 44));
         expect(trigger.center, cell.center);
       } finally {
@@ -518,84 +562,48 @@ void main() {
     });
 
     for (final mobile in [false, true]) {
-      testWidgets(
-        '${mobile ? 'touch' : 'compact'}: the cell is the row-sized trigger box',
-        (tester) async {
-          debugDefaultTargetPlatformOverride = mobile
-              ? TargetPlatform.android
-              : TargetPlatform.windows;
-          try {
-            await pumpRow(tester, LocalProjectEntry(_project()));
-            await hover(tester);
-            final trigger = _actionsFor(_projectName);
-            expect(trigger, findsOneWidget);
+      testWidgets('${mobile ? 'touch' : 'compact'}: the cell is the rail square', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = mobile
+            ? TargetPlatform.android
+            : TargetPlatform.windows;
+        try {
+          await pumpRow(tester, LocalProjectEntry(_project()));
+          await hover(tester);
+          final trigger = _actionsFor(_projectName);
+          expect(trigger, findsOneWidget);
 
-            final cell = find.byKey(const ValueKey('drawer-remove-cell'));
-            final context = tester.element(find.byType(DrawerEntryRow));
-            final cellRect = tester.getRect(cell);
-            expect(cellRect.width, AbIconButton.footprintWidth(context));
-            // Touch is Apple's 44pt target: the cell fills the row's whole
-            // content height. Desktop keeps the 24px trigger box.
-            expect(
-              cellRect.height,
-              mobile ? 44.0 : AbIconButton.boxExtent(context),
-            );
-            if (mobile) {
-              expect(cellRect.size, const Size(44, 44));
-              // The tappable box, not the AbListRow's, which also carries the
-              // 2+2 margin around it.
-              final rowRect = tester
-                  .getRect(
-                    find
-                        .ancestor(of: cell, matching: find.byType(AbListRow))
-                        .first,
-                  )
-                  .deflate(AbTokens.space2);
-              expect(
-                rowRect.top <= cellRect.top + 0.01 &&
-                    rowRect.bottom >= cellRect.bottom - 0.01,
-                isTrue,
-                reason: 'the target lies within its own row: $cellRect vs $rowRect',
-              );
-              expect(cellRect.top - rowRect.top, closeTo(0, 0.01));
-              expect(rowRect.bottom - cellRect.bottom, closeTo(0, 0.01));
-            }
-            expect(
-              tester.getCenter(trigger),
-              cellRect.center,
-              reason: 'the trigger is centred on its cell',
-            );
-            if (mobile) {
-              // Touch Carbon's target is 44: the trigger is the whole cell,
-              // fully painted, with nothing clipping it.
-              expect(tester.getSize(trigger), const Size(44, 44));
-              expect(tester.getRect(trigger), cellRect);
-              expect(
-                find.descendant(of: cell, matching: find.byType(ClipRect)),
-                findsNothing,
-              );
-              expect(
-                find.descendant(of: cell, matching: find.byType(OverflowBox)),
-                findsNothing,
-              );
-            } else {
-              // Compact uses Carbon's extra-small trigger, which is the cell:
-              // what paints is exactly what takes the click.
-              expect(tester.getSize(trigger), const Size(24, 24));
-              expect(
-                find.ancestor(of: trigger, matching: find.byType(ClipRect)),
-                findsNothing,
-              );
-            }
-            expect(
-              AbCarbonScope.platformDensity,
-              mobile ? CarbonDensity.touch : CarbonDensity.compact,
-            );
-          } finally {
-            debugDefaultTargetPlatformOverride = null;
-          }
-        },
-      );
+          final cell = find.byKey(const ValueKey('drawer-remove-cell'));
+          final context = tester.element(find.byType(DrawerEntryRow));
+          final cellRect = tester.getRect(cell);
+          final rail = drawerRailCell(CarbonTheme.of(context));
+          expect(rail, mobile ? 44.0 : 24.0);
+          expect(cellRect.size, Size(rail, rail));
+          expect(
+            tester.getCenter(trigger),
+            cellRect.center,
+            reason: 'the trigger is centred on its cell',
+          );
+          // The trigger is the whole cell, fully painted, with nothing
+          // clipping it: what paints is exactly what takes the tap.
+          expect(tester.getRect(trigger), cellRect);
+          expect(
+            find.descendant(of: cell, matching: find.byType(ClipRect)),
+            findsNothing,
+          );
+          expect(
+            find.descendant(of: cell, matching: find.byType(OverflowBox)),
+            findsNothing,
+          );
+          expect(
+            AbCarbonScope.platformDensity,
+            mobile ? CarbonDensity.touch : CarbonDensity.compact,
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
     }
   });
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -13,7 +14,6 @@ import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/widgets/agent_work_status_dot.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 
 import '../helpers/test_store_overrides.dart';
@@ -36,7 +36,7 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
     overrides: overrides,
     child: MaterialApp(
       builder: abToastHostBuilder,
-      home: Scaffold(body: child),
+      home: AbCarbonScope(child: Scaffold(body: child)),
     ),
   );
 }
@@ -141,14 +141,14 @@ void main() {
         await tester.pump();
 
         expect(
-          find.byType(AgentWorkStatusDot),
+          find.byType(DrawerProjectAggregateDot),
           findsNothing,
           reason: 'expanded: the session rows below carry the dot',
         );
 
         await _toggleCollapse(tester, 'p1');
         expect(
-          find.byType(AgentWorkStatusDot),
+          find.byType(DrawerProjectAggregateDot),
           callToAction.contains(status) ? findsOneWidget : findsNothing,
           reason: 'collapsed: only a state that needs the user',
         );
@@ -156,7 +156,7 @@ void main() {
         // Re-expanding must put the trailing slot back to empty — the rollup
         // is bound to the collapse, not latched by having once been shown.
         await _toggleCollapse(tester, 'p1');
-        expect(find.byType(AgentWorkStatusDot), findsNothing);
+        expect(find.byType(DrawerProjectAggregateDot), findsNothing);
       });
     }
 

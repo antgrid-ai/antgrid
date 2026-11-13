@@ -4,7 +4,7 @@
 import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/demo_memory.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/models/memory.dart';
 import 'package:antgrid/providers/demo_mode.dart';
 import 'package:antgrid/providers/memory.dart';
@@ -254,8 +254,10 @@ void main() {
     );
     await tester.pump();
 
-    final row = find.widgetWithText(AbListRow, 'Memory');
-    expect(tester.widget<AbListRow>(row).enabled, isTrue);
+    final row = find.byWidgetPredicate(
+      (w) => w is CarbonSideNavLink && w.label == 'Memory',
+    );
+    expect(tester.widget<CarbonSideNavLink>(row).disabled, isFalse);
     await tester.tap(row);
     await tester.pump();
     expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
