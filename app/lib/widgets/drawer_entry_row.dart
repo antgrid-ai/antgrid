@@ -49,6 +49,7 @@ import '../providers/new_session_action.dart'
 import '../providers/new_session_picker.dart'
     show
         enterNewSession,
+        enterNewSessionForRemoteProject,
         selectedSourceIdProvider,
         selectedTargetProjectProvider;
 import '../providers/project_work_status.dart';
@@ -57,8 +58,10 @@ import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
+import '../services/control_plane_client.dart' show AdvertisedProject;
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
+import 'projects_drawer.dart' show closeDrawerIfOverlay;
 import 'session_isolation_badge.dart' show sessionIsIsolated;
 
 /// One row in the projects drawer.
@@ -1543,5 +1546,132 @@ class _CommandIndicator extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// The header row of one advertised project under an expanded machine row:
+/// its name, collapsed by default; a tap toggles its expansion. The host
+/// renders the session list beneath it as a sibling. The compound
+/// `<uuid>.<projectId>` regId is the key in [expandedDrawerIdsProvider] (its dot
+/// keeps it out of the machine-socket keep-alive set, which only counts
+/// bare-uuid ids).
+class AdvertisedProjectRow extends ConsumerStatefulWidget {
+  final String machineUuid;
+  final AdvertisedProject project;
+  const AdvertisedProjectRow({
+    super.key,
+    required this.machineUuid,
+    required this.project,
+  });
+
+  @override
+  ConsumerState<AdvertisedProjectRow> createState() =>
+      _AdvertisedProjectRowState();
+}
+
+class _AdvertisedProjectRowState extends ConsumerState<AdvertisedProjectRow> {
+  /// Keyboard focus reveals the row's action alongside hover: an affordance
+  /// that only a pointer can summon is unreachable by keyboard entirely.
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final regId = RemoteProject(
+      machineUuid: widget.machineUuid,
+      projectId: widget.project.projectId,
+    ).registrationId;
+    final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
+    final isWarm = ref.watch(
+      projectSessionRegistryProvider.select((open) => open.contains(regId)),
+    );
+    // Watched HERE and not inside the builder below. A `ref.watch` reached from
+    // a descendant element's build is closed and re-subscribed on every rebuild
+    // of this element — `ConsumerStatefulElement` retires whatever the build
+    // itself did not re-read before its children run — so hovering the row
+    // would cancel and resume the work-status subscription on each frame.
+    final needsUser =
+        !expanded && DrawerProjectAggregateDot.needsUser(ref, regId);
+    final demo = ref.watch(demoModeProvider);
+    final label = widget.project.label;
+    final name = (label != null && label.isNotEmpty)
+        ? label
+        : widget.project.projectId;
+    return HoverableDrawerRow(
+      builder: (context, hovered, pointerOver) {
+        final revealed = hovered || _focused;
+        // No permanent run-state glyph: it made the remote half of the
+        // drawer read as busier than the local half for no reason the user
+        // could name. The same collapsed-only attention dot a local project
+        // shows takes its place, built in the same order as
+        // `_DrawerEntryTrailing`'s — rollup inboard, action outermost — so
+        // the two halves of the drawer are one row grammar down to their
+        // metrics.
+        final aggregate = needsUser
+            ? DrawerProjectAggregateDot(entryId: regId)
+            : null;
+        final newSession = revealed
+            // Create a session in THIS project (not the machine): lands on
+            // New Session already targeting it — the user only picks the
+            // agent and hits Start.
+            ? AbIconButton(
+                icon: AbIcons.add,
+                tooltip: 'New session',
+                onTap: _newSessionForProject,
+              )
+            : null;
+        // The rail cell goes to whichever element is outermost, so the dot
+        // inherits it at rest instead of sitting a full cell inboard of
+        // every other row's trailing glyph.
+        final memory = revealed && !demo
+            ? MemoryProjectButton(
+                target: MemoryTarget.machine(machineId: widget.machineUuid),
+                projectId: widget.project.projectId,
+                projectName: name,
+              )
+            : null;
+        final cells = <Widget?>[];
+        if (newSession == null) {
+          if (aggregate != null) {
+            cells.add(AbRowTrailingCell(child: aggregate));
+          }
+        } else {
+          cells.add(aggregate);
+          cells.add(memory);
+          cells.add(AbRowTrailingCell(child: newSession));
+        }
+        return AbListRow(
+          horizontalPadding: 0,
+          density: AbRowDensity.sm,
+          contentFloor: AbRowContentFloor.touchRow,
+          // No `hoverable`: matches the local project row, which never took
+          // it — the fill previews selection, and this row's tap expands.
+          // See `DrawerBand` for the rule.
+          leading: DrawerProjectLeading(
+            expanded: expanded,
+            pointerOver: pointerOver,
+            warm: isWarm,
+          ),
+          title: Text(
+            name,
+            overflow: TextOverflow.ellipsis,
+            style: drawerProjectTitleStyle(context),
+          ),
+          trailing: AbRowTrailingCell.kit(cells),
+          margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+          onFocusChange: (v) => setState(() => _focused = v),
+          onTap: () =>
+              ref.read(expandedDrawerIdsProvider.notifier).toggle(regId),
+        );
+      },
+    );
+  }
+
+  void _newSessionForProject() {
+    enterNewSessionForRemoteProject(
+      ref.container,
+      machineUuid: widget.machineUuid,
+      project: widget.project,
+    );
+    closeDrawerIfOverlay(context);
   }
 }
