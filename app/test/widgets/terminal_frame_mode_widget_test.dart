@@ -3099,9 +3099,14 @@ void main() {
       );
       await tester.pump();
 
+      // The tab is forwarded to another loopback port when 5173 is already
+      // taken on this machine, so the link lands on the tab's own origin.
+      final localPort = preview.currentState.tabs
+          .singleWhere((t) => t.port == 5173)
+          .localPort;
       expect(
         preview.takeNavRequest(5173),
-        Uri.parse('http://localhost:5173/x?y=1#z'),
+        Uri.parse('http://localhost:$localPort/x?y=1#z'),
       );
     });
   });
