@@ -30,6 +30,7 @@ import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
 import '../util/external_open_target.dart';
+import 'carbon_badge_strip.dart';
 import 'carbon_session_badges.dart';
 import 'carbon_session_rename_dialog.dart';
 import 'carbon_status_dot.dart';
@@ -357,28 +358,22 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       // The badges are the row's status marks: they sit in the trailing slot the
       // session menu swaps into on hover, as every other drawer row's marks do.
       trailing: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: _badgeMaxWidth),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final badge in <Widget>[
-                CarbonSessionIsolationBadge(session: session, setup: setup),
-                CarbonSessionApprovalBadge(session: session),
-                CarbonSessionSharedWorkspaceBadge(session: session),
-                CarbonSessionHandlerBadge(
-                  entryId: widget.entryId,
-                  sessionId: session.id,
-                ),
-                CarbonSessionMemoryRestartBadge(
-                  entryId: widget.entryId,
-                  session: session,
-                ),
-                CarbonSessionDeletingBadge(deleting: deleting),
-              ])
-                Flexible(child: badge),
-            ],
-          ),
+        CarbonBadgeStrip(
+          maxWidth: _badgeMaxWidth,
+          children: [
+            CarbonSessionIsolationBadge(session: session, setup: setup),
+            CarbonSessionApprovalBadge(session: session),
+            CarbonSessionSharedWorkspaceBadge(session: session),
+            CarbonSessionHandlerBadge(
+              entryId: widget.entryId,
+              sessionId: session.id,
+            ),
+            CarbonSessionMemoryRestartBadge(
+              entryId: widget.entryId,
+              session: session,
+            ),
+            CarbonSessionDeletingBadge(deleting: deleting),
+          ],
         ),
       ],
       keepActionsRevealed: _menuOpen || _actionBusy,

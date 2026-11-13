@@ -11,10 +11,13 @@ import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/providers/open_checkout.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/widgets/carbon_session_badges.dart';
+import 'package:antgrid/widgets/drawer/drawer_metrics.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
@@ -221,5 +224,32 @@ void main() {
     );
     await tester.pumpWidget(const SizedBox());
     handle.dispose();
+  });
+
+  // Six badges share the trailing slot and all but one render nothing here, so
+  // a slot divided between them evenly leaves this tag an empty pill.
+  testWidgets('a lone tag shows its whole label', (tester) async {
+    await pumpRow(
+      tester,
+      session: _session(lacksMemory: true),
+      overrides: [
+        entryIsLocalCheckoutProvider.overrideWith((ref, id) async => true),
+        memoryDrawerEnabledProvider.overrideWith((ref) async => true),
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    // Either outcome is right, depending on how wide the font sets the label:
+    // the whole label fits, or the tag truncates at the full badge budget.
+    final label = tester.renderObject<RenderParagraph>(find.text('No Memory'));
+    final whole =
+        label.size.width >= label.getMaxIntrinsicWidth(double.infinity) - 0.01;
+    final tag = tester.getSize(find.byType(CarbonSessionMemoryRestartBadge));
+    expect(
+      whole || (tag.width - kDrawerPanelWidth / 2).abs() < 0.01,
+      isTrue,
+      reason: 'the tag got ${tag.width}px for a ${label.size.width}px label',
+    );
+    await tester.pumpWidget(const SizedBox());
   });
 }
