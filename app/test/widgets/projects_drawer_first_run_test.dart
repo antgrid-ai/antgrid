@@ -6,7 +6,7 @@
 //
 // The drawer is the only desktop surface mounted on BOTH routes, which is the
 // whole reason the checklist lives here rather than on the New Session canvas.
-import 'package:antgrid/design/widgets/ab_docked_column.dart';
+import 'package:antgrid/widgets/docked_column.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/providers/account_agents.dart';
@@ -177,12 +177,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    // AbDockedColumn never squeezes its header, so at this size the header is
+    // DockedColumn never squeezes its header, so at this size the header is
     // what runs past the bottom edge; the drawer's Clip.hardEdge is the only
     // thing keeping it off the pane beside it.
     expect(
       find.ancestor(
-        of: find.byType(AbDockedColumn),
+        of: find.byType(DockedColumn),
         matching: find.byType(ClipPath),
       ),
       findsOneWidget,

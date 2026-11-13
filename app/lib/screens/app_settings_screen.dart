@@ -18,6 +18,7 @@ import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../util/detached.dart';
+import '../widgets/carbon_choice_tile.dart';
 import '../widgets/carbon_confirm.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
@@ -239,12 +240,14 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     runSpacing: CarbonSpacing.spacing03,
                     children: [
                       for (final preset in AbThemePreset.values)
-                        _ChoiceTile(
+                        CarbonChoiceTile(
                           label: preset.label,
                           selected: settings.preset == preset,
-                          preview: preset == AbThemePreset.custom
-                              ? palette
-                              : (kPresets[preset] ?? kDefaultPalette),
+                          preview: _PreviewStrip(
+                            preset == AbThemePreset.custom
+                                ? palette
+                                : (kPresets[preset] ?? kDefaultPalette),
+                          ),
                           onPressed: () => run(
                             'set preset',
                             () => preset == AbThemePreset.custom
@@ -330,7 +333,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   runSpacing: CarbonSpacing.spacing03,
                   children: [
                     for (final step in _uiScaleSteps)
-                      _ChoiceTile(
+                      CarbonChoiceTile(
                         label: step.label,
                         detail: '${step.value.toStringAsFixed(2)}×',
                         selected: settings.uiScale == step.value,
@@ -622,111 +625,6 @@ class _SettingToggle extends StatelessWidget {
       ),
     ),
   );
-}
-
-/// One option of a single-choice setting, drawn as a Carbon selectable tile.
-///
-/// Each tile is its own tab stop and announces whether it is selected, so a
-/// choice is never carried by the border colour alone: the selected tile also
-/// carries a check mark. [preview] paints the preset's own colours as a strip
-/// above the label.
-class _ChoiceTile extends StatelessWidget {
-  const _ChoiceTile({
-    required this.label,
-    required this.selected,
-    required this.onPressed,
-    this.detail,
-    this.preview,
-  });
-
-  final String label;
-  final String? detail;
-  final bool selected;
-  final VoidCallback onPressed;
-  final AbColors? preview;
-
-  static const double _width = 148;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    return CarbonInteraction(
-      onPressed: onPressed,
-      label: label,
-      selected: selected,
-      inMutuallyExclusiveGroup: true,
-      excludeChildSemantics: true,
-      builder: (context, state, _) {
-        // A selected tile draws a thicker rule; the padding gives the extra
-        // pixel back so the tile does not change size when selected.
-        final border = selected ? 2.0 : 1.0;
-        return CarbonFocusRing(
-          visible: state.focusVisible,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: state.hovered ? c.layerHover01 : c.layer01,
-              border: Border.all(
-                color: selected ? c.borderInverse : c.borderTile01,
-                width: border,
-              ),
-            ),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minWidth: _width,
-                maxWidth: _width,
-                minHeight: t.minTarget,
-              ),
-              child: Padding(
-                padding: EdgeInsets.all(CarbonSpacing.spacing04 - border + 1),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (preview case final p?) ...[
-                      _PreviewStrip(p),
-                      const SizedBox(height: CarbonSpacing.spacing03),
-                    ],
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            label,
-                            style: t.typography.control.copyWith(
-                              color: c.textPrimary,
-                              fontWeight: selected
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                            ),
-                          ),
-                        ),
-                        if (selected)
-                          CarbonIcon(
-                            CarbonIcons.checkmarkFilled,
-                            size: 16,
-                            color: c.iconPrimary,
-                          ),
-                      ],
-                    ),
-                    if (detail != null) ...[
-                      const SizedBox(height: CarbonSpacing.spacing01),
-                      Text(
-                        detail!,
-                        style: t.typography.code.copyWith(
-                          color: c.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
 }
 
 /// The three colours that characterise a preset, side by side.

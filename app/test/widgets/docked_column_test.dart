@@ -1,7 +1,7 @@
 // Heights here are the measured ones from the projects drawer: 86 = the
 // New Session button + PROJECTS label on desktop, 185 = the tallest first-run
 // checklist (five steps + a two-line hint), 45 = UpdateRow / AccountFooter.
-import 'package:antgrid/design/widgets/ab_docked_column.dart';
+import 'package:antgrid/widgets/docked_column.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,7 +10,7 @@ const _pinnedRows = [
   SizedBox(key: ValueKey('footer'), height: 45),
 ];
 
-// No MaterialApp: AbDockedColumn imports package:flutter/widgets.dart only, and
+// No MaterialApp: DockedColumn imports package:flutter/widgets.dart only, and
 // a box-layout test that needs a theme or a Scaffold to run would be the first
 // place a Material dependency could creep in unnoticed.
 Widget harness(
@@ -27,7 +27,7 @@ Widget harness(
       child: SizedBox(
         width: 288,
         height: height,
-        child: AbDockedColumn(
+        child: DockedColumn(
           minBodyExtent: minBodyExtent,
           header: const SizedBox(key: ValueKey('header'), height: 86),
           body: ListView(
@@ -154,7 +154,7 @@ void main() {
 
   test('minBodyExtent must not be negative', () {
     expect(
-      () => AbDockedColumn(
+      () => DockedColumn(
         header: const SizedBox(),
         body: const SizedBox(),
         dock: const SizedBox(),

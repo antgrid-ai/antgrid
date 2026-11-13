@@ -12,11 +12,11 @@ import '../../providers/project_work_status.dart';
 import '../../providers/session_delete_pending.dart';
 import '../../providers/session_setup.dart';
 import '../../util/relative_time.dart';
-import '../agent_work_status_indicator.dart';
 import '../carbon_session_badges.dart';
+import '../carbon_status_dot.dart';
 import '../session_delete_flow.dart' show carbonSessionDeleteDialogs;
 import 'recent_session_row_actions.dart';
-import 'recent_sessions_summary.dart' show RecentGroupBy, workStatusLabel;
+import 'recent_sessions_summary.dart' show RecentGroupBy;
 
 /// One row of the Recent list: agent mark with a status dot, session name and
 /// badges, project, relative time, delete.
@@ -72,12 +72,15 @@ class CarbonRecentSessionRow extends ConsumerWidget {
     final originText = recentOriginText(row.origin, groupedBy);
     final command = recentRowCommandText(row);
 
-    final title = _accessibleName(
+    final title = sessionSpokenName(
+      name: row.session.name,
       status: status,
       agent: recentRowHasMark(row.session.tool) ? agentLabel : command,
       originText: originText,
       relTime: relTime,
+      bypassesApprovals: row.session.approvalPolicy == 'bypass',
       isolation: sessionIsolationSpoken(row.session, setup),
+      sharedWorkspace: row.session.sharedWorkspace,
       deleting: deleting,
     );
 
@@ -134,30 +137,6 @@ class CarbonRecentSessionRow extends ConsumerWidget {
         ),
       ],
     );
-  }
-
-  /// The contained row excludes its content from semantics, so this title is
-  /// the row's whole accessible name: everything the badges and both lines say.
-  String _accessibleName({
-    required AgentWorkStatus status,
-    required String? agent,
-    required String originText,
-    required String relTime,
-    required String? isolation,
-    required bool deleting,
-  }) {
-    final s = row.session;
-    return [
-      s.name,
-      workStatusLabel(status),
-      ?agent,
-      if (originText.isNotEmpty) originText,
-      relTime,
-      if (s.approvalPolicy == 'bypass') 'bypasses approvals',
-      ?isolation,
-      if (s.sharedWorkspace) 'shared workspace',
-      if (deleting) 'deleting',
-    ].join(', ');
   }
 }
 
@@ -336,7 +315,7 @@ class _SessionMark extends StatelessWidget {
     if (!recentRowHasMark(tool)) {
       return SizedBox.square(
         dimension: box,
-        child: Center(child: _StatusDot(status: status)),
+        child: Center(child: CarbonWorkStatusDot(status: status)),
       );
     }
     return SizedBox.square(
@@ -360,38 +339,9 @@ class _SessionMark extends StatelessWidget {
           Positioned(
             right: -CarbonSpacing.spacing01,
             bottom: -CarbonSpacing.spacing01,
-            child: _StatusDot(status: status),
+            child: CarbonWorkStatusDot(status: status),
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// A status dot in the Carbon support colours. Not a Carbon component: the
-/// indicator glyphs are too large to hang off an icon's corner. Only `done` is
-/// a ring, so it stays distinguishable from the live states without relying on
-/// its grey.
-class _StatusDot extends StatelessWidget {
-  const _StatusDot({required this.status});
-
-  final AgentWorkStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final color = agentWorkStatusDotColor(t, status) ?? t.colors.iconSecondary;
-    final hollow = agentWorkStatusDotHollow(status);
-    return ExcludeSemantics(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          // A ring is filled with the surface so the mark behind it does not
-          // show through.
-          color: hollow ? t.layer(CarbonLayer.of(context)) : color,
-          border: hollow ? Border.all(color: color) : null,
-        ),
-        child: const SizedBox.square(dimension: CarbonSpacing.spacing03),
       ),
     );
   }

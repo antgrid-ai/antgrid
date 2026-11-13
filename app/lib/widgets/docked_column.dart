@@ -44,8 +44,8 @@ import 'package:flutter/widgets.dart';
 /// through to [RenderBox]'s zeros), so a parent that shrink-wraps instead of
 /// bounding — [IntrinsicHeight], a min-size [Column], a [Wrap] — measures the
 /// whole panel at zero and collapses every slot without raising anything.
-class AbDockedColumn extends StatelessWidget {
-  const AbDockedColumn({
+class DockedColumn extends StatelessWidget {
+  const DockedColumn({
     super.key,
     required this.header,
     required this.body,
@@ -73,14 +73,14 @@ class AbDockedColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CustomMultiChildLayout(
-      delegate: _AbDockedColumnDelegate(
+      delegate: _DockedColumnDelegate(
         pinnedCount: pinned.length,
         minBodyExtent: minBodyExtent,
       ),
       children: [
-        LayoutId(id: _AbDockedSlot.header, child: header),
-        LayoutId(id: _AbDockedSlot.body, child: body),
-        LayoutId(id: _AbDockedSlot.dock, child: dock),
+        LayoutId(id: _DockedSlot.header, child: header),
+        LayoutId(id: _DockedSlot.body, child: body),
+        LayoutId(id: _DockedSlot.dock, child: dock),
         // Declared last so they paint over an oversized header on a panel too
         // short to hold one.
         for (var i = 0; i < pinned.length; i++)
@@ -90,7 +90,7 @@ class AbDockedColumn extends StatelessWidget {
   }
 }
 
-enum _AbDockedSlot { header, body, dock }
+enum _DockedSlot { header, body, dock }
 
 @immutable
 class _PinnedSlot {
@@ -106,8 +106,8 @@ class _PinnedSlot {
   int get hashCode => index;
 }
 
-class _AbDockedColumnDelegate extends MultiChildLayoutDelegate {
-  _AbDockedColumnDelegate({
+class _DockedColumnDelegate extends MultiChildLayoutDelegate {
+  _DockedColumnDelegate({
     required this.pinnedCount,
     required this.minBodyExtent,
   });
@@ -119,8 +119,8 @@ class _AbDockedColumnDelegate extends MultiChildLayoutDelegate {
   void performLayout(Size size) {
     final width = BoxConstraints.tightFor(width: size.width);
 
-    final header = layoutChild(_AbDockedSlot.header, width);
-    positionChild(_AbDockedSlot.header, Offset.zero);
+    final header = layoutChild(_DockedSlot.header, width);
+    positionChild(_DockedSlot.header, Offset.zero);
 
     // Every budget below is clamped at zero: a negative maxHeight is exactly
     // what a Flex hands its children here, and it is why one asserts.
@@ -135,23 +135,23 @@ class _AbDockedColumnDelegate extends MultiChildLayoutDelegate {
     }
 
     final dock = layoutChild(
-      _AbDockedSlot.dock,
+      _DockedSlot.dock,
       width.copyWith(maxHeight: remaining - math.min(minBodyExtent, remaining)),
     );
-    positionChild(_AbDockedSlot.dock, Offset(0, bottom - dock.height));
+    positionChild(_DockedSlot.dock, Offset(0, bottom - dock.height));
 
     layoutChild(
-      _AbDockedSlot.body,
+      _DockedSlot.body,
       BoxConstraints.tightFor(
         width: size.width,
         height: math.max(0.0, remaining - dock.height),
       ),
     );
-    positionChild(_AbDockedSlot.body, Offset(0, header.height));
+    positionChild(_DockedSlot.body, Offset(0, header.height));
   }
 
   @override
-  bool shouldRelayout(_AbDockedColumnDelegate oldDelegate) =>
+  bool shouldRelayout(_DockedColumnDelegate oldDelegate) =>
       oldDelegate.pinnedCount != pinnedCount ||
       oldDelegate.minBodyExtent != minBodyExtent;
 }

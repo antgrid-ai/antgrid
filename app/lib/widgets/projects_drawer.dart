@@ -7,7 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_docked_column.dart';
+import 'docked_column.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -118,7 +118,7 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
     return MenuBoundsScope(
       child: Container(
         width: 288,
-        // Clipped because [AbDockedColumn] never squeezes its header: on a
+        // Clipped because [DockedColumn] never squeezes its header: on a
         // window too short for even that, a truncated sidebar beats chrome
         // bleeding over the workspace beside it.
         clipBehavior: Clip.hardEdge,
@@ -133,7 +133,7 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
         // answers that by asserting, because its non-flex children are laid out
         // unbounded. Here the list yields first and the setup section scrolls
         // inside its own slot, so no height can overflow.
-        child: AbDockedColumn(
+        child: DockedColumn(
           // Keeps a strip of the list on screen however short the window gets;
           // otherwise a tall checklist leaves the sidebar showing no projects at
           // all. Borrowed from the token scale as a floor rather than measured
@@ -174,7 +174,7 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
   }
 }
 
-/// Fixed chrome above the project list. One slot because [AbDockedColumn]
+/// Fixed chrome above the project list. One slot because [DockedColumn]
 /// budgets per slot and neither of these may be compressed — the New Session
 /// button is the drawer's primary action.
 ///
@@ -205,7 +205,7 @@ class _TopChrome extends StatelessWidget {
 /// The setup checklist in its docked slot, between the project list and the
 /// pinned rows below it.
 ///
-/// Scrollable because this is the slot [AbDockedColumn] compresses once the
+/// Scrollable because this is the slot [DockedColumn] compresses once the
 /// list is at its floor — a bare section here would only move the overflow one
 /// level down. It scrolls only when it must: given room the viewport takes the
 /// content's own height, so the docked layout is unchanged at every size that

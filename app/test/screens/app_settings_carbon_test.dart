@@ -5,6 +5,7 @@ import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/settings_section.dart';
 import 'package:antgrid/screens/app_settings_screen.dart';
 import 'package:antgrid/services/app_settings_service.dart';
+import 'package:antgrid/widgets/carbon_choice_tile.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
@@ -158,9 +159,7 @@ void main() {
     tester,
   ) async {
     await _withSettings(tester, (_) async {
-      final tiles = find.byWidgetPredicate(
-        (w) => w.runtimeType.toString() == '_ChoiceTile',
-      );
+      final tiles = find.byType(CarbonChoiceTile);
       // Seven presets plus four sizes.
       expect(tiles, findsNWidgets(11));
       expect(
