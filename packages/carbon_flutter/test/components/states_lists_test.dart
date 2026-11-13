@@ -460,4 +460,81 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  group('side nav item states', () {
+    Widget nav({bool disabled = false, FocusNode? node}) => Align(
+      alignment: AlignmentDirectional.topStart,
+      child: CarbonSideNav(
+        width: 288,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CarbonSideNavLink(
+              label: 'Item',
+              disabled: disabled,
+              focusNode: node,
+              onPressed: () {},
+            ),
+          ],
+        ),
+      ),
+    );
+
+    Color? fillOf(WidgetTester tester) => (find
+            .descendant(
+              of: find.byType(CarbonSideNavLink),
+              matching: find.byType(ColoredBox),
+            )
+            .evaluate()
+            .map((e) => e.widget as ColoredBox)
+            .first
+            .color);
+
+    testWidgets('a press fills with background-active until release', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, nav());
+      expect(fillOf(tester), const Color(0x00000000));
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Item')),
+      );
+      await tester.pump();
+      expect(fillOf(tester), _t.colors.backgroundActive);
+      await press.up();
+      await tester.pump();
+      expect(fillOf(tester), const Color(0x00000000));
+    });
+
+    testWidgets('a disabled item shows no hover or press fill', (tester) async {
+      await pumpCarbon(tester, nav(disabled: true));
+      final press = await tester.startGesture(
+        tester.getCenter(find.text('Item')),
+      );
+      await tester.pump();
+      expect(fillOf(tester), const Color(0x00000000));
+      await press.up();
+    });
+
+    testWidgets('keyboard focus paints the 2px focus ring', (tester) async {
+      FocusManager.instance.highlightStrategy =
+          FocusHighlightStrategy.alwaysTraditional;
+      addTearDown(
+        () => FocusManager.instance.highlightStrategy =
+            FocusHighlightStrategy.automatic,
+      );
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await pumpCarbon(tester, nav(node: node));
+      node.requestFocus();
+      await tester.pump();
+      final ring = tester.widget<CarbonFocusRing>(
+        find.descendant(
+          of: find.byType(CarbonSideNavLink),
+          matching: find.byType(CarbonFocusRing),
+        ),
+      );
+      expect(ring.visible, isTrue);
+    });
+  });
 }

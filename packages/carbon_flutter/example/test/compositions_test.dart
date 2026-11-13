@@ -9,6 +9,7 @@ const List<String> _compositionIds = <String>[
   'row-actions-list',
   'searchable-picker',
   'confirmation-flow',
+  'navigation-sidebar',
 ];
 
 Future<void> _tapFinder(WidgetTester tester, Finder finder) async {

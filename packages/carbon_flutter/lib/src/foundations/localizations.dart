@@ -36,6 +36,7 @@ class CarbonLocalizations {
     this.on = 'On',
     this.off = 'Off',
     this.unavailableValue = 'Unavailable',
+    this.sideNavigation = 'Side navigation',
     String Function(int count)? resultCount,
     String Function(String label)? removeItem,
   }) : _resultCount = resultCount,
@@ -78,6 +79,9 @@ class CarbonLocalizations {
   /// Shown by a select or dropdown whose committed value is not among its
   /// options. The value is displayed as unavailable, never replaced.
   final String unavailableValue;
+
+  /// The default name of a side navigation landmark.
+  final String sideNavigation;
   final String Function(int count)? _resultCount;
   final String Function(String label)? _removeItem;
 

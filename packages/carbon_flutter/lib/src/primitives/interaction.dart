@@ -154,6 +154,7 @@ class CarbonInteraction extends StatefulWidget {
     this.onPressed,
     this.onLongPress,
     this.cancelOnLongPress = false,
+    this.onDoublePressed,
     this.onSecondaryTap,
     this.focusNode,
     this.autofocus = false,
@@ -197,6 +198,13 @@ class CarbonInteraction extends StatefulWidget {
   /// control whose content shows tooltips on a touch hold, so reading one
   /// does not also activate the control on release.
   final bool cancelOnLongPress;
+
+  /// A second primary press within the double-tap window of the first. The
+  /// first press still runs [onPressed] at once, as a browser's click does
+  /// before its dblclick, so single presses are never delayed; the second runs
+  /// only this. Keyboard activation never doubles. Carbon defines no
+  /// double-press (deviation C-double).
+  final VoidCallback? onDoublePressed;
 
   /// Secondary (right) click, for context menus. Ignored when disabled.
   final VoidCallback? onSecondaryTap;
@@ -533,31 +541,91 @@ class _CarbonInteractionState extends State<CarbonInteraction> {
             child: MouseRegion(
               onEnter: (_) => _handleHover(true),
               onExit: (_) => _handleHover(false),
-              child: GestureDetector(
-                behavior: widget.hitTestBehavior,
-                excludeFromSemantics: true,
-                onTapDown: enabled ? (_) => _handlePressDown() : null,
-                onTapCancel: enabled ? () => _setPressed(false) : null,
-                onTapUp: enabled ? _handleTapUp : null,
-                onTap: enabled ? _handlePointerTap : null,
-                onLongPress:
-                    enabled &&
-                        (widget.onLongPress != null || widget.cancelOnLongPress)
-                    ? () {
-                        _setPressed(false);
-                        widget.onLongPress?.call();
-                      }
-                    : null,
-                onSecondaryTap: enabled ? widget.onSecondaryTap : null,
-                child: widget.excludeChildSemantics
-                    ? ExcludeSemantics(child: visual)
-                    : visual,
+              child: _withSerialTaps(
+                enabled,
+                GestureDetector(
+                  behavior: widget.hitTestBehavior,
+                  excludeFromSemantics: true,
+                  onTapDown: enabled && !_serial
+                      ? (_) => _handlePressDown()
+                      : null,
+                  onTapCancel: enabled && !_serial
+                      ? () => _setPressed(false)
+                      : null,
+                  onTapUp: enabled && !_serial ? _handleTapUp : null,
+                  onTap: enabled && !_serial ? _handlePointerTap : null,
+                  onLongPress:
+                      enabled &&
+                          (widget.onLongPress != null ||
+                              widget.cancelOnLongPress)
+                      ? () {
+                          _setPressed(false);
+                          widget.onLongPress?.call();
+                        }
+                      : null,
+                  onSecondaryTap: enabled ? widget.onSecondaryTap : null,
+                  child: widget.excludeChildSemantics
+                      ? ExcludeSemantics(child: visual)
+                      : visual,
+                ),
               ),
             ),
           ),
         ),
       ),
     );
+  }
+
+  bool get _serial => widget.onDoublePressed != null;
+
+  // A SerialTapGestureRecognizer reports each press as it lands, where a plain
+  // onDoubleTap would hold every single tap back for the double-tap timeout to
+  // see whether a second one follows.
+  Widget _withSerialTaps(bool enabled, Widget child) {
+    // Always mounted, with no recognizers when unused, so toggling the double
+    // press handler never reparents the subtree.
+    return RawGestureDetector(
+      behavior: widget.hitTestBehavior,
+      excludeFromSemantics: true,
+      gestures: !enabled || !_serial
+          ? const <Type, GestureRecognizerFactory>{}
+          : <Type, GestureRecognizerFactory>{
+              SerialTapGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                    SerialTapGestureRecognizer
+                  >(
+                    // Primary only, so a secondary click still reaches
+                    // onSecondaryTap instead of counting as a tap.
+                    () => SerialTapGestureRecognizer(
+                      allowedButtonsFilter: (buttons) =>
+                          buttons == kPrimaryButton,
+                    ),
+                    (r) => r
+                      ..onSerialTapDown = ((_) => _handlePressDown())
+                      ..onSerialTapCancel = ((_) => _setPressed(false))
+                      ..onSerialTapUp = _handleSerialTapUp,
+                  ),
+            },
+      child: child,
+    );
+  }
+
+  void _handleSerialTapUp(SerialTapUpDetails details) {
+    final box = context.findRenderObject();
+    final inside =
+        box is! RenderBox ||
+        !box.hasSize ||
+        (Offset.zero & box.size).contains(
+          box.globalToLocal(details.globalPosition),
+        );
+    if (!inside) {
+      _setPressed(false);
+    } else if (details.count.isEven) {
+      _setPressed(false);
+      widget.onDoublePressed?.call();
+    } else {
+      _handleTap();
+    }
   }
 }
 

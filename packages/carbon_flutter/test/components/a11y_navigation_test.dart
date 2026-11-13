@@ -86,4 +86,53 @@ void main() {
       });
     }
   });
+
+  group('side nav', () {
+    testWidgets('names its landmark and its items', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpCarbon(
+        tester,
+        Align(
+          alignment: AlignmentDirectional.topStart,
+          child: CarbonSideNav(
+            width: 288,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CarbonSideNavLink(label: 'Home', current: true, onPressed: () {}),
+                CarbonSideNavMenu(
+                  title: 'Projects',
+                  expanded: true,
+                  onExpandedChanged: (_) {},
+                  children: [
+                    CarbonSideNavLink(
+                      label: 'Build',
+                      content: const Text('Visible only'),
+                      onPressed: () {},
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(
+        tester.getSemantics(find.byType(CarbonSideNav)).label,
+        'Side navigation',
+      );
+      final home = tester.getSemantics(find.text('Home'));
+      expect(home.flagsCollection.isButton, isTrue);
+      expect(home.flagsCollection.isSelected, Tristate.isTrue);
+      expect(
+        tester.getSemantics(find.text('Projects')).flagsCollection.isExpanded,
+        Tristate.isTrue,
+      );
+      // A content row is named by its label, not by whatever the content shows.
+      expect(find.bySemanticsLabel('Build'), findsOneWidget);
+      expect(find.bySemanticsLabel('Visible only'), findsNothing);
+      handle.dispose();
+    });
+  });
 }

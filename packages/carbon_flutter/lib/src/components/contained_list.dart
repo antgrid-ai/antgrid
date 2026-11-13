@@ -6,6 +6,7 @@ import '../foundations/theme.dart';
 import '../foundations/tokens.dart';
 import '../primitives/focus_ring.dart';
 import '../primitives/interaction.dart';
+import '../primitives/revealed_actions.dart';
 import 'inline_loading.dart';
 
 /// How a contained list sits in its surroundings.
@@ -451,21 +452,10 @@ class CarbonContainedListRow extends StatefulWidget {
 }
 
 class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
-  bool _hovered = false;
-  bool _focusWithin = false;
-
   VoidCallback? get _activate {
     final toggle = widget.onSelectedChanged;
     if (toggle != null) return () => toggle(!(widget.selected ?? false));
     return widget.onPressed;
-  }
-
-  void _setHover(bool value) {
-    if (_hovered != value) setState(() => _hovered = value);
-  }
-
-  void _setFocusWithin(bool value) {
-    if (_focusWithin != value) setState(() => _focusWithin = value);
   }
 
   @override
@@ -603,15 +593,9 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
       );
     }
 
-    final showActions =
-        !widget.revealActionsOnHover ||
-        theme.isTouch ||
-        _hovered ||
-        _focusWithin;
-
     // The selection bar paints above the content so a pressed or hovered fill
     // never hides it.
-    final row = DecoratedBox(
+    Widget rowWith(bool showActions) => DecoratedBox(
       position: DecorationPosition.foreground,
       decoration: BoxDecoration(
         border: selected
@@ -624,58 +608,43 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
             : null,
       ),
       child: DecoratedBox(
-      decoration: BoxDecoration(color: fill),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: <Widget>[
-          Expanded(child: target),
-          if (widget.actions.isNotEmpty)
-            Visibility(
-              visible: showActions,
-              maintainState: true,
-              maintainAnimation: true,
-              maintainSize: true,
-              maintainSemantics: true,
-              maintainFocusability: true,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  for (var i = 0; i < widget.actions.length; i++) ...<Widget>[
-                    if (i > 0) const SizedBox(width: CarbonSpacing.spacing02),
-                    widget.actions[i],
-                  ],
-                ],
+        decoration: BoxDecoration(color: fill),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: <Widget>[
+            Expanded(child: target),
+            if (widget.actions.isNotEmpty)
+              revealedActionsCell(
+                visible: showActions,
+                actions: widget.actions,
               ),
-            ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
 
-    return MouseRegion(
-        onEnter: (_) => _setHover(true),
-        onExit: (_) => _setHover(false),
-        child: Focus(
-          canRequestFocus: false,
-          skipTraversal: true,
-          onFocusChange: _setFocusWithin,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              row,
-              Padding(
-                padding: EdgeInsetsDirectional.only(
-                  start: inset ? CarbonSpacing.spacing05 : 0,
-                ),
-                child: SizedBox(
-                  height: CarbonBorders.hairline,
-                  child: ColoredBox(color: theme.borderSubtle(level)),
-                ),
-              ),
-            ],
+    return RevealedActionsHost(
+      builder: (context, hovered, focusWithin) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          rowWith(
+            !widget.revealActionsOnHover ||
+                theme.isTouch ||
+                hovered ||
+                focusWithin,
           ),
-        ),
+          Padding(
+            padding: EdgeInsetsDirectional.only(
+              start: inset ? CarbonSpacing.spacing05 : 0,
+            ),
+            child: SizedBox(
+              height: CarbonBorders.hairline,
+              child: ColoredBox(color: theme.borderSubtle(level)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -45,7 +45,8 @@ node tool/generate_colors.cjs <scratch-directory> lib/src/foundations/colors.dar
   > lib/src/foundations/colors.g.dart
 ```
 
-Icons (append names to `ICONS` in the script to bundle more):
+Icons (append names to `ICONS` in the script to bundle more; the bundled set
+includes `user`, `login` and `download` for account and update affordances):
 
 ```bash
 npm pack @carbon/icons@<version> && tar xzf carbon-icons-<version>.tgz

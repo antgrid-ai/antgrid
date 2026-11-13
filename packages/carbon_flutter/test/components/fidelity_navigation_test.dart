@@ -635,4 +635,100 @@ void main() {
       );
     });
   });
+
+  // ui-shell/side-nav/_side-nav.scss: link and menu blocks, padding 0 16,
+  // heading-compact-01 labels, 3px current bar, 16px icon box.
+  group('side nav', () {
+    Widget nav() => Align(
+      alignment: AlignmentDirectional.topStart,
+      child: CarbonSideNav(
+        width: 256,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CarbonSideNavLink(
+              label: 'Rest',
+              icon: CarbonIcons.folder,
+              onPressed: () {},
+            ),
+            CarbonSideNavLink(
+              label: 'Now',
+              current: true,
+              icon: CarbonIcons.folder,
+              onPressed: () {},
+            ),
+            const CarbonSideNavDivider(),
+          ],
+        ),
+      ),
+    );
+
+    testWidgets('link geometry follows the upstream block', (tester) async {
+      await pumpCarbon(tester, nav());
+      final rest = find.widgetWithText(CarbonSideNavLink, 'Rest');
+      expect(tester.getSize(rest).height, 32);
+      final icon = tester.getRect(
+        find.descendant(of: rest, matching: find.byType(CarbonIcon)),
+      );
+      expect(icon.size, const Size(16, 16));
+      expect(icon.left, 16);
+      // The icon gap is spacing-03 here, not upstream's 24.
+      expect(tester.getTopLeft(find.text('Rest')).dx, 16 + 16 + 8);
+      expect(
+        tester.getSize(find.byType(CarbonSideNavDivider)),
+        const Size(256, 17),
+      );
+    });
+
+    testWidgets('current row uses selected fill, 600 weight and a 3px bar', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, nav());
+      final now = find.widgetWithText(CarbonSideNavLink, 'Now');
+      final boxes = find
+          .descendant(of: now, matching: find.byType(DecoratedBox))
+          .evaluate()
+          .map((e) => e.widget as DecoratedBox)
+          .toList();
+      final bar =
+          (boxes.first.decoration as BoxDecoration).border!
+              as BorderDirectional;
+      expect(boxes.first.position, DecorationPosition.foreground);
+      expect(bar.start.width, 3);
+      expect(bar.start.color, _theme.colors.borderInteractive);
+      expect(
+        (boxes[1].decoration as BoxDecoration).color,
+        _theme.colors.backgroundSelected,
+      );
+      final style = DefaultTextStyle.of(tester.element(find.text('Now'))).style;
+      expect(style.fontWeight, FontWeight.w600);
+      expect(style.color, _theme.colors.textPrimary);
+    });
+
+    testWidgets('hover turns the label primary and fills with hover', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, nav());
+      final rest = find.widgetWithText(CarbonSideNavLink, 'Rest');
+      expect(
+        DefaultTextStyle.of(tester.element(find.text('Rest'))).style.color,
+        _theme.colors.textSecondary,
+      );
+      await _hover(tester, rest);
+      expect(
+        DefaultTextStyle.of(tester.element(find.text('Rest'))).style.color,
+        _theme.colors.textPrimary,
+      );
+      final fill = find
+          .descendant(of: rest, matching: find.byType(DecoratedBox))
+          .evaluate()
+          .map((e) => e.widget as DecoratedBox)
+          .firstWhere((b) => b.position == DecorationPosition.background);
+      expect(
+        (fill.decoration as BoxDecoration).color,
+        _theme.colors.backgroundHover,
+      );
+    });
+  });
 }

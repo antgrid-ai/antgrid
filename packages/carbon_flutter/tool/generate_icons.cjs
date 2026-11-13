@@ -80,6 +80,9 @@ const ICONS = [
   ['warningAltFilled', 'warning--alt--filled', false],
   ['warningAltInvertedFilled', 'warning--alt-inverted--filled', false],
   ['warningSquareFilled', 'warning-square--filled', false],
+  ['user', 'user', false],
+  ['login', 'login', false],
+  ['download', 'download', false],
 ];
 
 const attr = (el, name) => {

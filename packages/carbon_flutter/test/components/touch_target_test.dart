@@ -254,6 +254,48 @@ void main() {
         );
         expect(tester.getSize(save).height, 64);
       });
+
+      testWidgets('side nav link, menu and nested item', (tester) async {
+        await pumpCarbon(
+          tester,
+          Align(
+            alignment: AlignmentDirectional.topStart,
+            child: CarbonSideNav(
+              width: 288,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CarbonSideNavLink(label: 'Link', onPressed: () {}),
+                  CarbonSideNavLink(label: 'Large', large: true, onPressed: () {}),
+                  CarbonSideNavMenu(
+                    title: 'Menu',
+                    expanded: true,
+                    onExpandedChanged: (_) {},
+                    children: [
+                      CarbonSideNavLink(label: 'Nested', onPressed: () {}),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          theme: _touch(target),
+          size: const Size(800, 600),
+        );
+        Size size(String label) =>
+            tester.getSize(find.widgetWithText(CarbonSideNavLink, label));
+        expect(size('Link').height, target);
+        expect(size('Nested').height, target);
+        // Large is 48 where that clears the finger target, and never less.
+        expect(size('Large').height, target > 48 ? target : 48);
+        expect(
+          tester
+              .getSize(find.widgetWithText(CarbonSideNavMenu, 'Menu'))
+              .height,
+          greaterThanOrEqualTo(target + target),
+        );
+      });
     });
   }
 }

@@ -129,6 +129,12 @@ enum CarbonIcons {
   warningAltInvertedFilled,
   /// Carbon `warning-square--filled`.
   warningSquareFilled,
+  /// Carbon `user`.
+  user,
+  /// Carbon `login`.
+  login,
+  /// Carbon `download`.
+  download,
   ;
 
   /// Whether the glyph points along the reading direction and so mirrors
@@ -336,5 +342,14 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   CarbonIcons.warningSquareFilled: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M26.0022,4H5.998A1.998,1.998,0,0,0,4,5.998V26.002A1.998,1.998,0,0,0,5.998,28H26.0022A1.9979,1.9979,0,0,0,28,26.002V5.998A1.9979,1.9979,0,0,0,26.0022,4ZM14.8752,8h2.25V18h-2.25ZM16,24a1.5,1.5,0,1,1,1.5-1.5A1.5,1.5,0,0,1,16,24Z')],
     inner: <_CarbonIconPath>[_CarbonIconPath('M14.8751,8h2.25V18h-2.25ZM16,24a1.5,1.5,0,1,1,1.5-1.5A1.5,1.5,0,0,1,16,24Z')],
+  ),
+  CarbonIcons.user: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16,4a5,5,0,1,1-5,5,5,5,0,0,1,5-5m0-2a7,7,0,1,0,7,7A7,7,0,0,0,16,2Z'), _CarbonIconPath('M26,30H24V25a5,5,0,0,0-5-5H13a5,5,0,0,0-5,5v5H6V25a7,7,0,0,1,7-7h6a7,7,0,0,1,7,7Z')],
+  ),
+  CarbonIcons.login: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,30H14a2,2,0,0,1-2-2V25h2v3H26V4H14V7H12V4a2,2,0,0,1,2-2H26a2,2,0,0,1,2,2V28A2,2,0,0,1,26,30Z'), _CarbonIconPath('M14.59 20.59 18.17 17 4 17 4 15 18.17 15 14.59 11.41 16 10 22 16 16 22 14.59 20.59z')],
+  ),
+  CarbonIcons.download: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,24v4H6V24H4v4H4a2,2,0,0,0,2,2H26a2,2,0,0,0,2-2h0V24Z'), _CarbonIconPath('M26 14 24.59 12.59 17 20.17 17 2 15 2 15 20.17 7.41 12.59 6 14 16 24 26 14z')],
   ),
 };

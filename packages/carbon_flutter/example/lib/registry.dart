@@ -8,6 +8,7 @@ import 'pages/compositions/action_toolbar_page.dart';
 import 'pages/compositions/row_actions_list_page.dart';
 import 'pages/compositions/searchable_picker_page.dart';
 import 'pages/compositions/confirmation_flow_page.dart';
+import 'pages/compositions/navigation_sidebar_page.dart';
 import 'pages/contained_list_page.dart';
 import 'pages/data_table_page.dart';
 import 'pages/content_switcher_page.dart';
@@ -34,6 +35,8 @@ import 'pages/foundations/density_page.dart';
 import 'pages/foundations/icons_page.dart';
 import 'pages/foundations/layers_page.dart';
 import 'pages/foundations/typography_page.dart';
+import 'pages/progress_bar_page.dart';
+import 'pages/side_nav_page.dart';
 
 /// One page in the gallery's navigation.
 class GalleryEntry {
@@ -234,6 +237,18 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     builder: (_) => const IconIndicatorPage(),
   ),
   GalleryEntry(
+    id: 'side-nav',
+    title: 'Side nav',
+    group: 'Components',
+    builder: (_) => const SideNavPage(),
+  ),
+  GalleryEntry(
+    id: 'progress-bar',
+    title: 'Progress bar',
+    group: 'Components',
+    builder: (_) => const ProgressBarPage(),
+  ),
+  GalleryEntry(
     id: 'settings-form',
     title: 'Settings form',
     group: 'Compositions',
@@ -262,5 +277,11 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Confirmation flow',
     group: 'Compositions',
     builder: (_) => const ConfirmationFlowComposition(),
+  ),
+  GalleryEntry(
+    id: 'navigation-sidebar',
+    title: 'Navigation sidebar',
+    group: 'Compositions',
+    builder: (_) => const NavigationSidebarComposition(),
   ),
 ];
