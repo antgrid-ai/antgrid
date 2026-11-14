@@ -1091,10 +1091,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       _historyOpen = false;
       _dropQueuedSeek();
     }
-    // The booking below is per-PTY, but this State is not: only
-    // `terminal_screen` keys the wrapper by terminalId — the pinned pane
-    // (`terminal_list_view`), `terminal_detail_view` and the setup banner all
-    // mount it unkeyed, so swapping which terminal they show reuses this State.
+    // The booking below is per-PTY, but this State is not: `terminal_screen`
+    // and `terminal_list_view` key the wrapper by terminalId, but
+    // `terminal_detail_view` and the setup banner mount it unkeyed, so swapping
+    // which terminal they show reuses this State.
     // Carried over, `_lastSent*` gate the new PTY against the old one's grid,
     // and two tabs sitting at the same epoch (the common case — both 0, or both
     // bumped in lockstep by a reattach) make the bump no edge at all. That is
