@@ -46,7 +46,7 @@ double _height(WidgetTester tester) =>
 
 void main() {
   // Every field in the app but one is this one — the sign-in form,
-  // AbSearchField, AbUrlField, the composer — and the wrapping branch forks
+  // AbSearchField, the composer — and the wrapping branch forks
   // four visual properties away from it. Nothing else in the suite would
   // notice if the fork inverted.
   testWidgets('a single-line field is one row of exactly rowHeightSm', (

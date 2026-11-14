@@ -1832,8 +1832,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   /// Unconditional over anything that half contains: this dispatcher watches
   /// raw pointers (see [_buildTabletTouch]) so it fires even under a descendant
   /// that already won the arena. Nothing on the sidebar's half has a horizontal
-  /// drag of its own — the git rows' swipe tray, the workspace tab strip and
-  /// the code viewers all live in the context pane, whose half moves no pane at
+  /// drag of its own — the git rows' swipe tray and the code viewers both live
+  /// in the context pane, whose half moves no pane at
   /// all — so no arbitration is needed. Putting a swipeable widget beside the
   /// agent, or giving the context pane a fling again, brings that question
   /// back.

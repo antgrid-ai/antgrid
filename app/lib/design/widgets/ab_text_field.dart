@@ -17,7 +17,7 @@ import 'ab_touch_sizing.dart';
 /// [focusNode] to share state; when null, the widget owns and disposes
 /// its own instance.
 ///
-/// Higher-level fields ([AbSearchField], [AbUrlField], ...) compose
+/// Higher-level fields ([AbSearchField], ...) compose
 /// behavior on top of this primitive — keep this base feature-free
 /// (no debounce, no select-all, no validation).
 class AbTextField extends StatefulWidget {

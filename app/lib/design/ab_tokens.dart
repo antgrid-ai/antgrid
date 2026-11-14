@@ -293,7 +293,6 @@ abstract final class AbTokens {
 
   static const sidebarWidth = 48.0;
   static const commandTrayHeight = 44.0;
-  static const bottomNavHeight = 56.0;
   static const collapsedStripWidth = 36.0;
 
   /// Width of a slide-in projects pane, matching the width a `Scaffold.drawer`
@@ -330,13 +329,6 @@ abstract final class AbTokens {
 
   /// Deprecated: use [rowHeightMd]. Retained for migration only.
   static const statusHeaderHeight = rowHeightMd;
-
-  /// One cell of a swipe-action tray ([AbSwipeActions]). Wider than
-  /// [tapTargetMin] because the cell carries an icon AND its label — the label
-  /// is what keeps a revealed action nameable, and a swipe reveals the tray
-  /// from the trailing edge, so a wide cell is also the easier target coming
-  /// out of the drag.
-  static const swipeActionWidth = 84.0;
 
   // Icon button — one canonical visual box (chrome default).
   static const iconButtonBox = 24.0;

@@ -469,10 +469,18 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       await pumpWide(tester);
 
-      expect(find.byTooltip('Expand'), findsNothing);
-      expect(find.byTooltip('Restore'), findsNothing);
-      expect(find.byTooltip('Collapse panel'), findsNothing);
-      expect(find.byTooltip('Hide panel'), findsNothing);
+      // The strip's pane controls are Carbon tooltips, which byTooltip cannot
+      // see; look for their names inside the bar instead.
+      for (final label in ['Expand', 'Restore', 'Collapse panel', 'Hide panel']) {
+        expect(find.byTooltip(label), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byType(AgentBar),
+            matching: find.bySemanticsLabel(label),
+          ),
+          findsNothing,
+        );
+      }
       expect(find.byTooltip('Hide projects'), findsNothing);
       expect(find.byTooltip('Show projects'), findsNothing);
     } finally {

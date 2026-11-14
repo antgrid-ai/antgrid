@@ -60,6 +60,7 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
+import 'workspace_tab_bar.dart' show workspaceStripHeight;
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -594,8 +595,8 @@ class _HandlerMenuItem extends ConsumerWidget {
 }
 
 /// The agent panel's desktop header, mirroring `WorkspaceTabBar` across the
-/// resizable divider: same height, same background, so the two read as one
-/// continuous strip.
+/// resizable divider: both take `workspaceStripHeight`, so their tops and
+/// bottoms line up.
 ///
 /// Where the workspace side puts tabs, this side puts the session's identity —
 /// the breadcrumb and branch pill the window title bar used to carry. Moving
@@ -646,6 +647,7 @@ class AgentBar extends ConsumerWidget {
         ? const <Widget>[]
         : titleBarProjectActions(ref);
     return AbToolbar.custom(
+      height: workspaceStripHeight,
       children: [
         if (isMobilePlatform) ...[
           AbIconButton(
