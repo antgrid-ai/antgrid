@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
@@ -739,90 +741,194 @@ class _DrawToolBar extends StatelessWidget {
   }
 
   Widget _buildRow({required bool compact}) {
-    return Row(
+    // Every control stays on screen: when the tools and the actions cannot
+    // share a row they stack, rather than one group scrolling out of view.
+    // Controls reachable only by swiping the bar read as simply missing.
+    return _ToolBarLayout(
+      tools: _EdgeFadeScroll(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Only the tool/color cluster scrolls. Undo, Clear and the two ways
-            // out are all pinned outside it: a dozen cells cannot fit a
-            // phone-width panel, and a control someone needs to reach every
-            // time they overdraw must never be the one that scrolls out of
-            // view — that used to include Undo/Clear, which is exactly the bug
-            // this pinning fixes (they were reachable only by swiping the
-            // toolbar itself, and read as simply missing).
-            Flexible(
-              child: _EdgeFadeScroll(
-                trailing: const _BarDivider(),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CarbonContentSwitcher<PreviewDrawTool>(
-                      size: CarbonContentSwitcherSize.small,
-                      iconOnly: true,
-                      semanticLabel: 'Drawing tools',
-                      value: tool,
-                      onChanged: onTool,
-                      options: [
-                        for (final (kind, icon, label) in _tools)
-                          CarbonOption<PreviewDrawTool>(
-                            value: kind,
-                            label: label,
-                            icon: CarbonIcon(icon),
-                          ),
-                      ],
-                    ),
-                    const _BarDivider(),
-                    _ColorPickerCell(pen: pen, onPen: onPen),
-                  ],
-                ),
-              ),
-            ),
-            CarbonButton.iconOnly(
-              icon: const CarbonIcon(CarbonIcons.undo),
-              semanticLabel: 'Undo',
-              onPressed: hasMarks ? onUndo : null,
-            ),
-            CarbonButton.iconOnly(
-              icon: const CarbonIcon(CarbonIcons.erase),
-              semanticLabel: 'Clear',
-              onPressed: hasMarks ? onClear : null,
+            CarbonContentSwitcher<PreviewDrawTool>(
+              size: CarbonContentSwitcherSize.small,
+              iconOnly: true,
+              semanticLabel: 'Drawing tools',
+              value: tool,
+              onChanged: onTool,
+              options: [
+                for (final (kind, icon, label) in _tools)
+                  CarbonOption<PreviewDrawTool>(
+                    value: kind,
+                    label: label,
+                    icon: CarbonIcon(icon),
+                  ),
+              ],
             ),
             const _BarDivider(),
-            CarbonButton.iconOnly(
-              icon: const CarbonIcon(CarbonIcons.close),
-              semanticLabel: 'Close',
-              onPressed: onClose,
-            ),
-            const SizedBox(width: CarbonSpacing.spacing03),
-            if (compact)
-              CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.send),
-                semanticLabel: 'Send',
-                kind: CarbonButtonKind.primary,
-                busy: busy,
-                onPressed: onSend,
-              )
-            else
-              CarbonButton(label: 'Send', busy: busy, onPressed: onSend),
+            _ColorPickerCell(pen: pen, onPen: onPen),
           ],
+        ),
+      ),
+      divider: const _BarDivider(),
+      actions: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.undo),
+            semanticLabel: 'Undo',
+            onPressed: hasMarks ? onUndo : null,
+          ),
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.erase),
+            semanticLabel: 'Clear',
+            onPressed: hasMarks ? onClear : null,
+          ),
+          const _BarDivider(),
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.close),
+            semanticLabel: 'Close',
+            onPressed: onClose,
+          ),
+          const SizedBox(width: CarbonSpacing.spacing03),
+          if (compact)
+            CarbonButton.iconOnly(
+              icon: const CarbonIcon(CarbonIcons.send),
+              semanticLabel: 'Send',
+              kind: CarbonButtonKind.primary,
+              busy: busy,
+              onPressed: onSend,
+            )
+          else
+            CarbonButton(label: 'Send', busy: busy, onPressed: onSend),
+        ],
+      ),
     );
   }
 }
 
 const double _kCompactBarWidth = 360;
 
-/// A horizontal scroller that fades whichever edge has content beyond it,
-/// followed by [trailing], which hides while the end edge is faded.
+/// The bar's two groups, [tools] (shapes and colour) and [actions] (Undo,
+/// Clear and the two ways out), on one row split by [divider] when both fit
+/// at their natural width; otherwise stacked tools-over-actions with the
+/// divider dropped, each row centred.
 ///
-/// Clipped hard, the tool cluster cuts the content switcher mid-cell, and its
-/// own cell divider lands beside the pinned divider that follows the cluster,
-/// reading as a doubled rule rather than as more tools to scroll to. The fade
-/// is the separator while it shows. [trailing] keeps its width when hidden:
-/// resizing it would resize the viewport and flip the fade back.
+/// Decided from the groups' intrinsic widths rather than a fixed breakpoint,
+/// because those move with density, text scale and the Send label.
+class _ToolBarLayout extends MultiChildRenderObjectWidget {
+  _ToolBarLayout({
+    required Widget tools,
+    required Widget divider,
+    required Widget actions,
+  }) : super(children: <Widget>[tools, divider, actions]);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderToolBarLayout();
+}
+
+class _ToolBarParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderToolBarLayout extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _ToolBarParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _ToolBarParentData> {
+  static const double _rowGap = CarbonSpacing.spacing02;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _ToolBarParentData) {
+      child.parentData = _ToolBarParentData();
+    }
+  }
+
+  (RenderBox, RenderBox, RenderBox) get _groups {
+    final tools = firstChild!;
+    final divider = childAfter(tools)!;
+    return (tools, divider, childAfter(divider)!);
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    final (tools, _, actions) = _groups;
+    return math.max(
+      tools.getMinIntrinsicWidth(double.infinity),
+      actions.getMinIntrinsicWidth(double.infinity),
+    );
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    final (tools, divider, actions) = _groups;
+    return tools.getMaxIntrinsicWidth(double.infinity) +
+        divider.getMaxIntrinsicWidth(double.infinity) +
+        actions.getMaxIntrinsicWidth(double.infinity);
+  }
+
+  @override
+  void performLayout() {
+    final (tools, divider, actions) = _groups;
+    final loose = BoxConstraints(maxWidth: constraints.maxWidth);
+    // Half a pixel of slack: intrinsic and laid-out widths can differ by
+    // rounding, which must not flip a bar that exactly fits into two rows.
+    final stacked =
+        computeMaxIntrinsicWidth(double.infinity) > constraints.maxWidth + 0.5;
+    tools.layout(loose, parentUsesSize: true);
+    actions.layout(loose, parentUsesSize: true);
+    divider.layout(
+      stacked ? BoxConstraints.tight(Size.zero) : loose,
+      parentUsesSize: true,
+    );
+    final toolsData = tools.parentData! as _ToolBarParentData;
+    final dividerData = divider.parentData! as _ToolBarParentData;
+    final actionsData = actions.parentData! as _ToolBarParentData;
+    if (stacked) {
+      final width = math.max(tools.size.width, actions.size.width);
+      toolsData.offset = Offset((width - tools.size.width) / 2, 0);
+      dividerData.offset = Offset.zero;
+      actionsData.offset = Offset(
+        (width - actions.size.width) / 2,
+        tools.size.height + _rowGap,
+      );
+      size = constraints.constrain(
+        Size(width, tools.size.height + _rowGap + actions.size.height),
+      );
+      return;
+    }
+    final height = math.max(
+      tools.size.height,
+      math.max(divider.size.height, actions.size.height),
+    );
+    var x = 0.0;
+    for (final (child, data) in [
+      (tools, toolsData),
+      (divider, dividerData),
+      (actions, actionsData),
+    ]) {
+      data.offset = Offset(x, (height - child.size.height) / 2);
+      x += child.size.width;
+    }
+    size = constraints.constrain(Size(x, height));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+}
+
+/// A horizontal scroller that fades whichever edge has content beyond it.
+///
+/// The tool cluster scrolls only in a panel narrower than the cluster itself,
+/// such as a quarter-width touch pane. Clipped hard there, it cuts the content
+/// switcher mid-cell and reads as a stray rule rather than as more tools.
 class _EdgeFadeScroll extends StatefulWidget {
-  const _EdgeFadeScroll({required this.child, required this.trailing});
+  const _EdgeFadeScroll({required this.child});
 
   final Widget child;
-  final Widget trailing;
 
   @override
   State<_EdgeFadeScroll> createState() => _EdgeFadeScrollState();
@@ -861,7 +967,7 @@ class _EdgeFadeScrollState extends State<_EdgeFadeScroll> {
     // dstIn keeps only the mask's alpha, so any opaque token serves as "show".
     final show = CarbonTheme.of(context).colors.textPrimary;
     const hide = Color(0x00000000);
-    final masked = ShaderMask(
+    return ShaderMask(
       blendMode: BlendMode.dstIn,
       shaderCallback: (bounds) {
         final stop = bounds.width <= 0
@@ -878,15 +984,6 @@ class _EdgeFadeScrollState extends State<_EdgeFadeScroll> {
         ).createShader(bounds);
       },
       child: scroller,
-    );
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Flexible(child: masked),
-        ExcludeSemantics(
-          child: Opacity(opacity: _fadeEnd ? 0 : 1, child: widget.trailing),
-        ),
-      ],
     );
   }
 }

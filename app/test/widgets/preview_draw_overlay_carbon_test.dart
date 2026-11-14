@@ -80,46 +80,77 @@ void main() {
     expect(abWidgetsInScope(tester), isEmpty);
   });
 
-  testWidgets('a clipped tool cluster hides the divider after it until '
-      'scrolled to its end', (tester) async {
-    // The cluster's own cell divider is what a hard clip leaves beside the
-    // pinned one; while the end edge fades, the pinned one must not show.
-    double dividerOpacity() => tester
-        .widget<Opacity>(
-          find.byWidgetPredicate(
-            (w) =>
-                w is Opacity &&
-                w.child.runtimeType.toString() == '_BarDivider',
-          ),
-        )
-        .opacity;
+  const everyControl = [
+    'Freehand',
+    'Line',
+    'Rectangle',
+    'Ellipse',
+    'Note',
+    'Pen color',
+    'Undo',
+    'Clear',
+    'Close',
+    'Send',
+  ];
 
-    await _pump(tester, size: const Size(400, 600));
-    expect(dividerOpacity(), 0);
+  Rect rectOf(WidgetTester tester, String label) =>
+      tester.getRect(find.bySemanticsLabel(label).first);
 
-    await tester.drag(
-      find.byType(SingleChildScrollView).last,
-      const Offset(-400, 0),
+  testWidgets('a phone-width bar stacks the actions under the tools with '
+      'every control on screen', (tester) async {
+    await _pump(tester, size: const Size(390, 700));
+    final screen = Offset.zero & tester.view.physicalSize;
+    for (final label in everyControl) {
+      final rect = rectOf(tester, label);
+      expect(
+        screen.contains(rect.topLeft) && screen.contains(rect.bottomRight),
+        isTrue,
+        reason: '$label at $rect is off screen',
+      );
+    }
+    // Inside the screen is not enough: a clipped cell still lies within it.
+    final viewport = tester.getRect(find.byType(Scrollable).last);
+    for (final label in everyControl.take(6)) {
+      final rect = rectOf(tester, label);
+      expect(
+        rect.left >= viewport.left - 0.5 && rect.right <= viewport.right + 0.5,
+        isTrue,
+        reason: '$label at $rect is clipped by the tool scroller $viewport',
+      );
+    }
+    expect(
+      tester
+          .state<ScrollableState>(find.byType(Scrollable).last)
+          .position
+          .maxScrollExtent,
+      0,
+      reason: 'no tool may sit behind a swipe',
     );
-    await tester.pumpAndSettle();
-    expect(dividerOpacity(), 1);
+    expect(
+      rectOf(tester, 'Undo').top,
+      greaterThanOrEqualTo(rectOf(tester, 'Freehand').bottom),
+    );
+    expect(
+      rectOf(tester, 'Send').center.dy,
+      moreOrLessEquals(rectOf(tester, 'Undo').center.dy, epsilon: 1),
+    );
   });
 
-  testWidgets('a bar wide enough for every tool shows the divider', (
+  testWidgets('a bar wide enough for both groups keeps one row', (
     tester,
   ) async {
     await _pump(tester, size: const Size(900, 600));
+    final row = rectOf(tester, 'Freehand').center.dy;
+    for (final label in everyControl) {
+      expect(
+        rectOf(tester, label).center.dy,
+        moreOrLessEquals(row, epsilon: 1),
+        reason: label,
+      );
+    }
     expect(
-      tester
-          .widget<Opacity>(
-            find.byWidgetPredicate(
-              (w) =>
-                  w is Opacity &&
-                  w.child.runtimeType.toString() == '_BarDivider',
-            ),
-          )
-          .opacity,
-      1,
+      rectOf(tester, 'Undo').left,
+      greaterThan(rectOf(tester, 'Pen color').right),
     );
   });
 
