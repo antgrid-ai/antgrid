@@ -20,6 +20,7 @@ Widget _tooltip({
   bool enabled = true,
   bool preferAbove = true,
   Duration showDelay = const Duration(milliseconds: 200),
+  bool showOnTap = false,
 }) => CarbonTooltip(
   message: message,
   alignment: alignment,
@@ -27,6 +28,7 @@ Widget _tooltip({
   enabled: enabled,
   preferAbove: preferAbove,
   showDelay: showDelay,
+  showOnTap: showOnTap,
   child: CarbonButton(
     key: _anchor,
     label: 'Save',
@@ -259,6 +261,80 @@ void main() {
       await tester.tap(find.byKey(_anchor));
       await tester.pump(const Duration(seconds: 1));
       expect(taps, 1);
+      expect(find.text(_tip), findsNothing);
+    });
+  });
+
+  group('showOnTap', () {
+    testWidgets('a tap shows it at once and still activates the child', (
+      tester,
+    ) async {
+      var taps = 0;
+      await pumpCarbon(
+        tester,
+        Center(child: _tooltip(showOnTap: true, onPressed: () => taps++)),
+      );
+      await tester.tap(find.byKey(_anchor));
+      await tester.pump();
+      expect(find.text(_tip), findsOneWidget);
+      expect(taps, 1);
+    });
+
+    testWidgets('a drag past the touch slop does not show it', (tester) async {
+      await pumpCarbon(tester, Center(child: _tooltip(showOnTap: true)));
+      final g = await tester.startGesture(tester.getCenter(find.byKey(_anchor)));
+      await g.moveBy(const Offset(kTouchSlop * 3, 0));
+      await g.up();
+      await tester.pump();
+      expect(find.text(_tip), findsNothing);
+    });
+
+    testWidgets('without showOnTap a tap shows nothing', (tester) async {
+      await pumpCarbon(tester, Center(child: _tooltip()));
+      await tester.tap(find.byKey(_anchor));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text(_tip), findsNothing);
+    });
+
+    testWidgets('the tap-shown tip ignores pointers and hides on the next press', (
+      tester,
+    ) async {
+      var below = 0;
+      await pumpCarbon(
+        tester,
+        Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: <Widget>[
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => below++,
+              child: const SizedBox(key: Key('below'), height: 300, width: 400),
+            ),
+            _tooltip(showOnTap: true),
+          ],
+        ),
+      );
+      await tester.tap(find.byKey(_anchor));
+      await tester.pump();
+      final tip = tester.getRect(find.text(_tip));
+      await tester.tapAt(tip.center);
+      await tester.pump();
+      expect(below, 1, reason: 'the tap reached the widget under the tip');
+      expect(find.text(_tip), findsNothing, reason: 'the press hid it');
+    });
+
+    testWidgets('a mouse click hides it when the pointer leaves', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, Center(child: _tooltip(showOnTap: true)));
+      final mouse = await _hover(tester, find.byKey(_anchor));
+      await tester.pump(const Duration(milliseconds: 300));
+      await mouse.down(tester.getCenter(find.byKey(_anchor)));
+      await mouse.up();
+      await tester.pump();
+      expect(find.text(_tip), findsOneWidget);
+      await mouse.moveTo(const Offset(1, 1));
+      await tester.pump(const Duration(milliseconds: 300));
       expect(find.text(_tip), findsNothing);
     });
   });

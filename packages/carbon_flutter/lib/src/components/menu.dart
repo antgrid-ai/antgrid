@@ -48,6 +48,7 @@ class CarbonMenuItem extends CarbonMenuEntry {
     this.icon,
     this.shortcut,
     this.kind = CarbonMenuItemKind.standard,
+    this.disabledReason,
   });
 
   final String label;
@@ -64,6 +65,10 @@ class CarbonMenuItem extends CarbonMenuEntry {
 
   final CarbonMenuItemKind kind;
 
+  /// Why the item is unavailable, shown in a tooltip on the disabled row and
+  /// announced as its hint. Ignored while [onPressed] is set.
+  final String? disabledReason;
+
   @override
   void _flatten(List<_Flat> out) => out.add(
     _Flat(
@@ -73,6 +78,7 @@ class CarbonMenuItem extends CarbonMenuEntry {
       shortcut: shortcut,
       danger: kind == CarbonMenuItemKind.danger,
       enabled: onPressed != null,
+      disabledReason: onPressed == null ? disabledReason : null,
       activate: onPressed,
     ),
   );
@@ -229,6 +235,7 @@ class _Flat {
     this.label = '',
     this.icon,
     this.shortcut,
+    this.disabledReason,
     this.danger = false,
     this.enabled = true,
     this.checked,
@@ -242,6 +249,7 @@ class _Flat {
     : kind = _FlatKind.header,
       icon = null,
       shortcut = null,
+      disabledReason = null,
       danger = false,
       enabled = false,
       checked = null,
@@ -255,6 +263,7 @@ class _Flat {
       label = '',
       icon = null,
       shortcut = null,
+      disabledReason = null,
       danger = false,
       enabled = false,
       checked = null,
@@ -267,6 +276,7 @@ class _Flat {
   final String label;
   final Widget? icon;
   final String? shortcut;
+  final String? disabledReason;
   final bool danger;
   final bool enabled;
   final bool? checked;
@@ -1023,7 +1033,7 @@ class _MenuRow extends StatelessWidget {
       button: false,
       role: role,
       label: flat.label,
-      hint: flat.shortcut,
+      hint: flat.shortcut ?? (enabled ? null : flat.disabledReason),
       checked: flat.checked,
       inMutuallyExclusiveGroup: flat.radio ? true : null,
       expanded: isSubmenu ? submenuOpen : null,
@@ -1171,13 +1181,26 @@ class _MenuRow extends StatelessWidget {
       },
     );
 
+    final reason = flat.disabledReason;
+    final Widget row = reason == null || enabled
+        ? interaction
+        : CarbonTooltip(
+            message: reason,
+            // The row already announces the reason as its hint.
+            excludeFromSemantics: true,
+            mergeChildSemantics: false,
+            // The row ignores taps, and touch has no hover to reveal the
+            // reason, so a tap is the request for it.
+            showOnTap: true,
+            child: interaction,
+          );
     final anchor = submenuAnchor;
-    if (anchor == null) return interaction;
+    if (anchor == null) return row;
     return Stack(
       fit: StackFit.passthrough,
       clipBehavior: Clip.none,
       children: <Widget>[
-        interaction,
+        row,
         PositionedDirectional(
           start: submenuFlipped ? 0 : null,
           end: submenuFlipped ? null : 0,

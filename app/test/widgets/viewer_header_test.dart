@@ -1,4 +1,5 @@
 // app/test/widgets/viewer_header_test.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_carbon.dart';
@@ -164,6 +165,36 @@ void main() {
     // Let the toast run out.
     await tester.pump(const Duration(seconds: 5));
   });
+
+  testWidgets(
+    'without a checkout root the absolute copy stays and says why it is off',
+    (tester) async {
+      final copied = captureClipboard(tester);
+      await _pump(
+        tester,
+        const SizedBox(
+          width: 400,
+          child: ViewerPathBreadcrumb(path: 'docs/protocol/peer-session.md'),
+        ),
+      );
+
+      await tester.tap(find.text('protocol'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy absolute path'), findsOneWidget);
+
+      // A touch tap has no hover to reveal the reason, so the tap itself must.
+      await tester.tap(find.text('Copy absolute path'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text('This agent does not report where its checkout is.'),
+        findsOneWidget,
+      );
+      expect(find.text('Copy absolute path'), findsOneWidget);
+      expect(copied, isEmpty);
+    },
+  );
 
   testWidgets('an image outside the checkout offers only its absolute path', (
     tester,

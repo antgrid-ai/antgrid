@@ -61,6 +61,7 @@ class CarbonTooltip extends StatefulWidget {
     this.showDelay = const Duration(milliseconds: 200),
     this.hideGrace = const Duration(milliseconds: 100),
     this.enabled = true,
+    this.showOnTap = false,
     this.excludeFromSemantics = false,
     this.mergeChildSemantics = true,
   });
@@ -81,6 +82,12 @@ class CarbonTooltip extends StatefulWidget {
   /// How long a pointer may be outside both trigger and tooltip before the
   /// tooltip hides.
   final Duration hideGrace;
+
+  /// Also shows the tooltip at once on a plain tap or click of the child. For
+  /// a child that ignores taps, such as a disabled control, where touch users
+  /// would otherwise have no way to read why. A tip shown this way ignores
+  /// pointers and hides on the next press anywhere, or when a mouse leaves.
+  final bool showOnTap;
 
   /// False shows no tooltip and exposes no tooltip semantics; [child] keeps
   /// its place in the tree either way, so its state and focus survive the
@@ -117,6 +124,9 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   Timer? _pointerTimer;
   Timer? _longPressTimer;
   Offset _pressOrigin = Offset.zero;
+  bool _tapCandidate = false;
+  bool _tapShown = false;
+  bool _tapByMouse = false;
 
   bool get _active =>
       widget.enabled && widget.message.isNotEmpty && !_yielded;
@@ -135,6 +145,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
     _hideTimer?.cancel();
     _pointerTimer?.cancel();
     _longPressTimer?.cancel();
+    _stopWatchingPointers();
     _detachKeyHandler();
     _controller.removeListener(_syncKeyHandler);
     _controller.dispose();
@@ -189,7 +200,34 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
     _hover = false;
     _focus = false;
     _touch = false;
+    _tapByMouse = false;
+    _stopWatchingPointers();
     _controller.close();
+  }
+
+  // A tap-shown tip must never take a click meant for the control beneath it,
+  // so it ignores pointers and cannot be left by hovering; the next press
+  // anywhere is what dismisses it.
+  void _onTap({required bool byMouse}) {
+    if (!_active) return;
+    final fresh = !_controller.isOpen;
+    _touch = true;
+    _tapByMouse = byMouse;
+    if (fresh) {
+      _tapShown = true;
+      GestureBinding.instance.pointerRouter.addGlobalRoute(_onGlobalPointer);
+    }
+    _requestShow(immediate: true);
+  }
+
+  void _onGlobalPointer(PointerEvent event) {
+    if (event is PointerDownEvent) _reset();
+  }
+
+  void _stopWatchingPointers() {
+    if (!_tapShown) return;
+    _tapShown = false;
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onGlobalPointer);
   }
 
   // Opening applies pending focus changes, which can call back into the focus
@@ -232,6 +270,10 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
 
   void _onHover(bool hovering) {
     if (!_active) return;
+    if (!hovering && _touch && _tapByMouse) {
+      _reset();
+      return;
+    }
     _hover = hovering;
     if (hovering) {
       _requestShow(immediate: false);
@@ -271,6 +313,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   // Focus a press hands to the child arrives after the pointer-up has been
   // dispatched, in a microtask, so the flag outlives the event by one timer.
   void _onPointerEnd() {
+    _tapCandidate = false;
     _longPressTimer?.cancel();
     _pointerTimer?.cancel();
     _pointerTimer = Timer(Duration.zero, () => _pointerDown = false);
@@ -286,9 +329,11 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
   void _startLongPress(PointerDownEvent event) {
     _longPressTimer?.cancel();
     _pressOrigin = event.position;
+    _tapCandidate = widget.showOnTap;
     final pointer = event.pointer;
     _longPressTimer = Timer(kLongPressTimeout, () {
       if (!mounted) return;
+      _tapCandidate = false;
       _onLongPress();
       GestureBinding.instance.cancelPointer(pointer);
     });
@@ -296,6 +341,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
 
   void _moveLongPress(PointerMoveEvent event) {
     if ((event.position - _pressOrigin).distance > kTouchSlop) {
+      _tapCandidate = false;
       _longPressTimer?.cancel();
     }
   }
@@ -314,6 +360,8 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
     _hover = false;
     _focus = false;
     _touch = false;
+    _tapByMouse = false;
+    _stopWatchingPointers();
   }
 
   @override
@@ -335,7 +383,9 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
       dismissOnEscape: false,
       dismissOnBack: false,
       onDismissed: _onDismissed,
-      popupBuilder: (context, available) => MouseRegion(
+      popupBuilder: (context, available) => IgnorePointer(
+        ignoring: _tapShown,
+        child: MouseRegion(
         onEnter: (_) => _onHover(true),
         onExit: (_) => _onHover(false),
         child: ExcludeSemantics(
@@ -363,6 +413,7 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
             ),
           ),
         ),
+        ),
       ),
       child: _TooltipSemantics(
         mode: !active || widget.excludeFromSemantics
@@ -378,7 +429,11 @@ class _CarbonTooltipState extends State<CarbonTooltip> {
             if (active) _startLongPress(e);
           },
           onPointerMove: _moveLongPress,
-          onPointerUp: (_) => _onPointerEnd(),
+          onPointerUp: (e) {
+            final tapped = _tapCandidate;
+            _onPointerEnd();
+            if (tapped) _onTap(byMouse: e.kind == PointerDeviceKind.mouse);
+          },
           onPointerCancel: (_) => _onPointerEnd(),
           child: MouseRegion(
             onEnter: (_) => _onHover(true),

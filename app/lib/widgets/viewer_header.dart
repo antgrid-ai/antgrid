@@ -137,12 +137,14 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
             icon: const CarbonIcon(CarbonIcons.copy),
             onPressed: () => _copy(widget.path),
           ),
-        // Disabled while an older bridge reports no checkout root, which is
-        // the only way the app learns where the checkout lives.
+        // Kept visible while an older bridge reports no checkout root, which
+        // is the only way the app learns where the checkout lives, so the
+        // reason is on the row rather than the item silently missing.
         CarbonMenuItem(
           label: 'Copy absolute path',
           icon: const CarbonIcon(CarbonIcons.copy),
           onPressed: absolute == null ? null : () => _copy(absolute),
+          disabledReason: 'This agent does not report where its checkout is.',
         ),
       ],
       semanticLabel: 'Copy path',

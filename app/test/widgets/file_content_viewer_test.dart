@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_carbon.dart';
@@ -138,6 +139,63 @@ void main() {
 
       expect(find.text('Binary file cannot be displayed'), findsOneWidget);
       expect(find.byType(CarbonNotification), findsOneWidget);
+    });
+
+    group('find bar', () {
+      // Focus falls back to the editor when the bar closes, which arms its
+      // cursor-blink timer. Unmounting instead trips a use-after-dispose in
+      // re_editor's blink controller, so take focus away to stop the blink.
+      Future<void> releaseEditorFocus(WidgetTester tester) async {
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+
+      Future<void> openFind(WidgetTester tester) async {
+        await tester.pumpWidget(
+          buildTestWidget(
+            selectedFilePath: 'a.txt',
+            fileContent: const FileContent(
+              path: 'a.txt',
+              content: 'alpha\nbeta\nalpha',
+              size: 16,
+            ),
+          ),
+        );
+        await tester.pumpUntil(
+          () => find.byType(CarbonLoading).evaluate().isEmpty,
+          reason: 'the editor to become interactive',
+        );
+        await tester.tap(find.bySemanticsLabel('Search in file'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(CarbonSearch), findsOneWidget);
+      }
+
+      testWidgets('Escape with an empty field closes it', (tester) async {
+        await openFind(tester);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+
+        expect(find.byType(CarbonSearch), findsNothing);
+        await releaseEditorFocus(tester);
+      });
+
+      // CarbonSearch spends Escape on clearing a typed query, so the bar
+      // stayed open for the first press.
+      testWidgets('Escape with a query typed closes it in one press', (
+        tester,
+      ) async {
+        await openFind(tester);
+        await tester.enterText(find.byType(EditableText), 'alpha');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+
+        expect(find.byType(CarbonSearch), findsNothing);
+        await releaseEditorFocus(tester);
+      });
     });
   });
 

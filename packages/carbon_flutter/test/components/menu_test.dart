@@ -183,6 +183,104 @@ void main() {
     expect(find.text('Paste'), findsOneWidget);
   });
 
+  group('disabledReason', () {
+    const reason = 'Needs a checkout.';
+    late List<String> log;
+
+    Future<void> openWithReason(WidgetTester tester) async {
+      log = <String>[];
+      await _pump(
+        tester,
+        _Host(
+          log: log,
+          entries: <CarbonMenuEntry>[
+            CarbonMenuItem(label: 'Open', onPressed: () => log.add('open')),
+            const CarbonMenuItem(label: 'Locked', disabledReason: reason),
+            CarbonMenuItem(
+              label: 'Live',
+              disabledReason: 'ignored',
+              onPressed: () => log.add('live'),
+            ),
+          ],
+        ),
+      );
+      await _open(tester);
+    }
+
+    testWidgets('hovering a disabled row shows the reason', (tester) async {
+      await openWithReason(tester);
+      expect(find.text(reason), findsNothing);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(find.text('Locked')));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
+      expect(find.text(reason), findsOneWidget);
+    });
+
+    testWidgets('a touch tap shows the reason, keeps the menu open and does not activate', (
+      tester,
+    ) async {
+      await openWithReason(tester);
+      await tester.tap(find.text('Locked'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text(reason), findsOneWidget);
+      expect(find.text('Open'), findsOneWidget);
+      expect(log, isEmpty, reason: 'nothing ran and nothing dismissed');
+    });
+
+    testWidgets('a tap on the row under the reason runs it and keeps the menu', (
+      tester,
+    ) async {
+      log = <String>[];
+      await _pump(
+        tester,
+        _Host(
+          log: log,
+          entries: <CarbonMenuEntry>[
+            CarbonMenuItem(label: 'Open', onPressed: () => log.add('open')),
+            const CarbonMenuItem(label: 'Locked', disabledReason: reason),
+            CarbonMenuItem(label: 'Paste', onPressed: () => log.add('paste')),
+          ],
+        ),
+      );
+      await _open(tester);
+      await tester.tap(find.text('Locked'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text(reason), findsOneWidget);
+      expect(log, isEmpty, reason: 'the reason did not close the menu');
+      // The popup box, padding included, not just its text: the tap below
+      // must land on the tip itself to prove the tip lets it through.
+      final tip = tester.getRect(
+        find
+            .ancestor(of: find.text(reason), matching: find.byType(IgnorePointer))
+            .first,
+      );
+      final open = tester.getRect(find.text('Open'));
+      expect(tip.contains(open.center), isTrue, reason: 'the tip covers Open');
+      await tester.tapAt(open.center);
+      await tester.pump();
+      await tester.pump();
+      expect(log, <String>['open'], reason: 'no outsideTap dismissal');
+    });
+
+    testWidgets('the reason is the row hint, and only while disabled', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await openWithReason(tester);
+      expect(tester.getSemantics(find.text('Locked')).hint, reason);
+      expect(tester.getSemantics(find.text('Live')).hint, isNot('ignored'));
+      await tester.tap(find.text('Live'));
+      await tester.pump();
+      expect(log, contains('live'));
+      handle.dispose();
+    });
+  });
+
   testWidgets('forward arrow opens a submenu and focuses its first item; back arrow closes it', (
     tester,
   ) async {

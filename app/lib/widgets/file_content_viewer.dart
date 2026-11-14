@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:re_editor/re_editor.dart';
 
@@ -75,7 +76,9 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   int _syncGeneration = 0;
   Timer? _editorReadyTimer;
   bool _showSearch = false;
-  final FocusNode _searchFocusNode = FocusNode();
+  // Escape closes the bar even with a query typed; CarbonSearch alone would
+  // spend the first Escape clearing it and ignore the second.
+  late final FocusNode _searchFocusNode = FocusNode(onKeyEvent: _onSearchKey);
 
   /// Anchors the follow-up comment popover under [CarbonSendToAgentButton] instead
   /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
@@ -256,6 +259,14 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     if (widget.searchQuery != oldWidget.searchQuery) {
       _applySearchHighlight();
     }
+  }
+
+  KeyEventResult _onSearchKey(FocusNode node, KeyEvent event) {
+    if (event.logicalKey != LogicalKeyboardKey.escape) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent && _showSearch) _toggleSearch();
+    return KeyEventResult.handled;
   }
 
   void _toggleSearch() {
