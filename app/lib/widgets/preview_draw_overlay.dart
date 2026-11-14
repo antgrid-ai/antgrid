@@ -750,8 +750,8 @@ class _DrawToolBar extends StatelessWidget {
             // this pinning fixes (they were reachable only by swiping the
             // toolbar itself, and read as simply missing).
             Flexible(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+              child: _EdgeFadeScroll(
+                trailing: const _BarDivider(),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -776,7 +776,6 @@ class _DrawToolBar extends StatelessWidget {
                 ),
               ),
             ),
-            const _BarDivider(),
             CarbonButton.iconOnly(
               icon: const CarbonIcon(CarbonIcons.undo),
               semanticLabel: 'Undo',
@@ -810,6 +809,87 @@ class _DrawToolBar extends StatelessWidget {
 }
 
 const double _kCompactBarWidth = 360;
+
+/// A horizontal scroller that fades whichever edge has content beyond it,
+/// followed by [trailing], which hides while the end edge is faded.
+///
+/// Clipped hard, the tool cluster cuts the content switcher mid-cell, and its
+/// own cell divider lands beside the pinned divider that follows the cluster,
+/// reading as a doubled rule rather than as more tools to scroll to. The fade
+/// is the separator while it shows. [trailing] keeps its width when hidden:
+/// resizing it would resize the viewport and flip the fade back.
+class _EdgeFadeScroll extends StatefulWidget {
+  const _EdgeFadeScroll({required this.child, required this.trailing});
+
+  final Widget child;
+  final Widget trailing;
+
+  @override
+  State<_EdgeFadeScroll> createState() => _EdgeFadeScrollState();
+}
+
+class _EdgeFadeScrollState extends State<_EdgeFadeScroll> {
+  bool _fadeStart = false;
+  bool _fadeEnd = false;
+
+  bool _onMetrics(ScrollMetrics m) {
+    final start = m.extentBefore > 0;
+    final end = m.extentAfter > 0;
+    if (start != _fadeStart || end != _fadeEnd) {
+      setState(() {
+        _fadeStart = start;
+        _fadeEnd = end;
+      });
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scroller = NotificationListener<ScrollMetricsNotification>(
+      onNotification: (n) => _onMetrics(n.metrics),
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (n) => _onMetrics(n.metrics),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: widget.child,
+        ),
+      ),
+    );
+    // Always masked, even with nothing to fade: swapping the wrapper in and
+    // out would remount the scroller and drop its offset mid-drag.
+    // dstIn keeps only the mask's alpha, so any opaque token serves as "show".
+    final show = CarbonTheme.of(context).colors.textPrimary;
+    const hide = Color(0x00000000);
+    final masked = ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (bounds) {
+        final stop = bounds.width <= 0
+            ? 0.0
+            : (CarbonSpacing.spacing06 / bounds.width).clamp(0.0, 0.5);
+        return LinearGradient(
+          colors: [
+            _fadeStart ? hide : show,
+            show,
+            show,
+            _fadeEnd ? hide : show,
+          ],
+          stops: [0, stop, 1 - stop, 1],
+        ).createShader(bounds);
+      },
+      child: scroller,
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(child: masked),
+        ExcludeSemantics(
+          child: Opacity(opacity: _fadeEnd ? 0 : 1, child: widget.trailing),
+        ),
+      ],
+    );
+  }
+}
 
 class _BarDivider extends StatelessWidget {
   const _BarDivider();

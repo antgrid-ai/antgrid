@@ -145,6 +145,13 @@ void main() {
     await tester.pumpWidget(await _host(const AsyncLoading()));
 
     expect(find.byType(CarbonLoading), findsOneWidget);
+    // Carbon's loading does not centre itself; the panel must.
+    // Measured against the host, not the screen: unfixed, the screen shrinks
+    // to the spinner and is trivially centred on it.
+    final panel = tester.getRect(find.byType(Scaffold));
+    final spinner = tester.getRect(find.byType(CarbonLoading));
+    expect((spinner.center.dx - panel.center.dx).abs(), lessThan(1));
+    expect((spinner.center.dy - panel.center.dy).abs(), lessThan(48));
     expect(abWidgetsInScope(tester), isEmpty);
   });
 

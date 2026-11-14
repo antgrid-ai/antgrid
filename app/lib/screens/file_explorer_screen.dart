@@ -178,7 +178,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     }
     final Widget content;
     if (fileService == null) {
-      content = const CarbonLoading(message: 'loading files...');
+      content = const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...'));
     } else {
       content = BackHandler(
         priority: BackPriority.fileViewer,
@@ -190,7 +190,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
           active: onScreen && _searchOpen,
           onBack: _backFromSearch,
           child: treeStateAsync.when(
-            loading: () => const CarbonLoading(message: 'loading files...'),
+            loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...')),
             error: (error, _) => CarbonEmptyState(
               error: true,
               heading: "Couldn't load files",
@@ -393,10 +393,10 @@ class _FileExplorerBody extends ConsumerWidget {
     // its own consumer, so Riverpod may rebuild it against a session the parent
     // hasn't yet re-gated on — and the façade throws once that session is gone.
     final searchService = serviceWhenReady(ref, searchServiceProvider);
-    if (searchService == null) return const CarbonLoading();
+    if (searchService == null) return const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
 
     return stateAsync.when(
-      loading: () => const CarbonLoading(),
+      loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small)),
       error: (error, _) => CarbonEmptyState(
         error: true,
         heading: 'Search failed',

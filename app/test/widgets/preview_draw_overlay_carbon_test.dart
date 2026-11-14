@@ -80,6 +80,49 @@ void main() {
     expect(abWidgetsInScope(tester), isEmpty);
   });
 
+  testWidgets('a clipped tool cluster hides the divider after it until '
+      'scrolled to its end', (tester) async {
+    // The cluster's own cell divider is what a hard clip leaves beside the
+    // pinned one; while the end edge fades, the pinned one must not show.
+    double dividerOpacity() => tester
+        .widget<Opacity>(
+          find.byWidgetPredicate(
+            (w) =>
+                w is Opacity &&
+                w.child.runtimeType.toString() == '_BarDivider',
+          ),
+        )
+        .opacity;
+
+    await _pump(tester, size: const Size(400, 600));
+    expect(dividerOpacity(), 0);
+
+    await tester.drag(
+      find.byType(SingleChildScrollView).last,
+      const Offset(-400, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(dividerOpacity(), 1);
+  });
+
+  testWidgets('a bar wide enough for every tool shows the divider', (
+    tester,
+  ) async {
+    await _pump(tester, size: const Size(900, 600));
+    expect(
+      tester
+          .widget<Opacity>(
+            find.byWidgetPredicate(
+              (w) =>
+                  w is Opacity &&
+                  w.child.runtimeType.toString() == '_BarDivider',
+            ),
+          )
+          .opacity,
+      1,
+    );
+  });
+
   testWidgets('the bar fits a narrow touch panel at double text scale', (
     tester,
   ) async {

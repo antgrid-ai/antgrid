@@ -704,7 +704,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               enabled: onScreen,
               child: previewStateAsync.when(
                 loading: () =>
-                    const CarbonLoading(message: 'loading preview...'),
+                    const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading preview...')),
                 error: (error, _) => CarbonEmptyState(
                   error: true,
                   heading: "Couldn't load the preview",

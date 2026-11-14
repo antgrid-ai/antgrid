@@ -101,7 +101,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   Widget _buildContent(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
-      return const CarbonLoading(message: 'loading changes...');
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...'));
     }
     final draft = _drafts.putIfAbsent(fileService, TextEditingController.new);
     final panel = _PanelContext(
@@ -138,7 +138,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           panel: panel,
           counts: counts,
           git: git ?? GitPaneState.empty,
-          body: const CarbonLoading(message: 'loading changes...'),
+          body: const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...')),
         ),
         error: (error, _) => _GitPanelScaffold(
           panel: panel,
@@ -1274,7 +1274,7 @@ class _GitPanelBody extends ConsumerWidget {
     );
     if (git.diffPath != null) {
       if (git.diffLoading) {
-        return const CarbonLoading();
+        return const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
       }
       if (git.diffContent != null) {
         // A commit-scoped diff's status letter comes from that commit's own
@@ -1443,7 +1443,7 @@ class _HistoryListState extends State<_HistoryList> {
   Widget build(BuildContext context) {
     final history = widget.git.history;
     if (history.initialLoad && history.commits.isEmpty) {
-      return const CarbonLoading(message: 'loading history...');
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading history...'));
     }
     if (history.error != null && history.commits.isEmpty) {
       return CarbonEmptyState(
