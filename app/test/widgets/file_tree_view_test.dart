@@ -1,20 +1,17 @@
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
-import 'package:flutter/material.dart';
-import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_empty_state.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
-import 'package:antgrid/design/widgets/ab_status_dot.dart';
-import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
-import 'package:antgrid/models/ab_message.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/file_tree_models.dart';
-import 'package:antgrid/models/git_status_index.dart';
+import 'package:antgrid/widgets/carbon_empty_state.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, kSecondaryMouseButton;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
 
-import '../helpers/counting_file_node.dart';
+import '../helpers/carbon_guard.dart';
 import '../helpers/clipboard.dart';
-import '../helpers/hover.dart';
+import '../helpers/counting_file_node.dart';
 
 /// The rendered color of the row's name label — reads the actual [Text]
 /// style rather than inspecting [FileNode.ignored] directly, since the
@@ -22,11 +19,8 @@ import '../helpers/hover.dart';
 Color _labelColor(WidgetTester tester, String name) =>
     tester.widget<Text>(find.text(name)).style!.color!;
 
-// One index per list instance, as FileService carries one per git:status, so a
-// test that re-pumps the same list is re-pumping the same status.
-final _indexes = Expando<GitStatusIndex>();
-GitStatusIndex _indexFor(List<GitFileStatusEntry> entries) =>
-    _indexes[entries] ??= GitStatusIndex(entries);
+CarbonColors _colors(WidgetTester tester) =>
+    CarbonTheme.of(tester.element(find.byType(FileTreeView))).colors;
 
 void main() {
   FileNode makeTree() {
@@ -64,43 +58,53 @@ void main() {
     );
   }
 
+  Widget host(
+    Widget tree, {
+    double textScale = 1,
+    Brightness brightness = Brightness.dark,
+  }) => MaterialApp(
+    theme: ThemeData(brightness: brightness),
+    themeAnimationDuration: Duration.zero,
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(
+        context,
+      ).copyWith(textScaler: TextScaler.linear(textScale)),
+      child: child!,
+    ),
+    home: Scaffold(body: AbCarbonScope(child: tree)),
+  );
+
   Widget buildTestWidget({
     FileNode? root,
     Set<String> expandedPaths = const {},
     String? selectedFilePath,
-    List<GitFileStatusEntry> gitFileEntries = const [],
-    bool changesOnly = false,
+    String? revealedDirectoryPath,
     void Function(String)? onToggleExpanded,
     void Function(String)? onFileSelected,
-    void Function(String)? onStage,
-    void Function(String)? onUnstage,
-    void Function(String)? onDiscard,
-    void Function(String)? onResolveConflict,
-  }) {
-    return MaterialApp(
-      home: Scaffold(
-        body: FileTreeView(
-          root: root,
-          expandedPaths: expandedPaths,
-          selectedFilePath: selectedFilePath,
-          gitStatus: _indexFor(gitFileEntries),
-          changesOnly: changesOnly,
-          onToggleExpanded: onToggleExpanded ?? (_) {},
-          onFileSelected: onFileSelected ?? (_) {},
-          onStage: onStage,
-          onUnstage: onUnstage,
-          onDiscard: onDiscard,
-          onResolveConflict: onResolveConflict,
-        ),
-      ),
-    );
+    double textScale = 1,
+  }) => host(
+    FileTreeView(
+      root: root,
+      expandedPaths: expandedPaths,
+      selectedFilePath: selectedFilePath,
+      revealedDirectoryPath: revealedDirectoryPath,
+      onToggleExpanded: onToggleExpanded ?? (_) {},
+      onFileSelected: onFileSelected ?? (_) {},
+    ),
+    textScale: textScale,
+  );
+
+  void smallView(WidgetTester tester) {
+    tester.view.physicalSize = const Size(400, 300);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
   }
 
   group('FileTreeView', () {
     testWidgets('shows empty state when root is null', (tester) async {
       await tester.pumpWidget(buildTestWidget(root: null));
 
-      expect(find.byType(AbEmptyState), findsOneWidget);
+      expect(find.byType(CarbonEmptyState), findsOneWidget);
       expect(find.text('No files available'), findsOneWidget);
     });
 
@@ -129,40 +133,28 @@ void main() {
     });
 
     group('Copy path', () {
-      Widget themed() => MaterialApp(
-        theme: ThemeData.dark().copyWith(
-          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
-        ),
-        home: Scaffold(
-          body: FileTreeView(
-            root: makeTree(),
-            expandedPaths: const {'project/lib'},
-            onToggleExpanded: (_) {},
-            onFileSelected: (_) {},
-          ),
-        ),
+      Widget themed() => buildTestWidget(
+        root: makeTree(),
+        expandedPaths: const {'project/lib'},
       );
 
       testWidgets('right-click copies the project-relative path', (
         tester,
       ) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        try {
-          final copied = captureClipboard(tester);
-          await tester.pumpWidget(themed());
+        final copied = captureClipboard(tester);
+        await tester.pumpWidget(themed());
 
-          await tester.tap(
-            find.text('main.dart'),
-            buttons: kSecondaryMouseButton,
-          );
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Copy path'));
-          await tester.pumpAndSettle();
+        final click = await tester.startGesture(
+          tester.getCenter(find.text('main.dart')),
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await click.up();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Copy path'));
+        await tester.pumpAndSettle();
 
-          expect(copied, ['project/lib/main.dart']);
-        } finally {
-          debugDefaultTargetPlatformOverride = null;
-        }
+        expect(copied, ['project/lib/main.dart']);
       });
 
       testWidgets('long-press offers it on touch, for folders too', (
@@ -177,6 +169,29 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(copied, ['project/lib']);
+      });
+
+      testWidgets('a right-click opens the menu without selecting the row', (
+        tester,
+      ) async {
+        String? selected;
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: makeTree(),
+            onFileSelected: (path) => selected = path,
+          ),
+        );
+
+        final click = await tester.startGesture(
+          tester.getCenter(find.text('README.md')),
+          kind: PointerDeviceKind.mouse,
+          buttons: kSecondaryMouseButton,
+        );
+        await click.up();
+        await tester.pumpAndSettle();
+
+        expect(find.text('Copy path'), findsOneWidget);
+        expect(selected, isNull);
       });
     });
 
@@ -193,6 +208,28 @@ void main() {
 
       await tester.tap(find.text('README.md'));
       expect(selectedPath, 'project/README.md');
+    });
+
+    testWidgets('arrow keys walk the rows from a single focus stop', (
+      tester,
+    ) async {
+      final toggled = <String>[];
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          onToggleExpanded: toggled.add,
+          onFileSelected: (_) {},
+        ),
+      );
+
+      await tester.tap(find.text('README.md'));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+
+      expect(toggled, ['project/lib']);
     });
 
     testWidgets('collapsed directory hides its children', (tester) async {
@@ -236,12 +273,34 @@ void main() {
       expect(find.text('This folder is empty'), findsOneWidget);
     });
 
+    testWidgets('a file and a folder sharing a path each keep a row', (
+      tester,
+    ) async {
+      // Replacing a file with a directory of the same name leaves a deletion
+      // and an addition that share the path; the row id carries the type.
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          FileNode(
+            name: 'twin',
+            path: 'project/twin',
+            type: FileNodeType.directory,
+          ),
+          FileNode(name: 'twin', path: 'project/twin', type: FileNodeType.file),
+        ],
+      );
+      await tester.pumpWidget(buildTestWidget(root: tree));
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('twin'), findsNWidgets(2));
+    });
+
     testWidgets(
       'selecting a file off the current viewport scrolls to reveal it',
       (tester) async {
-        tester.view.physicalSize = const Size(400, 300);
-        tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.reset);
+        smallView(tester);
 
         final tree = FileNode(
           name: 'project',
@@ -312,25 +371,14 @@ void main() {
         Set<String> expandedPaths = const {'project/zdeep'},
         String? selectedFilePath,
         String? revealedDirectoryPath,
-      }) => MaterialApp(
-        theme: ThemeData(extensions: const [kDefaultPalette]),
-        home: Scaffold(
-          body: FileTreeView(
-            root: root,
-            expandedPaths: expandedPaths,
-            selectedFilePath: selectedFilePath,
-            revealedDirectoryPath: revealedDirectoryPath,
-            onToggleExpanded: (_) {},
-            onFileSelected: (_) {},
-          ),
-        ),
+        double textScale = 1,
+      }) => buildTestWidget(
+        root: root,
+        expandedPaths: expandedPaths,
+        selectedFilePath: selectedFilePath,
+        revealedDirectoryPath: revealedDirectoryPath,
+        textScale: textScale,
       );
-
-      void smallView(WidgetTester tester) {
-        tester.view.physicalSize = const Size(400, 300);
-        tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.reset);
-      }
 
       testWidgets(
         'a revealed folder off the viewport is scrolled to and marked',
@@ -349,7 +397,9 @@ void main() {
           await tester.pumpAndSettle();
 
           expect(find.text('zdeep'), findsOneWidget);
-          expect(_labelColor(tester, 'zdeep'), kDefaultPalette.accent);
+          // Marked as the current row: selection takes the primary text colour
+          // every other row at rest does not have.
+          expect(_labelColor(tester, 'zdeep'), _colors(tester).textPrimary);
         },
       );
 
@@ -398,6 +448,43 @@ void main() {
 
         expect(find.text('target.dart'), findsOneWidget);
       });
+
+      // Every row is one extent tall, so the offset is index * extent and the
+      // row must land centred in the viewport to the pixel — at a large text
+      // scale as much as at 1.0, where the extent grows with the label.
+      for (final scale in [1.0, 2.0]) {
+        testWidgets('lands exactly on the row at text scale $scale', (
+          tester,
+        ) async {
+          smallView(tester);
+          await tester.pumpWidget(themed(root: longTree(), textScale: scale));
+          final extent = CarbonTreeView.rowExtentOf(
+            tester.element(find.byType(CarbonTreeView)),
+          );
+
+          await tester.pumpWidget(
+            themed(
+              root: longTree(),
+              selectedFilePath: 'project/file40.dart',
+              textScale: scale,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final position = tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position;
+          expect(
+            position.pixels,
+            closeTo(40 * extent + extent / 2 - position.viewportDimension / 2, 0.01),
+          );
+          final viewport = tester.getRect(find.byType(CarbonTreeView));
+          expect(
+            tester.getCenter(find.text('file40.dart')).dy,
+            closeTo(viewport.center.dy, 0.5),
+          );
+        });
+      }
     });
 
     testWidgets('a filename wider than the panel does not overflow', (
@@ -427,480 +514,11 @@ void main() {
 
       expect(tester.takeException(), isNull);
     });
-
-    testWidgets('undecorated when no git entries are passed (Files tab)', (
-      tester,
-    ) async {
-      final tree = makeTree();
-      await tester.pumpWidget(
-        buildTestWidget(root: tree, expandedPaths: {'project/lib'}),
-      );
-
-      expect(find.textContaining('+'), findsNothing);
-      expect(find.textContaining('-'), findsNothing);
-    });
-
-    testWidgets('a changed file shows a +added/-deleted badge', (tester) async {
-      final tree = makeTree();
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: tree,
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 3,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('+3'), findsOneWidget);
-      expect(find.text('-1'), findsOneWidget);
-    });
-
-    testWidgets('a directory carries no decoration of its own', (tester) async {
-      final tree = makeTree();
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: tree,
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 1,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('lib'), findsOneWidget);
-      // main.dart's own badge is the only decoration — no dot on lib itself.
-      expect(find.byType(AbStatusDot), findsNothing);
-    });
-
-    testWidgets('changesOnly lists just the changed files, flat', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 1,
-              deletions: 1,
-            ),
-          ],
-        ),
-      );
-
-      // One row naming the file, its folder beside it — no folder rows.
-      expect(find.text('main.dart  project/lib'), findsOneWidget);
-      expect(find.text('lib'), findsNothing);
-      expect(find.text('project'), findsNothing);
-      // Unchanged files are not listed at all.
-      expect(find.textContaining('utils.dart'), findsNothing);
-      expect(find.textContaining('README.md'), findsNothing);
-    });
-
-    testWidgets(
-      'the changes list orders names that differ only in case the way the file tree does',
-      (tester) async {
-        const upper = GitFileStatusEntry(
-          path: 'README.md',
-          status: 'M',
-          staged: false,
-        );
-        const lower = GitFileStatusEntry(
-          path: 'readme.md',
-          status: 'M',
-          staged: false,
-        );
-
-        for (final entries in [
-          const [upper, lower],
-          const [lower, upper],
-        ]) {
-          await tester.pumpWidget(
-            buildTestWidget(
-              root: null,
-              changesOnly: true,
-              gitFileEntries: entries,
-            ),
-          );
-
-          expect(
-            tester.getRect(find.text('readme.md')).top,
-            lessThan(tester.getRect(find.text('README.md')).top),
-          );
-        }
-      },
-    );
-
-    testWidgets('a folder\'s files stay together in the flat list', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: null,
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(path: 'b/x.dart', status: 'M', staged: false),
-            GitFileStatusEntry(path: 'a/z.dart', status: 'M', staged: false),
-            GitFileStatusEntry(path: 'b/a.dart', status: 'M', staged: false),
-          ],
-        ),
-      );
-
-      double top(String label) => tester.getRect(find.text(label)).top;
-      expect(top('z.dart  a'), lessThan(top('a.dart  b')));
-      expect(top('a.dart  b'), lessThan(top('x.dart  b')));
-    });
-
-    testWidgets('changesOnly lists a change the file tree has no node for', (
-      tester,
-    ) async {
-      // A DELETED file is the everyday case: it is gone from disk, so the
-      // tree — built from disk — can never carry a node for it. It gets an
-      // ordinary row because this list is built from the change PATHS.
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/deleted.dart',
-              status: 'D',
-              staged: true,
-              additions: 0,
-              deletions: 7,
-            ),
-          ],
-          onUnstage: (_) {},
-        ),
-      );
-
-      final row = find.text('deleted.dart  project/lib');
-      expect(row, findsOneWidget);
-      // Still actionable — a staged deletion has to be unstageable. On this
-      // (touch) platform that means the swipe tray, the row's only affordance.
-      await tester.drag(row, const Offset(-120, 0));
-      await tester.pumpAndSettle();
-      expect(find.text('Unstage'), findsOneWidget);
-    });
-
-    testWidgets('an untracked directory keeps the path git reported', (
-      tester,
-    ) async {
-      // `git status` reports a directory it did not walk into as `assets/`,
-      // trailing slash and all. That exact string is what the row's entries are
-      // keyed by and what every action hands back to git, so a path rebuilt
-      // from its segments would decorate nothing and act on something nobody
-      // reported.
-      String? opened;
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          onFileSelected: (p) => opened = p,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'assets/',
-              status: 'U',
-              staged: false,
-              additions: 4,
-            ),
-          ],
-        ),
-      );
-
-      expect(find.text('assets'), findsOneWidget);
-      // Its own badge, which it only gets if the row found its entry.
-      expect(find.text('+4'), findsOneWidget);
-
-      await tester.tap(find.text('assets'));
-      expect(opened, 'assets/');
-    });
-
-    // `git:status` is a push while `root` waits on a lazy per-checkout tree
-    // hydration, so the Git tab routinely builds with changes but no tree. The
-    // list it renders then has to be the SAME list, or the whole tab visibly
-    // rearranges itself once the tree lands.
-    testWidgets('changesOnly renders the same rows with or without the tree', (
-      tester,
-    ) async {
-      const entries = [
-        GitFileStatusEntry(
-          path: 'project/lib/main.dart',
-          status: 'M',
-          staged: false,
-        ),
-        GitFileStatusEntry(
-          path: 'project/README.md',
-          status: 'M',
-          staged: false,
-        ),
-      ];
-      List<String> rowLabels() => tester
-          .widgetList<Text>(find.byType(Text))
-          .map((t) => t.textSpan?.toPlainText() ?? t.data ?? '')
-          .toList();
-
-      await tester.pumpWidget(
-        buildTestWidget(root: null, changesOnly: true, gitFileEntries: entries),
-      );
-      expect(find.text('No files available'), findsNothing);
-      final withoutTree = rowLabels();
-      expect(withoutTree, contains('main.dart  project/lib'));
-
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          // A copy, so the index is built afresh rather than replayed.
-          gitFileEntries: List.of(entries),
-        ),
-      );
-
-      expect(rowLabels(), withoutTree);
-    });
-
-    testWidgets('a null root still shows the empty state outside changesOnly', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildTestWidget(root: null, changesOnly: false));
-
-      expect(find.text('No files available'), findsOneWidget);
-    });
-
-    testWidgets('changesOnly with no changes shows the empty state', (
-      tester,
-    ) async {
-      final tree = makeTree();
-      await tester.pumpWidget(buildTestWidget(root: tree, changesOnly: true));
-
-      expect(find.byType(AbEmptyState), findsOneWidget);
-      expect(find.text('No changed files'), findsOneWidget);
-    });
-
-    // The row's icon buttons are a DESKTOP affordance: they live behind hover,
-    // which a touch device has no way to produce — there the swipe tray is the
-    // whole story (see the touch group below). The override has to be cleared
-    // before the body returns; a tearDown runs too late for the framework's
-    // debug-variable assert.
-    Future<void> withDesktop(
-      WidgetTester tester,
-      Widget widget,
-      Future<void> Function() body,
-    ) async {
-      try {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        await tester.pumpWidget(widget);
-        await body();
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    }
-
-    testWidgets('an unstaged file exposes Stage and Discard, not Unstage', (
-      tester,
-    ) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-            ),
-          ],
-          onStage: (_) {},
-          onUnstage: (_) {},
-          onDiscard: (_) {},
-        ),
-        () async {
-          await hoverRow(tester, find.text('main.dart'));
-
-          expect(find.byTooltip('Stage Changes'), findsOneWidget);
-          expect(find.byTooltip('Discard Changes'), findsOneWidget);
-          expect(find.byTooltip('Unstage Changes'), findsNothing);
-        },
-      );
-    });
-
-    testWidgets('a staged file exposes Unstage and Discard, not Stage', (
-      tester,
-    ) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: true,
-            ),
-          ],
-          onStage: (_) {},
-          onUnstage: (_) {},
-          onDiscard: (_) {},
-        ),
-        () async {
-          await hoverRow(tester, find.text('main.dart'));
-
-          expect(find.byTooltip('Unstage Changes'), findsOneWidget);
-          expect(find.byTooltip('Stage Changes'), findsNothing);
-          // Discard on a staged-only row is a revert to HEAD, not a no-op —
-          // the bridge drops the index entry before restoring (git.ts,
-          // includeStaged).
-          expect(find.byTooltip('Discard Changes'), findsOneWidget);
-        },
-      );
-    });
-
-    testWidgets('a conflicted file exposes only Mark Resolved', (tester) async {
-      var discarded = false;
-      String? resolved;
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: '!',
-              staged: false,
-            ),
-          ],
-          onStage: (_) {},
-          onUnstage: (_) {},
-          onDiscard: (_) => discarded = true,
-          onResolveConflict: (p) => resolved = p,
-        ),
-        () async {
-          // Revealed first: a conflicted row withholds the other three even
-          // when everything it could offer is on screen, which is a claim an
-          // unrevealed row cannot make.
-          await hoverRow(tester, find.text('main.dart'));
-
-          expect(find.byTooltip('Stage Changes'), findsNothing);
-          expect(find.byTooltip('Unstage Changes'), findsNothing);
-          expect(find.byTooltip('Discard Changes'), findsNothing);
-          expect(discarded, isFalse);
-
-          await tester.tap(find.byTooltip('Mark Resolved'));
-          await tester.pump();
-          expect(resolved, 'project/lib/main.dart');
-        },
-      );
-    });
-
-    testWidgets('a conflict sorts ahead of every other change', (
-      tester,
-    ) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
-            // Both come first by path; only the CONFLICT puts utils.dart
-            // above them.
-            GitFileStatusEntry(
-              path: 'project/README.md',
-              status: 'M',
-              staged: false,
-              additions: 1,
-            ),
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: 'M',
-              staged: false,
-              additions: 2,
-            ),
-            GitFileStatusEntry(
-              path: 'project/lib/utils.dart',
-              status: '!',
-              staged: false,
-            ),
-          ],
-        ),
-        () async {
-          double top(String label) => tester.getRect(find.text(label)).top;
-          final conflict = top('utils.dart  project/lib');
-          expect(conflict, lessThan(top('main.dart  project/lib')));
-          expect(conflict, lessThan(top('README.md  project')));
-        },
-      );
-    });
-
-    testWidgets('a conflict keeps the plain status dot', (tester) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          changesOnly: true,
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: '!',
-              staged: false,
-            ),
-          ],
-        ),
-        () async {
-          expect(find.byType(AbStatusDot), findsOneWidget);
-        },
-      );
-    });
-
-    testWidgets('a resolve callback nobody passes offers nothing', (
-      tester,
-    ) async {
-      await withDesktop(
-        tester,
-        buildTestWidget(
-          root: makeTree(),
-          expandedPaths: {'project/lib'},
-          gitFileEntries: const [
-            GitFileStatusEntry(
-              path: 'project/lib/main.dart',
-              status: '!',
-              staged: false,
-            ),
-          ],
-          onStage: (_) {},
-          onUnstage: (_) {},
-          onDiscard: (_) {},
-        ),
-        () async {
-          await hoverRow(tester, find.text('main.dart'));
-
-          expect(find.byTooltip('Mark Resolved'), findsNothing);
-        },
-      );
-    });
   });
 
   group('ignored rows', () {
     testWidgets(
-      'an ignored node renders with the muted token and a normal sibling does not',
+      'an ignored node renders dimmer than a normal sibling',
       (tester) async {
         const tree = FileNode(
           name: 'project',
@@ -921,33 +539,17 @@ void main() {
             ),
           ],
         );
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: ThemeData(extensions: const [kDefaultPalette]),
-            home: Scaffold(
-              body: FileTreeView(
-                root: tree,
-                expandedPaths: const {},
-                onToggleExpanded: (_) {},
-                onFileSelected: (_) {},
-              ),
-            ),
-          ),
-        );
+        await tester.pumpWidget(buildTestWidget(root: tree));
 
-        expect(_labelColor(tester, 'build.log'), kDefaultPalette.textMuted);
-        expect(
-          _labelColor(tester, 'kept.dart'),
-          isNot(kDefaultPalette.textMuted),
-        );
+        final colors = _colors(tester);
+        expect(_labelColor(tester, 'build.log'), colors.textPlaceholder);
+        expect(_labelColor(tester, 'kept.dart'), colors.textSecondary);
       },
     );
 
-    // A directory's UNDIMMED colour is textSecondary, not textPrimary, so the
-    // step this pins is secondary→muted. Asserted positively on both rows: an
-    // `isNot(textMuted)` on the sibling would hold even if the ignored arm
-    // were never reached for a directory at all.
-    testWidgets('an ignored directory dims from textSecondary to textMuted', (
+    // Asserted positively on both rows: an `isNot(dim)` on the sibling would
+    // hold even if the ignored arm were never reached for a directory at all.
+    testWidgets('an ignored directory dims below an ordinary one', (
       tester,
     ) async {
       const tree = FileNode(
@@ -968,22 +570,11 @@ void main() {
           ),
         ],
       );
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData(extensions: const [kDefaultPalette]),
-          home: Scaffold(
-            body: FileTreeView(
-              root: tree,
-              expandedPaths: const {},
-              onToggleExpanded: (_) {},
-              onFileSelected: (_) {},
-            ),
-          ),
-        ),
-      );
+      await tester.pumpWidget(buildTestWidget(root: tree));
 
-      expect(_labelColor(tester, 'build'), kDefaultPalette.textMuted);
-      expect(_labelColor(tester, 'lib'), kDefaultPalette.textSecondary);
+      final colors = _colors(tester);
+      expect(_labelColor(tester, 'build'), colors.textPlaceholder);
+      expect(_labelColor(tester, 'lib'), colors.textSecondary);
     });
 
     // Selection outranks the dim. Swapping the two arms of the ternary leaves
@@ -1006,347 +597,10 @@ void main() {
         ],
       );
       await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData(extensions: const [kDefaultPalette]),
-          home: Scaffold(
-            body: FileTreeView(
-              root: tree,
-              expandedPaths: const {},
-              selectedFilePath: 'project/build.log',
-              onToggleExpanded: (_) {},
-              onFileSelected: (_) {},
-            ),
-          ),
-        ),
+        buildTestWidget(root: tree, selectedFilePath: 'project/build.log'),
       );
 
-      expect(_labelColor(tester, 'build.log'), kDefaultPalette.accent);
-    });
-  });
-
-  // On touch the swipe tray is the ONLY per-file affordance, so these cover
-  // both halves of that bargain: every action has to be reachable through it,
-  // and no action may fire from a gesture the user did not mean.
-  //
-  // Leftward only: rightward dismisses a surface everywhere in this app (the
-  // mobile drawer, the agent page's back fling, the touch tablet's sidebar),
-  // so a row may not claim it — which is why all three actions share one tray.
-  group('FileTreeView touch swipe tray', () {
-    // The platform override has to be cleared before the test body returns —
-    // the framework asserts every foundation debug variable is unset by then,
-    // which a tearDown runs too late to satisfy.
-    Future<void> withChangedFile(
-      WidgetTester tester, {
-      void Function(String)? onStage,
-      void Function(String)? onUnstage,
-      void Function(String)? onDiscard,
-      void Function(String)? onResolveConflict,
-      void Function(String)? onFileSelected,
-      String status = 'M',
-      bool staged = false,
-      required Future<void> Function() body,
-    }) async {
-      try {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        await tester.pumpWidget(
-          buildTestWidget(
-            root: makeTree(),
-            expandedPaths: {'project/lib'},
-            gitFileEntries: [
-              GitFileStatusEntry(
-                path: 'project/lib/main.dart',
-                status: status,
-                staged: staged,
-              ),
-            ],
-            onFileSelected: onFileSelected,
-            onStage: onStage ?? (_) {},
-            onUnstage: onUnstage ?? (_) {},
-            onDiscard: onDiscard ?? (_) {},
-            onResolveConflict: onResolveConflict,
-          ),
-        );
-        await body();
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    }
-
-    // These render the PLAIN tree, not changesOnly, so every row — conflicts
-    // included — keeps its basename; hoisting is a changesOnly behaviour.
-    Finder row() => find.text('main.dart');
-
-    /// Reveals the tray the way a finger does — a drag past the open
-    /// threshold, well short of the full-swipe one.
-    Future<void> openTray(WidgetTester tester) async {
-      await tester.drag(row(), const Offset(-120, 0));
-      await tester.pumpAndSettle();
-    }
-
-    // On a phone the tree is the second page of the shell's PageView, whose
-    // own horizontal drag is how the user gets back to the agent. Nothing
-    // arbitrates that for the row — the two meet in the gesture arena, where
-    // the row wins by being the deeper recognizer — so this is what stands
-    // between staging a file and being thrown back to the agent page.
-    testWidgets('a row swipe beats the PageView the phone puts it in', (
-      tester,
-    ) async {
-      final controller = PageController();
-      addTearDown(controller.dispose);
-      try {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
-        await tester.pumpWidget(
-          MaterialApp(
-            home: Scaffold(
-              body: PageView(
-                controller: controller,
-                children: [
-                  const SizedBox.expand(),
-                  FileTreeView(
-                    root: makeTree(),
-                    expandedPaths: const {'project/lib'},
-                    gitStatus: GitStatusIndex(const [
-                      GitFileStatusEntry(
-                        path: 'project/lib/main.dart',
-                        status: 'M',
-                        staged: false,
-                      ),
-                    ]),
-                    onToggleExpanded: (_) {},
-                    onFileSelected: (_) {},
-                    onStage: (_) {},
-                    onUnstage: (_) {},
-                    onDiscard: (_) {},
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-        controller.jumpToPage(1);
-        await tester.pumpAndSettle();
-
-        await openTray(tester);
-
-        expect(find.text('Stage'), findsOneWidget);
-        expect(
-          controller.page,
-          1,
-          reason: 'the page must not slide back to the agent',
-        );
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    });
-
-    testWidgets('touch rows carry no action buttons at all', (tester) async {
-      await withChangedFile(
-        tester,
-        body: () async {
-          expect(find.byTooltip('Stage Changes'), findsNothing);
-          expect(find.byTooltip('Unstage Changes'), findsNothing);
-          expect(find.byTooltip('Discard Changes'), findsNothing);
-          // What the row is FOR still shows: the diff stat.
-          expect(find.byType(AbSwipeActions), findsWidgets);
-        },
-      );
-    });
-
-    testWidgets('a swipe reveals both actions and Stage runs on tap', (
-      tester,
-    ) async {
-      String? staged;
-      await withChangedFile(
-        tester,
-        onStage: (path) => staged = path,
-        body: () async {
-          await openTray(tester);
-          expect(find.text('Stage'), findsOneWidget);
-          expect(find.text('Revert'), findsOneWidget);
-
-          await tester.tap(find.text('Stage'));
-          await tester.pumpAndSettle();
-          expect(staged, 'project/lib/main.dart');
-          // Tray closes behind the action it ran.
-          expect(find.text('Stage'), findsNothing);
-        },
-      );
-    });
-
-    testWidgets('a staged row offers Unstage in the same slot', (tester) async {
-      String? unstaged;
-      await withChangedFile(
-        tester,
-        staged: true,
-        onUnstage: (path) => unstaged = path,
-        body: () async {
-          await openTray(tester);
-          expect(find.text('Stage'), findsNothing);
-
-          await tester.tap(find.text('Unstage'));
-          await tester.pumpAndSettle();
-          expect(unstaged, 'project/lib/main.dart');
-        },
-      );
-    });
-
-    // Discard lost its button when touch rows lost theirs, so the tray is the
-    // only way to reach it — that it is reachable at all is the point here.
-    testWidgets('Revert runs from the tray', (tester) async {
-      String? discarded;
-      await withChangedFile(
-        tester,
-        onDiscard: (path) => discarded = path,
-        body: () async {
-          await openTray(tester);
-          await tester.tap(find.text('Revert'));
-          await tester.pumpAndSettle();
-          expect(discarded, 'project/lib/main.dart');
-        },
-      );
-    });
-
-    testWidgets('a short swipe snaps back and runs nothing', (tester) async {
-      var acted = false;
-      await withChangedFile(
-        tester,
-        onStage: (_) => acted = true,
-        onDiscard: (_) => acted = true,
-        body: () async {
-          await tester.drag(row(), const Offset(-20, 0));
-          await tester.pumpAndSettle();
-
-          expect(acted, isFalse);
-          expect(find.text('Stage'), findsNothing);
-        },
-      );
-    });
-
-    // The full-swipe shortcut exists for the reversible action only. Past the
-    // tray the row travels at half the finger, so this drag is deliberately
-    // longer than the threshold it has to cross.
-    testWidgets('a full swipe stages, and never reverts', (tester) async {
-      String? staged;
-      var discarded = false;
-      await withChangedFile(
-        tester,
-        onStage: (path) => staged = path,
-        onDiscard: (_) => discarded = true,
-        body: () async {
-          await tester.drag(row(), const Offset(-780, 0));
-          await tester.pumpAndSettle();
-
-          expect(staged, 'project/lib/main.dart');
-          expect(discarded, isFalse);
-        },
-      );
-    });
-
-    // Rightward belongs to whatever surface the row sits on — the tablet's
-    // context pane closes on it — so the row must not move, let alone act.
-    testWidgets('a rightward swipe does nothing', (tester) async {
-      var acted = false;
-      await withChangedFile(
-        tester,
-        onStage: (_) => acted = true,
-        body: () async {
-          await tester.fling(row(), const Offset(500, 0), 1200);
-          await tester.pumpAndSettle();
-
-          expect(acted, isFalse);
-          expect(find.text('Stage'), findsNothing);
-        },
-      );
-    });
-
-    testWidgets('an open tray takes the row tap instead of opening the file', (
-      tester,
-    ) async {
-      String? opened;
-      await withChangedFile(
-        tester,
-        onFileSelected: (path) => opened = path,
-        body: () async {
-          await openTray(tester);
-          // Tapped by position, not by the label: an open tray has carried the
-          // row's own content off the left edge, which is the point.
-          final rect = tester.getRect(
-            find.ancestor(of: row(), matching: find.byType(AbSwipeActions)),
-          );
-          await tester.tapAt(Offset(rect.left + 40, rect.center.dy));
-          await tester.pumpAndSettle();
-
-          expect(opened, isNull);
-          expect(find.text('Stage'), findsNothing);
-        },
-      );
-    });
-
-    // The row that owns a tray absorbs its own tap to close it; every OTHER
-    // row has to close it too, or a tray stays latched open on a row nobody is
-    // touching — the same stale affordance a scroll would leave behind.
-    testWidgets('a tap on another row closes the open tray', (tester) async {
-      String? selected;
-      await withChangedFile(
-        tester,
-        onFileSelected: (path) => selected = path,
-        body: () async {
-          await openTray(tester);
-          expect(find.text('Stage'), findsOneWidget);
-
-          await tester.tap(find.text('utils.dart'));
-          await tester.pumpAndSettle();
-
-          expect(find.text('Stage'), findsNothing);
-          // …and still selects, rather than spending the tap on the dismissal.
-          expect(selected, 'project/lib/utils.dart');
-        },
-      );
-    });
-
-    testWidgets('a conflicted file has no tray without a resolve handler', (
-      tester,
-    ) async {
-      var acted = false;
-      await withChangedFile(
-        tester,
-        status: '!',
-        onStage: (_) => acted = true,
-        onDiscard: (_) => acted = true,
-        body: () async {
-          await tester.drag(row(), const Offset(-780, 0));
-          await tester.pumpAndSettle();
-
-          expect(acted, isFalse);
-          expect(find.text('Revert'), findsNothing);
-        },
-      );
-    });
-
-    testWidgets('a conflicted row trays Resolve, and only Resolve', (
-      tester,
-    ) async {
-      var acted = false;
-      String? resolved;
-      await withChangedFile(
-        tester,
-        status: '!',
-        onStage: (_) => acted = true,
-        onDiscard: (_) => acted = true,
-        onResolveConflict: (p) => resolved = p,
-        body: () async {
-          await openTray(tester);
-
-          expect(find.text('Stage'), findsNothing);
-          expect(find.text('Unstage'), findsNothing);
-          expect(find.text('Revert'), findsNothing);
-
-          await tester.tap(find.text('Resolve'));
-          await tester.pumpAndSettle();
-          expect(resolved, 'project/lib/main.dart');
-          expect(acted, isFalse);
-        },
-      );
+      expect(_labelColor(tester, 'build.log'), _colors(tester).textPrimary);
     });
   });
 
@@ -1419,6 +673,25 @@ void main() {
       expect(find.text('more items not shown'), findsNothing);
     });
 
+    testWidgets('a notice is not a row anyone can open', (tester) async {
+      final toggled = <String>[];
+      final selected = <String>[];
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: cutDirectory,
+          expandedPaths: const {'project/lib'},
+          onToggleExpanded: toggled.add,
+          onFileSelected: selected.add,
+        ),
+      );
+
+      await tester.tap(find.text('more items not shown'));
+      await tester.pump();
+
+      expect(toggled, isEmpty);
+      expect(selected, isEmpty);
+    });
+
     testWidgets(
       'a truncated directory still carries its notice beside a loading one',
       (tester) async {
@@ -1464,55 +737,69 @@ void main() {
       },
     );
 
-    // _FileTreeViewState._revealSelected jumps to an off-screen row by
-    // multiplying ONE measured row extent by a flat index, so a notice row
-    // that renders at a different height puts every row below it out by that
-    // difference per notice. The loading row's leading is a fixed-size dot
-    // where every other row's is text, which is exactly how it drifts.
-    testWidgets('every row renders at the same height', (tester) async {
-      const tree = FileNode(
-        name: 'project',
-        path: 'project',
-        type: FileNodeType.directory,
-        children: [
-          FileNode(
-            name: 'lib',
-            path: 'project/lib',
-            type: FileNodeType.directory,
-            truncated: true,
-            children: [
-              FileNode(
-                name: 'main.dart',
-                path: 'project/lib/main.dart',
-                type: FileNodeType.file,
-              ),
-            ],
-          ),
-          FileNode(
-            name: 'src',
-            path: 'project/src',
-            type: FileNodeType.directory,
-            childrenLoaded: false,
-            childrenLoading: true,
-          ),
-        ],
-      );
+    // The reveal jumps to an off-screen row by multiplying ONE row extent by a
+    // flat index, so a notice or loading row that rendered at any other height
+    // would put every row below it out by the difference. The rows of a tree
+    // share one fixed extent, so consecutive row centres are exactly that far
+    // apart whatever each row holds.
+    for (final scale in [1.0, 2.0]) {
+      testWidgets('every row kind is one extent tall at text scale $scale', (
+        tester,
+      ) async {
+        const tree = FileNode(
+          name: 'project',
+          path: 'project',
+          type: FileNodeType.directory,
+          children: [
+            FileNode(
+              name: 'lib',
+              path: 'project/lib',
+              type: FileNodeType.directory,
+              truncated: true,
+              children: [
+                FileNode(
+                  name: 'main.dart',
+                  path: 'project/lib/main.dart',
+                  type: FileNodeType.file,
+                ),
+              ],
+            ),
+            FileNode(
+              name: 'src',
+              path: 'project/src',
+              type: FileNodeType.directory,
+              childrenLoaded: false,
+              childrenLoading: true,
+            ),
+          ],
+        );
 
-      await tester.pumpWidget(
-        buildTestWidget(
-          root: tree,
-          expandedPaths: const {'project/lib', 'project/src'},
-        ),
-      );
+        await tester.pumpWidget(
+          buildTestWidget(
+            root: tree,
+            expandedPaths: const {'project/lib', 'project/src'},
+            textScale: scale,
+          ),
+        );
 
-      final rows = find.byType(AbListRow);
-      final count = rows.evaluate().length;
-      expect(count, greaterThan(4));
-      final heights = <double>{
-        for (var i = 0; i < count; i++) tester.getSize(rows.at(i)).height,
-      };
-      expect(heights, hasLength(1));
-    });
+        final extent = CarbonTreeView.rowExtentOf(
+          tester.element(find.byType(CarbonTreeView)),
+        );
+        final centres = [
+          for (final label in [
+            'lib',
+            'main.dart',
+            'more items not shown',
+            'src',
+            'Loading…',
+          ])
+            tester.getCenter(find.text(label)).dy,
+        ];
+        for (var i = 1; i < centres.length; i++) {
+          expect(centres[i] - centres[i - 1], closeTo(extent, 0.01));
+        }
+      });
+    }
   });
 
   group('loading notice', () {
@@ -1594,71 +881,6 @@ void main() {
   });
 
   group('FileTreeView reuse across rebuilds', () {
-    Widget rowFor(WidgetTester tester, String path, FileNodeType type) =>
-        tester.widget(find.byKey(ValueKey((path, type))));
-
-    List<GitFileStatusEntry> mainEntries(int additions) => [
-      GitFileStatusEntry(
-        path: 'project/lib/main.dart',
-        status: 'M',
-        staged: false,
-        additions: additions,
-        deletions: 1,
-      ),
-    ];
-
-    testWidgets('a file-tree update reuses the changes rows', (tester) async {
-      final entries = mainEntries(3);
-      Widget build({FileNode? root}) => buildTestWidget(
-        root: root,
-        changesOnly: true,
-        gitFileEntries: entries,
-      );
-      FileNode mainRow() =>
-          (rowFor(tester, 'project/lib/main.dart', FileNodeType.file)
-                      as dynamic)
-                  .node
-              as FileNode;
-
-      await tester.pumpWidget(build());
-      final node = mainRow();
-
-      await tester.pumpWidget(build(root: makeTree()));
-      // The row widget is rebuilt; what it carries is not re-derived.
-      expect(identical(mainRow(), node), isTrue);
-      expect(find.text('+3'), findsOneWidget);
-    });
-
-    testWidgets('a replaced change list is never served stale', (tester) async {
-      final tree = makeTree();
-      final lib = {'project/lib'};
-      final replacement = [
-        ...mainEntries(5),
-        const GitFileStatusEntry(
-          path: 'project/README.md',
-          status: 'M',
-          staged: false,
-          additions: 7,
-        ),
-      ];
-      for (final changesOnly in [true, false]) {
-        for (final entries in [mainEntries(3), List.of(replacement)]) {
-          await tester.pumpWidget(
-            buildTestWidget(
-              root: tree,
-              expandedPaths: lib,
-              changesOnly: changesOnly,
-              gitFileEntries: entries,
-            ),
-          );
-        }
-        final reason = 'changesOnly: $changesOnly';
-        expect(find.text('+3'), findsNothing, reason: reason);
-        expect(find.text('+5'), findsOneWidget, reason: reason);
-        expect(find.text('+7'), findsOneWidget, reason: reason);
-      }
-    });
-
     testWidgets('an unchanged file tree is not re-walked on rebuild', (
       tester,
     ) async {
@@ -1680,6 +902,59 @@ void main() {
 
       expect(root.childrenReads, reads);
       expect(find.text('main.dart'), findsOneWidget);
+    });
+
+    testWidgets('a replaced expanded set is walked again', (tester) async {
+      final root = makeTree();
+      await tester.pumpWidget(buildTestWidget(root: root));
+      expect(find.text('main.dart'), findsNothing);
+
+      await tester.pumpWidget(
+        buildTestWidget(root: root, expandedPaths: {'project/lib'}),
+      );
+      expect(find.text('main.dart'), findsOneWidget);
+    });
+  });
+
+  group('Carbon scope', () {
+    testWidgets('no Ab widget sits under the scope in any row kind', (
+      tester,
+    ) async {
+      const tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        truncated: true,
+        children: [
+          FileNode(
+            name: 'lib',
+            path: 'project/lib',
+            type: FileNodeType.directory,
+            children: [
+              FileNode(
+                name: 'main.dart',
+                path: 'project/lib/main.dart',
+                type: FileNodeType.file,
+              ),
+            ],
+          ),
+          FileNode(
+            name: 'src',
+            path: 'project/src',
+            type: FileNodeType.directory,
+            childrenLoaded: false,
+            childrenLoading: true,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: tree,
+          expandedPaths: const {'project/lib', 'project/src'},
+        ),
+      );
+
+      expect(abWidgetsInScope(tester), isEmpty);
     });
   });
 }

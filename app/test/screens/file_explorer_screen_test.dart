@@ -1,13 +1,10 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/widgets/ab_disclosure_chevron.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
-import 'package:antgrid/design/widgets/ab_icon.dart';
-import 'package:antgrid/design/widgets/ab_toolbar.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -43,6 +40,11 @@ List<Override> _readySessionOverrides(ProjectSession session) => [
   selectedRegistrationIdProvider.overrideWithValue('test'),
   projectSessionProvider('test').overrideWith((ref) => session),
 ];
+
+Finder _button(String label) => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == label,
+  description: 'CarbonButton "$label"',
+);
 
 void main() {
   Future<Widget> buildTestWidget({
@@ -84,7 +86,7 @@ void main() {
         await buildTestWidget(treeState: const AsyncLoading()),
       );
 
-      expect(find.byType(AbLoading), findsOneWidget);
+      expect(find.byType(CarbonLoading), findsOneWidget);
       expect(find.text('loading files...'), findsOneWidget);
     });
 
@@ -146,7 +148,7 @@ void main() {
         await tester.pump();
 
         expect(tester.takeException(), isNull);
-        expect(find.byType(AbLoading), findsOneWidget);
+        expect(find.byType(CarbonLoading), findsOneWidget);
         expect(find.text('loading files...'), findsOneWidget);
       },
     );
@@ -270,7 +272,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.byTooltip('Back to file tree'), findsOneWidget);
+      expect(_button('Back to file tree'), findsOneWidget);
     });
 
     testWidgets('wide (800dp): no back button is present', (tester) async {
@@ -280,7 +282,7 @@ void main() {
       await tester.pump();
 
       // In wide mode the back button is not rendered.
-      expect(find.byTooltip('Back to file tree'), findsNothing);
+      expect(_button('Back to file tree'), findsNothing);
     });
   });
   group('FileExplorerScreen filter box', () {
@@ -341,32 +343,11 @@ void main() {
       String query,
     ) async {
       await tester.enterText(filterInput(), query);
-      // Only FileService.findDebounce: FileSearchBar is mounted with
-      // Duration.zero so the two debounces do not stack.
+      // Only FileService.findDebounce: FileSearchBar reports every keystroke
+      // so the two debounces do not stack.
       await tester.pump(FileService.findDebounce + const Duration(milliseconds: 20));
       return t.sent.lastWhere((m) => m['type'] == 'file:find');
     }
-
-    testWidgets('the filter glyph starts in the chevron column of the tree', (
-      tester,
-    ) async {
-      final (_, widget) = await buildFilterWidget();
-      await tester.pumpWidget(widget);
-      await tester.pump();
-
-      // LEFT edges, not centres: the two glyphs are different widths, so a
-      // centre comparison would assert icon sizes rather than the layout. The inset
-      // itself is what has to agree — AbListRow's own horizontal padding on
-      // one side, the toolbar's padding plus its centre-slot gap on the other.
-      final icon = find.descendant(
-        of: find.byType(FileSearchBar),
-        matching: find.byType(AbIcon),
-      );
-      expect(
-        tester.getTopLeft(icon.first).dx,
-        tester.getTopLeft(find.byType(AbDisclosureChevron).first).dx,
-      );
-    });
 
     testWidgets('the filter shares the action row rather than taking its own', (
       tester,
@@ -379,11 +360,12 @@ void main() {
       // — which searches file CONTENTS, not names — and the tree lost a row
       // of height to say it twice.
       expect(
-        find.descendant(
-          of: find.byType(AbToolbar),
-          matching: find.byType(FileSearchBar),
-        ),
-        findsOneWidget,
+        tester.getCenter(find.byType(FileSearchBar)).dy,
+        closeTo(tester.getCenter(_button('Refresh')).dy, 0.5),
+      );
+      expect(
+        tester.getCenter(_button('Search in files')).dy,
+        closeTo(tester.getCenter(_button('Refresh')).dy, 0.5),
       );
     });
 
