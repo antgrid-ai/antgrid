@@ -867,6 +867,67 @@ void main() {
     handle.dispose();
   });
 
+  group('content', () {
+    const iconKey = ValueKey('glyph');
+    Widget button(CarbonButtonContent content, {bool expand = true}) {
+      final b = CarbonButton(
+        key: _btn,
+        label: 'Password',
+        kind: CarbonButtonKind.tertiary,
+        content: content,
+        expand: expand,
+        icon: const SizedBox.square(key: iconKey, dimension: 16),
+        onPressed: () {},
+      );
+      // A tight 200 px host would stretch the button whatever `expand` says,
+      // so the shrink-to-content case must size from its own content.
+      return expand ? _host(b, width: 200) : _aligned(b);
+    }
+
+    testWidgets('centered puts the icon before the label, the pair centred', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, button(CarbonButtonContent.centered));
+      final box = tester.getRect(find.byKey(_btn));
+      final icon = tester.getRect(find.byKey(iconKey));
+      final label = tester.getRect(find.text('Password'));
+      expect(icon.right, lessThan(label.left));
+      expect(label.left - icon.right, CarbonSpacing.spacing03);
+      expect(
+        (icon.left - box.left) - (box.right - label.right),
+        closeTo(0, 0.5),
+      );
+    });
+
+    testWidgets('centered pads 8 px when the pair fills the button', (
+      tester,
+    ) async {
+      await pumpCarbon(
+        tester,
+        button(CarbonButtonContent.centered, expand: false),
+      );
+      final box = tester.getRect(find.byKey(_btn));
+      expect(
+        tester.getRect(find.byKey(iconKey)).left - box.left,
+        CarbonSpacing.spacing03,
+      );
+      expect(
+        box.right - tester.getRect(find.text('Password')).right,
+        CarbonSpacing.spacing03,
+      );
+    });
+
+    testWidgets('standard keeps the label first and the icon at the end', (
+      tester,
+    ) async {
+      await pumpCarbon(tester, button(CarbonButtonContent.standard));
+      final box = tester.getRect(find.byKey(_btn));
+      final icon = tester.getRect(find.byKey(iconKey));
+      expect(tester.getRect(find.text('Password')).right, lessThan(icon.left));
+      expect(box.right - icon.right, CarbonSpacing.spacing05);
+    });
+  });
+
   group('neutral', () {
     Color? labelColor(WidgetTester tester) =>
         tester.widget<Text>(find.text('Value')).style?.color;

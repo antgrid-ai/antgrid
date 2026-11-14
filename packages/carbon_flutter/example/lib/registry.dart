@@ -28,6 +28,7 @@ import 'pages/select_page.dart';
 import 'pages/status_icon_page.dart';
 import 'pages/tabs_page.dart';
 import 'pages/tag_page.dart';
+import 'pages/tile_page.dart';
 import 'pages/text_input_page.dart';
 import 'pages/toggle_page.dart';
 import 'pages/tooltip_page.dart';
@@ -213,6 +214,12 @@ final List<GalleryEntry> galleryEntries = <GalleryEntry>[
     title: 'Tag',
     group: 'Components',
     builder: (_) => const TagPage(),
+  ),
+  GalleryEntry(
+    id: 'tile',
+    title: 'Tile',
+    group: 'Components',
+    builder: (_) => const TilePage(),
   ),
   GalleryEntry(
     id: 'contained-list',

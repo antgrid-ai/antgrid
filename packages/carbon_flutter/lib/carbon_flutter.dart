@@ -28,6 +28,7 @@ export 'src/components/side_nav.dart';
 export 'src/components/status_icon.dart';
 export 'src/components/tabs.dart';
 export 'src/components/tag.dart';
+export 'src/components/tile.dart';
 export 'src/components/text_input.dart';
 export 'src/components/toggle.dart';
 export 'src/components/tooltip.dart';

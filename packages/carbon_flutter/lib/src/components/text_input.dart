@@ -331,6 +331,7 @@ class CarbonTextInput extends StatefulWidget {
     this.enableSuggestions = true,
     this.autofocus = false,
     this.semanticLabel,
+    this.announceError = false,
     this.onChanged,
     this.onSubmitted,
     this.onEditingComplete,
@@ -350,6 +351,11 @@ class CarbonTextInput extends StatefulWidget {
 
   /// The host's validation error, shown with an icon in place of the helper.
   final String? errorText;
+
+  /// Speaks [errorText] as a polite live region when it appears. For hosts
+  /// that set the error after an action (a rejected submit) rather than while
+  /// the user is editing, and have no form to announce it.
+  final bool announceError;
 
   /// A non-blocking warning, shown when there is no error.
   final String? warnText;
@@ -820,6 +826,7 @@ class _CarbonTextInputState extends State<CarbonTextInput> {
         enabled: enabled,
         readOnly: readOnly,
         excludeTextSemantics: true,
+        announceError: widget.announceError,
         child: box,
       ),
     );

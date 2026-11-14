@@ -63,6 +63,18 @@ enum CarbonButtonSize {
   final double height;
 }
 
+/// How a text [CarbonButton] lays out its label and [CarbonButton.icon].
+enum CarbonButtonContent {
+  /// Carbon's layout: the label at the start, the icon pinned to the end, 16 px
+  /// inline padding.
+  standard,
+
+  /// The icon before the label, the pair centred in the button, 8 px between
+  /// them and 8 px inline padding. For a row of equal buttons whose icons must
+  /// fit beside their labels in a narrow column.
+  centered,
+}
+
 void _ignore() {}
 
 /// A Carbon button.
@@ -101,6 +113,7 @@ class CarbonButton extends StatelessWidget {
     this.leading,
     this.neutral = false,
     this.focusableWhenDisabled = false,
+    this.content = CarbonButtonContent.standard,
   }) : assert(
          !neutral || kind == CarbonButtonKind.ghost,
          'neutral applies only to ghost buttons',
@@ -146,6 +159,7 @@ class CarbonButton extends StatelessWidget {
        neutral = false,
        expand = false,
        minWidth = null,
+       content = CarbonButtonContent.standard,
        _iconOnly = true;
 
   /// The visible text; null for an icon-only button.
@@ -236,7 +250,14 @@ class CarbonButton extends StatelessWidget {
   /// technology.
   final bool focusableWhenDisabled;
 
+  /// The label and icon arrangement; ignored by the icon-only form. With
+  /// [CarbonButtonContent.centered] the icon sits before the label and
+  /// [minWidth] only widens the button around the centred pair.
+  final CarbonButtonContent content;
+
   final bool _iconOnly;
+
+  bool get _centered => !_iconOnly && content == CarbonButtonContent.centered;
 
   static const double _maxWidth = 320;
 
@@ -270,7 +291,8 @@ class CarbonButton extends StatelessWidget {
     final hPad = switch ((_iconOnly, extraSmall)) {
       (true, true) => CarbonSpacing.spacing02,
       (true, false) || (false, true) => CarbonSpacing.spacing03,
-      (false, false) => CarbonSpacing.spacing05,
+      (false, false) =>
+        _centered ? CarbonSpacing.spacing03 : CarbonSpacing.spacing05,
     };
     final vPad = extraSmall
         ? 0.0
@@ -348,7 +370,7 @@ class CarbonButton extends StatelessWidget {
                   topPinned ? _pinnedPadding : vPad,
                 ),
                 child: Align(
-                  alignment: _iconOnly
+                  alignment: _iconOnly || _centered
                       ? Alignment.center
                       : (topPinned
                             ? AlignmentDirectional.topStart
@@ -469,6 +491,21 @@ class CarbonButton extends StatelessWidget {
               _spinner(theme, style),
             ],
           );
+    if (_centered) {
+      // The Align in build centres the row inside whatever width the button is
+      // given, so no spacer or fill is needed.
+      return hasIcon
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              spacing: CarbonSpacing.spacing03,
+              children: [
+                _iconBox(theme, style),
+                Flexible(child: labelWidget),
+              ],
+            )
+          : labelWidget;
+    }
     if (!hasIcon) return expand ? _fill(labelWidget) : labelWidget;
     if (floor != null && !expand) {
       // The row sizes to the floor, and spaceBetween pins the icon to the end.
