@@ -133,8 +133,9 @@ class CarbonCodeStyle {
 }
 
 /// Highlights single lines with a [CarbonCodeStyle], for surfaces that paint
-/// their own rows. Same per-line independence and bounded cache as the Ab
-/// `CodeLineHighlighter`, and the same language table, with the palette
+/// their own rows. Each line is highlighted on its own: a diff hunk is a
+/// fragment and its -/+ lines interleave two versions of the file, so state
+/// carried between lines would cascade into the wrong colours. The palette is
 /// supplied per call so a brightness switch recolours open rows.
 class CarbonLineHighlighter {
   CarbonLineHighlighter._(this._languageKey, Mode mode)

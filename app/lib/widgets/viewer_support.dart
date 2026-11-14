@@ -1,13 +1,11 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon.dart';
 import '../models/file_tree_models.dart';
+import 'carbon_empty_state.dart';
 
 /// Last path segment. Checkout paths are POSIX-style, where a backslash is a
 /// legal filename character; only an image outside the checkout arrives as the
@@ -82,31 +80,83 @@ class ViewerModifiedBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space12,
-        vertical: AbTokens.space6,
+    return CarbonNotification(
+      kind: CarbonNotificationKind.warning,
+      title: 'File changed externally',
+      action: CarbonNotificationAction(label: 'Refresh', onPressed: onRefresh),
+    );
+  }
+}
+
+/// An icon-only viewer tool whose [label] is both its accessible name and its
+/// tooltip. [selected] latches a toggle such as Find.
+class ViewerIconButton extends StatelessWidget {
+  const ViewerIconButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    this.onPressed,
+    this.selected,
+  });
+
+  final CarbonIcons icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final bool? selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return CarbonButton.iconOnly(
+      icon: CarbonIcon(icon),
+      semanticLabel: label,
+      selected: selected,
+      onPressed: onPressed,
+    );
+  }
+}
+
+/// A viewer's pane while its file is still being read.
+class ViewerLoadingState extends StatelessWidget {
+  const ViewerLoadingState({super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
+}
+
+/// The pane for a file that no longer exists, with a way back out.
+class ViewerDeletedState extends StatelessWidget {
+  const ViewerDeletedState({super.key, this.onClose});
+
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return CarbonEmptyState(
+      icon: CarbonIcons.close,
+      heading: 'This file was deleted',
+      action: CarbonButton(
+        label: 'Close',
+        kind: CarbonButtonKind.ghost,
+        onPressed: onClose,
       ),
-      decoration: BoxDecoration(
-        color: c.bgSurface,
-        border: Border(bottom: BorderSide(color: c.borderSubtle)),
-      ),
-      child: Row(
-        children: [
-          AbIcon(AbIcons.warning, size: AbTokens.fontBody, color: c.warning),
-          const SizedBox(width: AbTokens.space8),
-          Expanded(
-            child: Text(
-              'File changed externally',
-              style: AbTokens.sansStyle(color: c.warning),
-            ),
-          ),
-          GestureDetector(
-            onTap: onRefresh,
-            child: Text('Refresh', style: AbTokens.sansStyle(color: c.accent)),
-          ),
-        ],
+    );
+  }
+}
+
+/// A read or render failure shown inline in the viewer's pane.
+class ViewerErrorNotice extends StatelessWidget {
+  const ViewerErrorNotice({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+      child: CarbonNotification(
+        kind: CarbonNotificationKind.error,
+        subtitle: message,
       ),
     );
   }

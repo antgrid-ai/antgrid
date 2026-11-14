@@ -6,9 +6,12 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/file_service.dart';
 import 'package:antgrid/widgets/attachment_preview_dialog.dart';
 import 'package:antgrid/widgets/file_viewer_router.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/carbon_guard.dart';
 
 class _PreviewService implements FileService {
   final changes = StreamController<FileTreeState>.broadcast();
@@ -33,6 +36,10 @@ class _PreviewService implements FileService {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+Finder button(String label) => find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == label,
+);
 
 void main() {
   testWidgets('preview follows its source service and closes that slot', (
@@ -159,15 +166,21 @@ void main() {
       await open(tester, screen: const Size(1400, 900), content: content);
       expect(find.text('notes.json'), findsOneWidget);
       expect(find.text(r'JSON · 2.0 KB · C:\Users\me\Docs'), findsOneWidget);
-      expect(find.byTooltip('Copy path'), findsOneWidget);
-      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(button('Copy path'), findsOneWidget);
+      expect(button('Close'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('leaves the viewer one header, not two', (tester) async {
       await open(tester, screen: const Size(1400, 900), content: content);
-      expect(find.byTooltip('Close file'), findsNothing);
-      expect(find.byTooltip('Download'), findsOneWidget);
+      expect(button('Close file'), findsNothing);
+      expect(button('Download'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('builds no Ab widget under its own Carbon scope', (tester) async {
+      await open(tester, screen: const Size(1400, 900), content: content);
+      expect(abWidgetsInScope(tester), isEmpty);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -176,7 +189,7 @@ void main() {
       Size dialog() => tester.getSize(
         find
             .descendant(
-              of: find.byType(Dialog),
+              of: find.byType(AttachmentPreviewDialog),
               matching: find.byType(SizedBox),
             )
             .first,

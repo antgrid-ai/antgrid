@@ -1,13 +1,10 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pdfrx/pdfrx.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon_button.dart';
 import '../models/file_tree_models.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/value_controller.dart';
@@ -99,8 +96,8 @@ class _FilePdfViewerState extends State<FilePdfViewer> {
       PdfScrollbar(controller: _controller),
       PdfScrollbar(controller: _controller, axis: Axis.horizontal),
       Positioned(
-        right: AbTokens.space16,
-        bottom: AbTokens.space16,
+        right: CarbonSpacing.spacing05,
+        bottom: CarbonSpacing.spacing05,
         child: _ZoomControls(controller: _controller),
       ),
     ];
@@ -112,17 +109,7 @@ class _FilePdfViewerState extends State<FilePdfViewer> {
     StackTrace? stackTrace,
     PdfDocumentRef documentRef,
   ) {
-    final c = context.antgrid;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AbTokens.space16),
-        child: Text(
-          'Could not open PDF: $error',
-          textAlign: TextAlign.center,
-          style: AbTokens.sansStyle(color: c.textMuted),
-        ),
-      ),
-    );
+    return ViewerErrorNotice(message: 'Could not open PDF: $error');
   }
 
   void _onLinkTap(PdfLink link) {
@@ -149,28 +136,25 @@ class _FilePdfViewerState extends State<FilePdfViewer> {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.antgrid;
+    final background = CarbonTheme.of(context).colors.background;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         buildViewerHeader(content: widget.content, onClose: widget.onClose),
         Expanded(
-          child: Container(
-            color: c.bgDeepest,
+          child: ColoredBox(
+            color: background,
             child: DecodedBytesBuilder(
               content: widget.content,
               builder: (context, bytes) => bytes == null
-                  ? Center(
-                      child: Text(
-                        "Couldn't render this PDF",
-                        style: AbTokens.sansStyle(color: c.textMuted),
-                      ),
+                  ? const ViewerErrorNotice(
+                      message: "Couldn't render this PDF",
                     )
                   : PdfViewer.data(
                       bytes,
                       sourceName: widget.content.path,
                       controller: _controller,
-                      params: _paramsFor(c.bgDeepest),
+                      params: _paramsFor(background),
                     ),
             ),
           ),
@@ -187,30 +171,28 @@ class _ZoomControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.antgrid;
-    return Container(
-      padding: const EdgeInsets.all(AbTokens.space4),
+    final colors = CarbonTheme.of(context).colors;
+    return DecoratedBox(
       decoration: BoxDecoration(
-        color: c.bgSurface,
-        border: Border.all(color: c.borderDefault),
-        borderRadius: BorderRadius.circular(AbTokens.radius5),
+        color: colors.layer01,
+        border: Border.all(color: colors.borderSubtle01),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AbIconButton(
-            icon: AbIcons.zoomOut,
-            tooltip: 'Zoom out',
-            onTap: () => detached(
+          ViewerIconButton(
+            icon: CarbonIcons.zoomOut,
+            label: 'Zoom out',
+            onPressed: () => detached(
               'FilePdfViewer',
               'zoom out',
               () => controller.zoomDown(),
             ),
           ),
-          AbIconButton(
-            icon: AbIcons.zoomIn,
-            tooltip: 'Zoom in',
-            onTap: () => detached(
+          ViewerIconButton(
+            icon: CarbonIcons.zoomIn,
+            label: 'Zoom in',
+            onPressed: () => detached(
               'FilePdfViewer',
               'zoom in',
               () => controller.zoomUp(),

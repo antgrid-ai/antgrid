@@ -2,10 +2,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_empty_state.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
-import 'package:antgrid/design/widgets/ab_scrollbar.dart';
+import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/widgets/carbon_empty_state.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:re_editor/re_editor.dart';
@@ -24,13 +23,15 @@ void main() {
     return ProviderScope(
       child: MaterialApp(
         home: Scaffold(
-          body: FileContentViewer(
-            fileContent: fileContent,
-            isLoading: isLoading,
-            selectedFilePath: selectedFilePath,
-            fileWasModified: fileWasModified,
-            onRefreshContent: onRefreshContent,
-            onClose: onClose,
+          body: AbCarbonScope(
+            child: FileContentViewer(
+              fileContent: fileContent,
+              isLoading: isLoading,
+              selectedFilePath: selectedFilePath,
+              fileWasModified: fileWasModified,
+              onRefreshContent: onRefreshContent,
+              onClose: onClose,
+            ),
           ),
         ),
       ),
@@ -42,7 +43,7 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(buildTestWidget(isLoading: true));
-      expect(find.byType(AbLoading), findsOneWidget);
+      expect(find.byType(CarbonLoading), findsOneWidget);
     });
 
     testWidgets('shows "Select a file to view" when content is null', (
@@ -65,7 +66,7 @@ void main() {
         ),
       );
 
-      expect(find.byType(AbEmptyState), findsOneWidget);
+      expect(find.byType(CarbonEmptyState), findsOneWidget);
       expect(find.text('This file was deleted'), findsOneWidget);
 
       // Tap close button
@@ -136,7 +137,7 @@ void main() {
       );
 
       expect(find.text('Binary file cannot be displayed'), findsOneWidget);
-      expect(find.text('!'), findsOneWidget);
+      expect(find.byType(CarbonNotification), findsOneWidget);
     });
   });
 
@@ -157,9 +158,11 @@ void main() {
             child: SizedBox(
               width: 400,
               height: 300,
-              child: FileContentViewer(
-                fileContent: wideFile,
-                selectedFilePath: 'lib/a.dart',
+              child: AbCarbonScope(
+                child: FileContentViewer(
+                  fileContent: wideFile,
+                  selectedFilePath: 'lib/a.dart',
+                ),
               ),
             ),
           ),
@@ -184,7 +187,7 @@ void main() {
     ) async {
       await tester.pumpWidget(host());
       await tester.pumpUntil(
-        () => find.byType(AbLoading).evaluate().isEmpty,
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
         reason: 'the highlighted editor to become interactive',
       );
 
@@ -217,7 +220,7 @@ void main() {
     ) async {
       await tester.pumpWidget(host());
       await tester.pumpUntil(
-        () => find.byType(AbLoading).evaluate().isEmpty,
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
         reason: 'the highlighted editor to become interactive',
       );
 
@@ -239,10 +242,14 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
+      await tester.pump();
 
       final bars = tester
-          .widgetList<AbScrollbar>(find.byType(AbScrollbar))
+          .widgetList<RawScrollbar>(find.byType(RawScrollbar))
           .toList();
       expect(
         bars.map((b) => b.scrollbarOrientation),
@@ -266,13 +273,14 @@ void main() {
 
     Widget host({FileContent? fileContent, int? searchLine}) => ProviderScope(
       child: MaterialApp(
-        theme: ThemeData(extensions: const [kDefaultPalette]),
         home: Scaffold(
-          body: FileContentViewer(
-            fileContent: fileContent,
-            isLoading: false,
-            selectedFilePath: 'notes.txt',
-            searchLine: searchLine,
+          body: AbCarbonScope(
+            child: FileContentViewer(
+              fileContent: fileContent,
+              isLoading: false,
+              selectedFilePath: 'notes.txt',
+              searchLine: searchLine,
+            ),
           ),
         ),
       ),
@@ -283,7 +291,9 @@ void main() {
           w is CustomPaint &&
           w.painter.runtimeType.toString() == '_LineMarkPainter',
     );
-    final markColor = kDefaultPalette.accent.withValues(alpha: 0.18);
+    final markColor = CarbonThemeData.forBrightness(
+      Brightness.light,
+    ).colors.interactive.withValues(alpha: 0.18);
 
     testWidgets('a file opened at a line marks that line', (tester) async {
       await tester.pumpWidget(host());

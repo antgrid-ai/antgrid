@@ -1,13 +1,12 @@
 import 'dart:convert';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../design/ab_icons.dart';
-import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/file_tree_models.dart';
 import '../util/ab_log.dart';
@@ -166,11 +165,11 @@ class FileDownloadButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (content.content == null) return const SizedBox.shrink();
-    final download = AbIconButton(
+    final download = ViewerIconButton(
       key: const Key('file-download'),
-      icon: AbIcons.download,
-      tooltip: 'Download',
-      onTap: () => detached(
+      icon: CarbonIcons.download,
+      label: 'Download',
+      onPressed: () => detached(
         'FileDownload',
         'download',
         () => downloadFileContent(context, content),
@@ -179,12 +178,13 @@ class FileDownloadButton extends StatelessWidget {
     if (!_isNative(TargetPlatform.android)) return download;
     return Row(
       mainAxisSize: MainAxisSize.min,
+      spacing: CarbonSpacing.spacing02,
       children: [
-        AbIconButton(
+        ViewerIconButton(
           key: const Key('file-share'),
-          icon: AbIcons.share,
-          tooltip: 'Share',
-          onTap: () => detached(
+          icon: CarbonIcons.share,
+          label: 'Share',
+          onPressed: () => detached(
             'FileDownload',
             'share',
             () => shareFileContent(context, content),

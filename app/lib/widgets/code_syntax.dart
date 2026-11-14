@@ -1,4 +1,3 @@
-import 'package:flutter/painting.dart';
 import 'package:re_highlight/re_highlight.dart';
 import 'package:re_highlight/languages/bash.dart';
 import 'package:re_highlight/languages/c.dart';
@@ -24,17 +23,8 @@ import 'package:re_highlight/languages/swift.dart';
 import 'package:re_highlight/languages/typescript.dart';
 import 'package:re_highlight/languages/xml.dart';
 import 'package:re_highlight/languages/yaml.dart';
-import 'package:re_highlight/styles/vs2015.dart';
 
-import '../design/ab_tokens.dart';
 import 'viewer_support.dart';
-
-/// Metrics every code surface renders at — the file viewer's editor and the
-/// diff viewer's hand-painted rows. Shared so a file and its own diff read at
-/// the same size; two sizes make one document look like two.
-double get kCodeFontSize => AbTokens.fontSm;
-const double kCodeFontHeight = 1.4;
-double get kCodeLineHeight => kCodeFontSize * kCodeFontHeight;
 
 final _langModes = <String, ({String key, Mode mode})>{
   'dart': (key: 'dart', mode: langDart),
@@ -80,51 +70,4 @@ final _langModes = <String, ({String key, Mode mode})>{
   final name = viewerBasename(path);
   final ext = name.contains('.') ? name.split('.').last : null;
   return ext != null ? _langModes[ext] : null;
-}
-
-/// Highlights single lines for surfaces that paint their own rows — the diff
-/// viewer, which needs per-row backgrounds and a dual line-number gutter that
-/// re_editor can't give it, but must still colour code exactly like the file
-/// viewer beside it (same [vs2015Theme]).
-///
-/// Lines are highlighted INDEPENDENTLY of each other, deliberately. A hunk is
-/// a fragment with no lead-in, and its `-`/`+` lines interleave two versions of
-/// the file — so any state carried line to line (an unterminated string, an
-/// open block comment) is as likely to be wrong as right, and a wrong state
-/// cascades over every line below it. Per line, a miss stays on its own row.
-class CodeLineHighlighter {
-  CodeLineHighlighter._(this._languageKey, Mode mode)
-    : _highlight = Highlight()..registerLanguage(_languageKey, mode);
-
-  /// Null when [path] has no known language — callers then render plain text.
-  static CodeLineHighlighter? forPath(String? path) {
-    final lang = codeLanguageForPath(path);
-    return lang == null ? null : CodeLineHighlighter._(lang.key, lang.mode);
-  }
-
-  /// Bounded so a long diff can't grow the cache without limit; hunks are
-  /// short and revisited on every scroll, so the hit rate is what matters.
-  static const _maxCachedLines = 2000;
-
-  final String _languageKey;
-  final Highlight _highlight;
-  final Map<String, TextSpan> _cache = {};
-  TextStyle? _base;
-
-  TextSpan span(String text, TextStyle base) {
-    if (base != _base) {
-      _cache.clear();
-      _base = base;
-    }
-    final cached = _cache[text];
-    if (cached != null) return cached;
-
-    final renderer = TextSpanRenderer(base, vs2015Theme);
-    _highlight.highlight(code: text, language: _languageKey).render(renderer);
-    final span = renderer.span ?? TextSpan(text: text, style: base);
-
-    if (_cache.length >= _maxCachedLines) _cache.clear();
-    _cache[text] = span;
-    return span;
-  }
 }

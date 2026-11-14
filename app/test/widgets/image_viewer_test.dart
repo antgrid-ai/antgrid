@@ -1,3 +1,4 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/file_tree_models.dart';
@@ -7,10 +8,14 @@ import 'package:antgrid/widgets/image_viewer.dart';
 const _png =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
+Widget _scope(BuildContext context, Widget? child) =>
+    AbCarbonScope(child: child!);
+
 void main() {
   testWidgets('decodes base64 and shows an Image', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
+          builder: _scope,
         home: Scaffold(
           body: ImageViewer(
             content: const FileContent(
@@ -31,6 +36,7 @@ void main() {
   testWidgets('shows fallback on bad base64', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
+          builder: _scope,
         home: Scaffold(
           body: ImageViewer(
             content: const FileContent(
