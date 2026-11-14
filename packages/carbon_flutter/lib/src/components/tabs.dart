@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -56,7 +57,8 @@ enum CarbonActivationMode {
 ///
 /// When the tabs are wider than the list they scroll horizontally, with
 /// backward and forward buttons at the ends. The focused and selected tabs are
-/// scrolled into view. A label wider than the whole list wraps inside its tab.
+/// scrolled into view. [wheelScrollsSideways] lets a vertical mouse wheel
+/// scroll them too. A label wider than the whole list wraps inside its tab.
 ///
 /// Tabs are identified by [CarbonOption.value]; a disabled option is shown but
 /// cannot be focused or selected. [CarbonOption.icon] shows after the label,
@@ -76,6 +78,8 @@ class CarbonTabs<T> extends StatefulWidget {
     this.semanticLabel,
     this.onClose,
     this.closeLabelBuilder,
+    this.onReselect,
+    this.wheelScrollsSideways = false,
   });
 
   final List<CarbonOption<T>> tabs;
@@ -96,6 +100,17 @@ class CarbonTabs<T> extends StatefulWidget {
   /// Called with the tab the user selected. Never called for the tab that is
   /// already selected.
   final ValueChanged<T> onChanged;
+
+  /// Called with the selected tab's value when it is clicked, tapped, or
+  /// activated with Enter or Space again, so the host can hand focus back to
+  /// the content the tab shows. Arrow, Home and End never call it.
+  final ValueChanged<T>? onReselect;
+
+  /// Lets a vertical mouse wheel scroll an overflowing list sideways, for
+  /// mice with no horizontal wheel. Off by default, as on the web: the list
+  /// then scrolls only for horizontal deltas (Shift+wheel, trackpads), and a
+  /// vertical wheel goes to whatever scrolls around the list.
+  final bool wheelScrollsSideways;
 
   final CarbonTabsVariant variant;
   final CarbonActivationMode activation;
@@ -247,6 +262,37 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
   void _select(CarbonOption<T> tab) {
     if (!tab.enabled || tab.value == widget.value) return;
     widget.onChanged(tab.value);
+  }
+
+  /// A press or Enter/Space on a tab, as opposed to arrowing onto it.
+  void _activate(CarbonOption<T> tab) {
+    if (!tab.enabled) return;
+    if (tab.value == widget.value) {
+      widget.onReselect?.call(tab.value);
+    } else {
+      widget.onChanged(tab.value);
+    }
+  }
+
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent || !_scroll.hasClients) return;
+    final delta = event.scrollDelta;
+    if (delta.dy == 0 || delta.dx.abs() >= delta.dy.abs()) return;
+    final position = _scroll.position;
+    final target = (position.pixels + delta.dy).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    // At an end, leave the wheel to an enclosing vertical scroll view. The
+    // list's own scrollable sits deeper and registers first when Shift flips
+    // the wheel onto its axis, so that case never reaches this handler.
+    if (target == position.pixels) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (e) {
+      if (!_scroll.hasClients) return;
+      // Down and right both move toward the end of the list, in either
+      // reading direction.
+      _scroll.position.pointerScroll((e as PointerScrollEvent).scrollDelta.dy);
+    });
   }
 
   void _handleTabFocus(Object? value, bool focused) {
@@ -417,7 +463,7 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
                             contained: contained,
                             level: level,
                             height: height,
-                            onSelect: () => _select(widget.tabs[i]),
+                            onSelect: () => _activate(widget.tabs[i]),
                             onClose: widget.onClose == null
                                 ? null
                                 : () => widget.onClose!(widget.tabs[i].value),
@@ -476,7 +522,11 @@ class _CarbonTabsState<T> extends State<CarbonTabs<T>> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         if (_canBack) scrollButton(back: true),
-        Expanded(child: scroller),
+        Expanded(
+          child: widget.wheelScrollsSideways
+              ? Listener(onPointerSignal: _onPointerSignal, child: scroller)
+              : scroller,
+        ),
         if (_canForward) scrollButton(back: false),
       ],
     );

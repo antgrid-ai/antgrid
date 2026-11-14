@@ -1,4 +1,5 @@
 import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -30,6 +31,8 @@ class _Host extends StatefulWidget {
     this.activation = CarbonActivationMode.automatic,
     this.variant = CarbonTabsVariant.line,
     this.log,
+    this.reselected,
+    this.wheelScrollsSideways = false,
   });
 
   final List<CarbonOption<String>> tabs;
@@ -37,6 +40,8 @@ class _Host extends StatefulWidget {
   final CarbonActivationMode activation;
   final CarbonTabsVariant variant;
   final List<String>? log;
+  final List<String>? reselected;
+  final bool wheelScrollsSideways;
 
   @override
   State<_Host> createState() => _HostState();
@@ -56,6 +61,8 @@ class _HostState extends State<_Host> {
           value: value,
           variant: widget.variant,
           activation: widget.activation,
+          wheelScrollsSideways: widget.wheelScrollsSideways,
+          onReselect: widget.reselected?.add,
           onChanged: (v) {
             widget.log?.add(v);
             setState(() => value = v);
@@ -196,6 +203,33 @@ void main() {
       await tester.tap(find.text('Beta'));
       await tester.pump();
       expect(log, ['b']);
+    });
+
+    testWidgets('pressing the selected tab again reports a reselect', (
+      tester,
+    ) async {
+      final log = <String>[];
+      final reselected = <String>[];
+      await pumpCarbon(
+        tester,
+        _Host(tabs: _abc, log: log, reselected: reselected),
+      );
+      await tester.tap(find.text('Alpha'));
+      await tester.pump();
+      expect(reselected, ['a']);
+      expect(log, isEmpty);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(reselected, ['a', 'a']);
+
+      // Arrowing onto a tab is a move, never a reselect.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(log, ['b', 'a']);
+      expect(reselected, ['a', 'a']);
     });
 
     testWidgets('a disabled tab never activates', (tester) async {
@@ -440,6 +474,71 @@ void main() {
       }
       expect(tester.getTopLeft(find.text('Tab number 0')).dx, before);
       handle.dispose();
+    });
+
+    for (final on in [false, true]) {
+      testWidgets('a vertical wheel ${on ? 'scrolls' : 'does not scroll'} the '
+          'list when wheelScrollsSideways is ${on ? 'on' : 'off'}', (
+        tester,
+      ) async {
+        await pumpCarbon(
+          tester,
+          _Host(tabs: many, initial: 'tab0', wheelScrollsSideways: on),
+          size: const Size(400, 400),
+        );
+        await tester.pump();
+        await tester.pump();
+        double offset() => tester
+            .state<ScrollableState>(
+              find.ancestor(
+                of: find.text('Tab number 0'),
+                matching: find.byType(Scrollable),
+              ),
+            )
+            .position
+            .pixels;
+        final pointer = TestPointer(1, PointerDeviceKind.mouse)
+          ..hover(tester.getCenter(find.text('Tab number 0')));
+        await tester.sendEventToBinding(pointer.scroll(const Offset(0, 120)));
+        await tester.pump();
+        if (on) {
+          expect(offset(), 120);
+          // Wheeling back up past the start stops there.
+          await tester.sendEventToBinding(pointer.scroll(const Offset(0, -500)));
+          await tester.pump();
+          expect(offset(), 0);
+        } else {
+          expect(offset(), 0);
+        }
+      });
+    }
+
+    testWidgets('at the start, a wheel up goes to the enclosing scroll view', (
+      tester,
+    ) async {
+      final outer = ScrollController(initialScrollOffset: 100);
+      addTearDown(outer.dispose);
+      await pumpCarbon(
+        tester,
+        SingleChildScrollView(
+          controller: outer,
+          child: Column(
+            children: [
+              const SizedBox(height: 300),
+              _Host(tabs: many, initial: 'tab0', wheelScrollsSideways: true),
+              const SizedBox(height: 600),
+            ],
+          ),
+        ),
+        size: const Size(400, 400),
+      );
+      await tester.pump();
+      await tester.pump();
+      final pointer = TestPointer(1, PointerDeviceKind.mouse)
+        ..hover(tester.getCenter(find.text('Tab number 0')));
+      await tester.sendEventToBinding(pointer.scroll(const Offset(0, -40)));
+      await tester.pump();
+      expect(outer.offset, 60);
     });
 
     testWidgets('scroll buttons are not tab stops', (tester) async {
