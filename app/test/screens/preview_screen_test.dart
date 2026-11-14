@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/providers/providers.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/screens/preview_screen.dart';
 import 'package:antgrid/widgets/send_capture_to_agent.dart';
 
@@ -48,7 +48,7 @@ void main() {
         buildTestWidget(previewState: const AsyncLoading()),
       );
 
-      expect(find.byType(AbLoading), findsOneWidget);
+      expect(find.byType(CarbonLoading), findsOneWidget);
 
       debugDefaultTargetPlatformOverride = null;
     });

@@ -185,6 +185,8 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
+      await tester.ensureVisible(find.bySemanticsLabel('Rectangle'));
+      await tester.pumpAndSettle();
       await tester.tap(find.bySemanticsLabel('Rectangle'));
       await tester.pumpAndSettle();
       // A tap, not a drag: a zero-sized rectangle is invisible, so it must
@@ -258,7 +260,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'never mind');
 
-      await tester.tap(find.byTooltip('Cancel note'));
+      await tester.tap(find.bySemanticsLabel('Cancel note'));
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsNothing);
