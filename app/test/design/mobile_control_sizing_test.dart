@@ -52,19 +52,21 @@ Future<double> _diffCodeFontSize(WidgetTester tester) async {
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(
-        body: SizedBox(
-          width: 400,
-          height: 400,
-          child: DiffViewer(
-            path: 'lib/a.dart',
-            gitStatus: 'M',
-            diff: '@@ -1,1 +1,1 @@\n-old\n+final marker = 1;\n',
-            additions: 1,
-            deletions: 1,
-            onViewFile: () {},
-            onClose: () {},
-            onSendToAgent: (context, message) async {},
+      home: AbCarbonScope(
+        child: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 400,
+            child: DiffViewer(
+              path: 'lib/a.dart',
+              gitStatus: 'M',
+              diff: '@@ -1,1 +1,1 @@\n-old\n+final marker = 1;\n',
+              additions: 1,
+              deletions: 1,
+              onViewFile: () {},
+              onClose: () {},
+              onSendToAgent: (context, message) async {},
+            ),
           ),
         ),
       ),
@@ -131,14 +133,12 @@ void main() {
 
   group('diff code font follows the platform in force', () {
     testWidgets('android renders the mobile code size', (tester) async {
-      expect(await _diffCodeFontSize(tester), AbTokens.fontSm);
-      expect(AbTokens.fontSm, 13);
+      expect(await _diffCodeFontSize(tester), 13);
     }, variant: _android);
 
     testWidgets('windows after android renders the desktop code size', (
       tester,
     ) async {
-      expect(AbTokens.fontSm, 12);
       expect(await _diffCodeFontSize(tester), 12);
     }, variant: _windows);
   });
