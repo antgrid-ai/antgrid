@@ -2,12 +2,12 @@
 // the backlog drawer. The rules pinned here are the ones the two hosts must not
 // be able to answer differently: what a return key does, when the send key is
 // live, and who owns the text.
-import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
+import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_judge_chip.dart';
 import 'package:antgrid/widgets/handler/handler_session_settings.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,11 +31,10 @@ Future<TextEditingController> _pump(
   await tester.pumpWidget(
     ProviderScope(
       child: MaterialApp(
-        theme: ThemeData.dark().copyWith(
-          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
-        ),
+        theme: buildAbTheme(),
         home: Scaffold(
-          body: HandlerInstructionComposer(
+          body: AbCarbonScope(
+            child: HandlerInstructionComposer(
             terminalId: 't1',
             controller: controller,
             hintText: 'Send an instruction…',
@@ -49,6 +48,7 @@ Future<TextEditingController> _pump(
                     semanticLabel: 'Send to Handler',
                     onSend: onSend,
                   ),
+            ),
           ),
         ),
       ),
@@ -122,7 +122,7 @@ void main() {
       await tester.pump();
 
       expect(controller.text, 'also update the docs\n');
-      expect(find.byType(ComposerSendButton), findsNothing);
+      expect(find.byKey(const Key('handler-instruction-send')), findsNothing);
     });
 
     testWidgets('Enter on an empty field neither sends nor is swallowed', (
@@ -146,13 +146,12 @@ void main() {
     ) async {
       // The whole point of dropping `TextInputAction.send`: on a phone Enter
       // must insert a newline and the send key must be the only commit. With
-      // maxLines null and no explicit action, the platform gives us newline.
+      // a multiline Carbon input the platform action is newline.
       await _pump(tester, onSend: () {});
       final field = tester.widget<TextField>(
         find.descendant(of: _field, matching: find.byType(TextField)),
       );
-      expect(field.textInputAction, isNull);
-      expect(field.maxLines, isNull);
+      expect(field.textInputAction, TextInputAction.newline);
     });
   });
 
@@ -163,21 +162,21 @@ void main() {
       await _pump(tester, onSend: () {});
       await _type(tester, '   ');
 
-      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNull);
+      expect(tester.widget<CarbonButton>(_sendKey).onPressed, isNull);
 
       await _type(tester, '   x');
 
-      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNotNull);
+      expect(tester.widget<CarbonButton>(_sendKey).onPressed, isNotNull);
     });
 
     testWidgets('opens dead on an empty host controller', (tester) async {
       await _pump(tester, onSend: () {});
-      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNull);
+      expect(tester.widget<CarbonButton>(_sendKey).onPressed, isNull);
     });
 
     testWidgets('opens live on a controller the host seeded', (tester) async {
       await _pump(tester, onSend: () {}, text: 'carried over');
-      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNotNull);
+      expect(tester.widget<CarbonButton>(_sendKey).onPressed, isNotNull);
     });
 
     testWidgets('a tap commits without touching the words', (tester) async {
@@ -194,18 +193,18 @@ void main() {
   });
 
   group('the box', () {
-    testWidgets('opens at three lines and stops growing at the cap', (
-      tester,
-    ) async {
+    testWidgets('opens at one line and stops growing at the cap', (tester) async {
       final controller = await _pump(tester, onSend: () {});
-      expect(tester.widget<AbPromptField>(_field).minLines, 3);
+      final opening = tester.getSize(_field).height;
 
       controller.text = [for (var i = 0; i < 40; i++) 'line $i'].join('\n');
       await tester.pumpAndSettle();
 
       // A long instruction scrolls inside the box rather than pushing the
       // backlog list — or the arm sheet's own commit — off screen.
-      expect(tester.getSize(_field).height, lessThanOrEqualTo(176.0));
+      final grown = tester.getSize(_field).height;
+      expect(grown, greaterThan(opening));
+      expect(grown, lessThanOrEqualTo(opening + 6 * 40.0));
     });
 
     testWidgets('carries the judge that will read what is typed', (

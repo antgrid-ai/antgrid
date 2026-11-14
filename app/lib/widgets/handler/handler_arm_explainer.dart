@@ -1,15 +1,10 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_adaptive_sheet.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_dialog.dart';
-import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
@@ -99,6 +94,9 @@ typedef HandlerArmDecision = ({
 /// judge cannot run headless, and the picker that fixes it belongs beside the
 /// warning. A title/body/two-buttons dialog has nowhere to put a control.
 ///
+/// [context] must sit under a Carbon scope, which the modal follows — an
+/// Antgrid-painted caller presents from a scoped node, never from its own.
+///
 /// Every arm opens it, not just the first: the sentence typed here is the only
 /// backlog a session can be given AT arm time, and the coverage it warns about
 /// is per-agent — so a user whose last arm was a watchable agent must still
@@ -112,9 +110,9 @@ Future<HandlerArmDecision?> showHandlerArmSheet(
   String? openingPrompt,
   bool? judgeCapable,
   bool explain = true,
-}) => showAbAdaptiveSheet<HandlerArmDecision>(
+}) => showCarbonModal<HandlerArmDecision>(
   context,
-  child: _ArmSheet(
+  builder: (_) => _ArmSheet(
     terminalId: terminalId,
     initial: initial,
     openingPrompt: openingPrompt,
@@ -204,7 +202,8 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
+    final c = t.colors;
     // Whitespace alone is not a goal to quote, and the store holds whatever the
     // New Session composer was sent with.
     //
@@ -234,135 +233,91 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
           : ref.watch(agentCatalogProvider)[effectiveJudge]?.judgeCapable,
       explain: widget.explain,
     );
-    return SingleChildScrollView(
-      child: Column(
+    return CarbonModal(
+      title: 'Arm Handler',
+      body: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: abDialogTitlePadding,
-            child: abDialogTitle(
-              'Arm Handler',
-              onClose: () => Navigator.of(context).maybePop(),
-            ),
-          ),
           // Absent on a repeat arm over a covered agent, where every sentence
           // this sheet could say has either been read already or would be a
           // claim about coverage nothing reported. The title and the composer
           // carry it from there.
-          if (body != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AbTokens.space16,
-                0,
-                AbTokens.space16,
-                AbTokens.space16,
-              ),
-              child: Text(
-                body,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: p.textSecondary,
-                ),
-              ),
-            )
-          else
-            // The title row carries no bottom padding of its own — a paragraph's
-            // leading is what has always separated it from what follows.
-            const SizedBox(height: AbTokens.space12),
+          if (body != null) ...[
+            Text(
+              body,
+              style: t.typography.body.copyWith(color: c.textSecondary),
+            ),
+            const SizedBox(height: CarbonSpacing.spacing05),
+          ],
           // The composer is the only block on this sheet that had no label, and
           // it is the one the sheet exists for. A hint is not a label: it is
           // gone the moment the user types, and on the ordinary repeat arm —
           // where the explanatory body is retired — an unlabelled box under a
           // bare title left the sheet with no statement of its subject at all.
-          // Geometry matches [HandlerLensControl]'s own heads so the three
-          // blocks read as one column.
-          const AbSectionHeader(
-            label: "What to do while you're away",
-            padding: EdgeInsets.fromLTRB(
-              AbTokens.space16,
-              0,
-              AbTokens.space16,
-              AbTokens.space6,
-            ),
+          // Same head as [HandlerLensControl]'s own so the two blocks read as
+          // one column.
+          Text(
+            "What to do while you're away",
+            style: t.typography.label.copyWith(color: c.textSecondary),
           ),
+          const SizedBox(height: CarbonSpacing.spacing02),
           // The antecedent for the composer's "beyond that?", shown rather than
           // referred to — this replaces the paragraph that used to describe it.
           // Two lines at most: a reminder of a sentence the user wrote, not a
           // second place to read it in full.
-          if (hasGoal)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AbTokens.space16,
-                0,
-                AbTokens.space16,
-                AbTokens.space8,
+          if (hasGoal) ...[
+            Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    // Names the surface the sentence lands on, and says
+                    // WHERE in it: this is entry #1, the one the backlog
+                    // pins above everything typed later.
+                    text: 'Your backlog starts with: ',
+                    style: TextStyle(color: c.textHelper),
+                  ),
+                  TextSpan(
+                    text: goal,
+                    style: TextStyle(color: c.textSecondary),
+                  ),
+                ],
               ),
-              child: Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      // Names the surface the sentence lands on, and says
-                      // WHERE in it: this is entry #1, the one the backlog
-                      // pins above everything typed later.
-                      text: 'Your backlog starts with: ',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXs,
-                        color: p.textMuted,
-                      ),
-                    ),
-                    TextSpan(
-                      text: goal,
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXs,
-                        color: p.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+              style: t.typography.helper,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
+            const SizedBox(height: CarbonSpacing.spacing03),
+          ],
           // Directly under the goal it continues, and above the lens control:
           // this box IS the act, and what the judge looks for is a setting
           // subordinate to it — so the cursor opens here and the sheet can be
           // answered without first aiming at it. The cost is a phone keyboard
           // over the copy explaining what arming does; it scrolls back.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AbTokens.space16,
-              0,
-              AbTokens.space16,
-              AbTokens.space16,
-            ),
-            child: HandlerInstructionComposer(
-              terminalId: widget.terminalId,
-              controller: _instruction,
-              hintText: hasGoal
-                  ? 'Anything to add beyond that?'
-                  // The empty backlog's invitation with the clause the
-                  // section head above already carries taken out — the drawer
-                  // keeps the full sentence because nothing labels the box
-                  // there. Same verb either way: one act worded one way.
-                  : 'Add what you want done.',
-              judge: (
-                judgeTool: _value.judgeTool,
-                judgeModel: _value.judgeModel,
+          HandlerInstructionComposer(
+            terminalId: widget.terminalId,
+            controller: _instruction,
+            hintText: hasGoal
+                ? 'Anything to add beyond that?'
+                // The empty backlog's invitation with the clause the
+                // section head above already carries taken out — the drawer
+                // keeps the full sentence because nothing labels the box
+                // there. Same verb either way: one act worded one way.
+                : 'Add what you want done.',
+            judge: (judgeTool: _value.judgeTool, judgeModel: _value.judgeModel),
+            onJudgeChanged: (pick) => setState(
+              () => _value = (
+                judgeTool: pick.judgeTool,
+                judgeModel: pick.judgeModel,
+                lens: _value.lens,
               ),
-              onJudgeChanged: (pick) => setState(
-                () => _value = (
-                  judgeTool: pick.judgeTool,
-                  judgeModel: pick.judgeModel,
-                  lens: _value.lens,
-                ),
-              ),
-              judgeScopeNote: handlerJudgeScopeOnArm,
-              autofocus: true,
-              // No send key: this sheet's one commit is [Arm Handler] below.
-              send: null,
             ),
+            judgeScopeNote: handlerJudgeScopeOnArm,
+            autofocus: true,
+            // No send key: this sheet's one commit is [Arm Handler] below.
+            send: null,
           ),
+          const SizedBox(height: CarbonSpacing.spacing06),
           // The judge rows stay off this sheet — the composer's chip is that
           // picker here, and mounting both would be two controls for one value.
           HandlerLensControl(
@@ -376,51 +331,45 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
             onRoleTapped: () => _roleTouched = true,
             onBriefEdited: () => _briefTouched = true,
           ),
-          Padding(
-            padding: const EdgeInsets.all(AbTokens.space16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                AbButton(
-                  label: 'Not now',
-                  onTap: () => Navigator.of(context).maybePop(),
-                ),
-                const SizedBox(width: AbTokens.space8),
-                AbButton(
-                  label: 'Arm Handler',
-                  variant: AbButtonVariant.primary,
-                  onTap: () {
-                    // Only the judge half of this delta is used: the lens is
-                    // sent off the touch flags instead, because a seed this app
-                    // was never told cannot be diffed against.
-                    final edit = handlerSessionSettingsEdit(_opened, _value);
-                    Navigator.of(context).maybePop((
-                      settings: (
-                        judgeTool: edit.judgeTool,
-                        judgeModel: edit.judgeModel,
-                        role: _roleTouched ? (_value.lens?.roleId ?? '') : null,
-                        // Trimmed here rather than in the field, which commits
-                        // raw so the controller is never rewritten under the
-                        // cursor: a brief of nothing but spaces is a clear.
-                        brief: _briefTouched
-                            ? (_value.lens?.brief ?? '').trim()
-                            : null,
-                      ),
-                      instruction: _instruction.text,
-                    ));
-                  },
-                ),
-              ],
-            ),
-          ),
         ],
       ),
+      actions: [
+        CarbonModalAction(
+          label: 'Not now',
+          kind: CarbonButtonKind.secondary,
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        CarbonModalAction(
+          label: 'Arm Handler',
+          onPressed: () {
+            // Only the judge half of this delta is used: the lens is
+            // sent off the touch flags instead, because a seed this app
+            // was never told cannot be diffed against.
+            final edit = handlerSessionSettingsEdit(_opened, _value);
+            Navigator.of(context).maybePop((
+              settings: (
+                judgeTool: edit.judgeTool,
+                judgeModel: edit.judgeModel,
+                role: _roleTouched ? (_value.lens?.roleId ?? '') : null,
+                // Trimmed here rather than in the field, which commits
+                // raw so the controller is never rewritten under the
+                // cursor: a brief of nothing but spaces is a clear.
+                brief: _briefTouched ? (_value.lens?.brief ?? '').trim() : null,
+              ),
+              instruction: _instruction.text,
+            ));
+          },
+        ),
+      ],
     );
   }
 }
 
 /// Shared arm flow. Pins the project at the start (focus can move during the
 /// sheet) but resolves its service after it, since a reconnect disposes it.
+///
+/// [context] must sit under a Carbon scope: both sheets it opens are Carbon
+/// modals that take their theme from it.
 Future<void> armWithSheet({
   required BuildContext context,
   required ProviderContainer container,
@@ -509,9 +458,9 @@ Future<bool> _showHandlerRefusal(
   BuildContext context,
   HandlerEntitlement entitlement,
 ) async =>
-    await showAbAdaptiveSheet<bool>(
+    await showCarbonModal<bool>(
       context,
-      child: _HandlerRefusalSheet(entitlement: entitlement),
+      builder: (_) => _HandlerRefusalSheet(entitlement: entitlement),
     ) ??
     false;
 
@@ -522,68 +471,34 @@ class _HandlerRefusalSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final upgradable =
         kPricingSurfacesEnabled &&
         entitlement.reason == HandlerEntitlementReason.notEntitled;
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: abDialogTitlePadding,
-            child: abDialogTitle(
-              // Names the plan on the one sheet that can sell it, and the state
-              // on the one that cannot: a title promising Pro over a machine
-              // whose credentials simply stopped answering points the user at a
-              // purchase that changes nothing.
-              upgradable ? 'Handler needs Pro' : 'Handler is unavailable',
-              onClose: () => Navigator.of(context).maybePop(false),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AbTokens.space16,
-              0,
-              AbTokens.space16,
-              AbTokens.space16,
-            ),
-            child: Text(
-              handlerEntitlementNotice(entitlement),
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: p.textSecondary,
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AbTokens.space16,
-              0,
-              AbTokens.space16,
-              AbTokens.space16,
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                AbButton(
-                  label: upgradable ? 'Not now' : 'Close',
-                  onTap: () => Navigator.of(context).maybePop(false),
-                ),
-                if (upgradable) ...[
-                  const SizedBox(width: AbTokens.space8),
-                  AbButton(
-                    label: 'See plans',
-                    variant: AbButtonVariant.primary,
-                    onTap: () => Navigator.of(context).maybePop(true),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
+    return CarbonModal(
+      // Names the plan on the one sheet that can sell it, and the state
+      // on the one that cannot: a title promising Pro over a machine
+      // whose credentials simply stopped answering points the user at a
+      // purchase that changes nothing.
+      title: upgradable ? 'Handler needs Pro' : 'Handler is unavailable',
+      body: Text(
+        handlerEntitlementNotice(entitlement),
+        style: t.typography.body.copyWith(color: t.colors.textSecondary),
       ),
+      actions: [
+        CarbonModalAction(
+          label: upgradable ? 'Not now' : 'Close',
+          kind: upgradable
+              ? CarbonButtonKind.secondary
+              : CarbonButtonKind.primary,
+          onPressed: () => Navigator.of(context).maybePop(false),
+        ),
+        if (upgradable)
+          CarbonModalAction(
+            label: 'See plans',
+            onPressed: () => Navigator.of(context).maybePop(true),
+          ),
+      ],
     );
   }
 }

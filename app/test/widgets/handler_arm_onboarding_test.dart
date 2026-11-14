@@ -1,9 +1,8 @@
 import 'dart:async';
 
 import 'package:antgrid/billing/pricing_visibility.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -26,9 +25,8 @@ import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
-import 'package:antgrid/widgets/handler/handler_judge_chip.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -404,9 +402,14 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('ARM'), findsOneWidget);
+    expect(find.text('Arm'), findsOneWidget);
 
-    await tester.tap(find.byTooltip("Dismiss — won't show again"));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
+      ),
+    );
     await tester.pump();
     final container = ProviderScope.containerOf(
       tester.element(find.byType(HandlerAwayHint)),
@@ -470,8 +473,12 @@ void main() {
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
             builder: _appToastHost,
+            // Under a Carbon scope, as the agent panel's sheet host is: the sheets
+            // are Carbon modals and take their theme from the presenting context.
             home: const Scaffold(
-              body: SizedBox.shrink(key: ValueKey('probe')),
+              body: AbCarbonScope(
+                child: SizedBox.shrink(key: ValueKey('probe')),
+              ),
             ),
           ),
         ),
@@ -510,7 +517,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
     }
 
@@ -620,7 +627,7 @@ void main() {
         isEmpty,
       );
 
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport)['armed'], true);
       await confirmArmed(tester, transport);
@@ -641,7 +648,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Proof it works'));
       await tester.pumpAndSettle();
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -678,7 +685,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Stays in scope'));
       await tester.pumpAndSettle();
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -766,6 +773,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      // The modal body scrolls under its footer; the lens sits past the fold.
+      await tester.ensureVisible(find.text('Your own'));
+      await tester.pump();
       await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -785,7 +795,7 @@ void main() {
         'not done until the tests pass\nask before the payment path',
       );
 
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -820,17 +830,20 @@ void main() {
       await tester.pumpAndSettle();
       // "Your own" reveals the panel — the free-text field is no longer always
       // on screen.
+      // The modal body scrolls under its footer; the lens sits past the fold.
+      await tester.ensureVisible(find.text('Your own'));
+      await tester.pump();
       await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
-        find.byType(AbTextField),
+        find.byKey(const ValueKey('handlerOwnLensField')),
         '  watch the migrations  ',
       );
       await tester.pumpAndSettle();
       // The panel's minimum three lines push the button past the fold that
       // fit it before the redesign, so it needs a scroll into view rather
       // than a bare tap.
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -881,17 +894,17 @@ void main() {
       if (kPricingSurfacesEnabled) {
         expect(find.text('Handler needs Pro'), findsOneWidget);
         expect(find.textContaining('Free plan'), findsOneWidget);
-        expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+        expect(find.widgetWithText(CarbonButton, 'See plans'), findsOneWidget);
       } else {
         expect(find.text('Handler is unavailable'), findsOneWidget);
         expect(find.textContaining('Pro'), findsNothing);
-        expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+        expect(find.widgetWithText(CarbonButton, 'See plans'), findsNothing);
       }
-      expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Arm Handler'), findsNothing);
 
       await tester.tap(
         find.widgetWithText(
-          AbButton,
+          CarbonButton,
           kPricingSurfacesEnabled ? 'Not now' : 'Close',
         ),
       );
@@ -919,10 +932,10 @@ void main() {
       // A purchase buys nothing here, and a button offering one would teach the
       // user the wrong thing about what went wrong.
       expect(find.text('Handler is unavailable'), findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
-      expect(find.widgetWithText(AbButton, 'Close'), findsOneWidget);
+      expect(find.widgetWithText(CarbonButton, 'See plans'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Close'), findsOneWidget);
 
-      await tester.tap(find.widgetWithText(AbButton, 'Close'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Close'));
       await tester.pumpAndSettle();
       expect(
         transport.sent.where((m) => m['type'] == 'handler:configure'),
@@ -985,7 +998,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Not now'));
       await tester.pumpAndSettle();
 
       expect(
@@ -1037,7 +1050,7 @@ void main() {
         find.text('Your backlog starts with: fix the flaky login test'),
         findsOneWidget,
       );
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport)['goal'], 'fix the flaky login test');
       await confirmArmed(tester, transport);
@@ -1065,7 +1078,7 @@ void main() {
         find.textContaining('Handler watches this session while'),
         findsOneWidget,
       );
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport).containsKey('goal'), isFalse);
       await confirmArmed(tester, transport);
@@ -1108,7 +1121,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         // The arm went; the instruction did not go with it.
@@ -1125,7 +1138,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await confirmArmed(tester, transport);
 
@@ -1142,7 +1155,7 @@ void main() {
 
         // Arming with nothing typed is the ordinary case, and an empty
         // `handler:instruct` would spend an extraction pass on nothing.
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await confirmArmed(tester, transport);
 
@@ -1168,7 +1181,7 @@ void main() {
         );
         await openSheet(tester, container, context);
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         container
@@ -1209,7 +1222,7 @@ void main() {
         );
         await openSheet(tester, container, context);
         container.read(_armFocus.notifier).set('q');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         bool arms(FakeAgentTransport t) =>
@@ -1264,7 +1277,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await tester.pump(kHandlerArmConfirmWindow + const Duration(seconds: 1));
         await tester.pumpAndSettle();
@@ -1289,7 +1302,7 @@ void main() {
         );
         container.read(_armFocus.notifier).set('q');
         await openSheet(tester, container, context);
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         expect(find.text('Handler not armed'), findsOneWidget);
@@ -1316,17 +1329,12 @@ void main() {
         );
         await openSheet(tester, container, context);
 
-        await tester.tap(find.byType(HandlerJudgeChip));
+        await tester.tap(find.byType(CarbonMenuButton));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Codex'));
         await tester.pumpAndSettle();
-        // The panel stays open on a judge pick — the model is the next thing
-        // the user may want — so it has to be dismissed before the sheet's own
-        // commit is reachable.
-        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-        await tester.pumpAndSettle();
 
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         final configures = transport.sent

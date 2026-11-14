@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
+import '../design/ab_carbon.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
@@ -66,6 +67,23 @@ import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
 import 'display_visibility.dart';
 import 'workspace_readiness_chip.dart';
+
+/// Identity of the one node in [AgentPanel] that sits under a Carbon scope.
+///
+/// The panel itself is Antgrid-painted, and a Carbon modal takes its theme from
+/// the context that presents it. The arm flow is started from Antgrid surfaces
+/// (the header shield, the session menu), so it presents from this node rather
+/// than from its own context.
+final _handlerSheetHostKeyProvider = Provider<GlobalKey>(
+  (ref) => GlobalKey(debugLabel: 'handlerSheetHost'),
+);
+
+/// A context under a Carbon scope to present Handler's sheets from, or
+/// [fallback] while the panel is not mounted.
+BuildContext _handlerSheetHost(
+  ProviderContainer container,
+  BuildContext fallback,
+) => container.read(_handlerSheetHostKeyProvider).currentContext ?? fallback;
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -196,6 +214,11 @@ class AgentPanel extends ConsumerWidget {
           const HandlerAwayHint(),
           const HandlerPaBar(),
           const CommandTray(),
+          // Last, so nothing above it changes position. Zero-sized: it exists
+          // only to give an Antgrid-painted caller a scoped context.
+          AbCarbonScope(
+            child: SizedBox.shrink(key: ref.watch(_handlerSheetHostKeyProvider)),
+          ),
         ],
       ),
     );
@@ -536,7 +559,7 @@ class _HandlerMenuItem extends ConsumerWidget {
       // HandlerHeaderControl.toggleArm.
       unawaited(
         armWithSheet(
-          context: host,
+          context: _handlerSheetHost(container, host),
           container: container,
           terminalId: activeId,
           agentObservable: coverage.observable,
@@ -990,7 +1013,7 @@ class HandlerHeaderControl extends ConsumerWidget {
       // container, never this widget's ref, and nothing in the flow can throw.
       unawaited(
         armWithSheet(
-          context: context,
+          context: _handlerSheetHost(ref.container, context),
           container: ref.container,
           terminalId: activeId,
           agentObservable: coverage.observable,
