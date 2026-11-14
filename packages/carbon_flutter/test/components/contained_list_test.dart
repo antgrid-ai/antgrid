@@ -1055,4 +1055,74 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('trailing marks', () {
+    Widget mark(String id) => SizedBox.square(key: ValueKey(id), dimension: 8);
+
+    testWidgets('line up at the end across rows with different action counts '
+        'and sit after the hidden actions', (tester) async {
+      await pumpCarbon(
+        tester,
+        CarbonContainedList(
+          label: 'L',
+          children: [
+            CarbonContainedListRow(
+              title: 'One',
+              onPressed: () {},
+              revealActionsOnHover: true,
+              actions: [_action('Delete', () {})],
+              trailing: mark('m1'),
+            ),
+            CarbonContainedListRow(
+              title: 'Two',
+              onPressed: () {},
+              revealActionsOnHover: true,
+              actions: [_action('Copy', () {}), _action('Move', () {})],
+              trailing: mark('m2'),
+            ),
+            CarbonContainedListRow(
+              title: 'None',
+              onPressed: () {},
+              trailing: mark('m3'),
+            ),
+          ],
+        ),
+      );
+      final ends = [
+        for (final id in ['m1', 'm2', 'm3'])
+          tester.getRect(find.byKey(ValueKey(id))).right,
+      ];
+      expect(ends.toSet(), hasLength(1));
+      final rowEnd = tester
+          .getRect(find.byType(CarbonContainedListRow).first)
+          .right;
+      expect(ends.first, rowEnd - CarbonSpacing.spacing05);
+      expect(
+        tester.getRect(find.byType(CarbonButton).first).right,
+        lessThanOrEqualTo(tester.getRect(find.byKey(const ValueKey('m1'))).left),
+      );
+    });
+
+    testWidgets('are left out of semantics', (tester) async {
+      final handle = tester.ensureSemantics();
+      try {
+        await pumpCarbon(
+          tester,
+          CarbonContainedList(
+            label: 'L',
+            children: [
+              CarbonContainedListRow(
+                title: 'Row',
+                onPressed: () {},
+                trailing: Semantics(label: 'twelve added', child: mark('m')),
+              ),
+            ],
+          ),
+        );
+        expect(find.bySemanticsLabel('twelve added'), findsNothing);
+      } finally {
+        handle.dispose();
+      }
+    });
+  });
 }

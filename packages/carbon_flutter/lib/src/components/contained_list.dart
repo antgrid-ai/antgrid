@@ -403,6 +403,10 @@ class CarbonContainedListSliver extends StatelessWidget {
 /// text, which wraps. With [revealActionsOnHover] the actions of a compact row
 /// show only while the pointer is over the row or focus is inside it; touch
 /// density always shows them, because there is no hover to reveal them.
+///
+/// [trailing] holds status marks pinned after the actions at the row's end.
+/// Hidden actions keep their space, so marks placed in [content] instead would
+/// sit at a different inset on every row with a different action count.
 class CarbonContainedListRow extends StatefulWidget {
   const CarbonContainedListRow({
     super.key,
@@ -419,6 +423,7 @@ class CarbonContainedListRow extends StatefulWidget {
     this.disabled = false,
     this.focusNode,
     this.content,
+    this.trailing,
   });
 
   final String title;
@@ -438,6 +443,11 @@ class CarbonContainedListRow extends StatefulWidget {
 
   /// Trailing controls, typically `CarbonButton.iconOnly`.
   final List<Widget> actions;
+
+  /// Non-interactive status marks at the row's end, after [actions], always
+  /// shown. Decorative like [content]: excluded from semantics, so whatever it
+  /// says must also be in [title] or elsewhere on screen.
+  final Widget? trailing;
 
   final VoidCallback? onPressed;
 
@@ -625,6 +635,14 @@ class _CarbonContainedListRowState extends State<CarbonContainedListRow> {
               revealedActionsCell(
                 visible: showActions,
                 actions: widget.actions,
+              ),
+            if (widget.trailing case final trailing?)
+              Padding(
+                padding: EdgeInsetsDirectional.only(
+                  start: widget.actions.isEmpty ? 0 : CarbonSpacing.spacing03,
+                  end: CarbonSpacing.spacing05,
+                ),
+                child: ExcludeSemantics(child: trailing),
               ),
           ],
         ),

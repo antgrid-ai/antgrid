@@ -358,18 +358,8 @@ class _GitChangeRow extends StatelessWidget {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
     );
-    final content = Row(
-      children: [
-        Expanded(
-          // Touch has no hover, and its long-press already opens the menu.
-          child: touch ? title : CarbonTooltip(message: path, child: title),
-        ),
-        if (entry != null) ...[
-          const SizedBox(width: CarbonSpacing.spacing03),
-          _trailing(theme, entry),
-        ],
-      ],
-    );
+    // Touch has no hover, and its long-press already opens the menu.
+    final content = touch ? title : CarbonTooltip(message: path, child: title);
 
     // Touch rows carry no action buttons at all: the swipe tray is the whole
     // affordance there, and a row of always-visible targets (there is no hover
@@ -425,6 +415,10 @@ class _GitChangeRow extends StatelessWidget {
       ),
       content: content,
       actions: actions,
+      // In the row's trailing slot, not the content: hidden hover actions
+      // keep their width, so a mark in the content would sit further in on
+      // every row offering more actions.
+      trailing: entry == null ? null : _trailing(theme, entry),
     );
 
     if (touch) {

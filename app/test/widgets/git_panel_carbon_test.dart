@@ -7,6 +7,8 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/widgets/carbon_diff_stat.dart';
+import 'package:antgrid/widgets/carbon_status_dot.dart';
 import 'package:antgrid/widgets/git_panel.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
@@ -126,6 +128,33 @@ void main() {
       await hoverRow(tester, find.byKey(const ValueKey('a.dart')));
 
       expect(abWidgetsInScope(tester), isEmpty);
+
+      await tester.pumpWidget(const SizedBox());
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('every row ends its status mark at the same inset, whatever '
+      'hover actions it reserves', (tester) async {
+    // A conflict offers one hidden action and the others two; hidden actions
+    // keep their width, so a mark laid out before them moved row to row.
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      await pumpPanel(
+        tester,
+        files: const [
+          ...files,
+          {'path': 'd.dart', 'status': 'M', 'staged': false, 'additions': 12, 'deletions': 4},
+        ],
+      );
+      final ends = <double>{
+        for (final e in find.byType(CarbonStatusDot).evaluate())
+          tester.getRect(find.byWidget(e.widget)).right,
+        tester.getRect(find.byType(CarbonDiffStat)).right,
+      };
+      expect(find.byType(CarbonStatusDot), findsNWidgets(3));
+      expect(ends, hasLength(1), reason: 'mark right edges: $ends');
 
       await tester.pumpWidget(const SizedBox());
     } finally {
