@@ -4,9 +4,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_carbon.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon_button.dart';
 import '../providers/visible_surface.dart';
 import 'carbon_diff_stat.dart';
 import 'workspace_tab_bar.dart';
@@ -37,7 +34,7 @@ import 'workspace_tab_bar.dart';
 /// that shuts it BY HAND. That is why it cannot be a [showAbPanel] route: a
 /// [PopupRoute] both closes on the first outside click and swallows that click
 /// on the way. The trade is that a pinned popup is invisible in the icon's
-/// resting look, so the icon latches on ([AbIconButton.selected]) for as long
+/// resting look, so the icon latches on ([CarbonButton.selected]) for as long
 /// as the rail is up.
 ///
 /// The shell keeps it down for as long as the context pane is on screen, since
@@ -115,18 +112,28 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
           // the panel can grow and stay inside the window.
           targetAnchor: Alignment.bottomRight,
           followerAnchor: Alignment.topRight,
-          offset: const Offset(0, AbTokens.space4),
+          offset: const Offset(0, CarbonSpacing.spacing02),
           child: const WorkspaceMenuPanel(),
         ),
       ),
       child: CompositedTransformTarget(
         link: _link,
-        child: AbIconButton(
-          key: WorkspaceMenuButton.buttonKey,
-          icon: AbIcons.workspace,
-          selected: open,
-          tooltip: 'Workspace',
-          onTap: () => ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+        // Scoped here as well as by the bar: the button is a public widget and
+        // a mount outside the bar must still find a Carbon theme.
+        child: AbCarbonScope(
+          child: CarbonTooltip(
+            message: 'Workspace',
+            excludeFromSemantics: true,
+            alignment: CarbonTooltipAlignment.end,
+            child: CarbonButton.iconOnly(
+              key: WorkspaceMenuButton.buttonKey,
+              icon: const CarbonIcon(CarbonIcons.workspace),
+              semanticLabel: 'Workspace',
+              selected: open,
+              onPressed: () =>
+                  ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+            ),
+          ),
         ),
       ),
     );

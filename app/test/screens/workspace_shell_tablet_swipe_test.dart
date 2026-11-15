@@ -49,12 +49,19 @@ import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/workspace_menu_button.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
+
+/// The leading drawer button. A Carbon tooltip is not a Material one, so
+/// `byTooltip` cannot find it; it is named by its semantic label instead.
+final _projectsButton = find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'Projects',
+);
 
 const double _kScreenWidth = 1600;
 // Mirrors AbTokens.drawerPaneWidth and WorkspaceShellState's
@@ -144,7 +151,7 @@ void main() {
       await _withTabletShell(tester, (container) async {
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, 0);
 
-        await tester.tap(find.byTooltip('Projects'));
+        await tester.tap(_projectsButton);
         await _settle(tester);
         expect(
           tester.getTopLeft(find.byType(ProjectsDrawer)).dx,
@@ -152,7 +159,7 @@ void main() {
           reason: 'the sidebar should have closed',
         );
 
-        await tester.tap(find.byTooltip('Projects'));
+        await tester.tap(_projectsButton);
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, 0);
       });
@@ -287,7 +294,7 @@ void main() {
       await _withTabletShell(tester, (container) async {
         await _pickView(tester, 'Git');
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
-        await tester.tap(find.byTooltip('Projects'));
+        await tester.tap(_projectsButton);
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, lessThan(0));
 
@@ -317,7 +324,7 @@ void main() {
         await _pickView(tester, 'Git');
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
 
-        await tester.tap(find.byTooltip('Projects'));
+        await tester.tap(_projectsButton);
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, lessThan(0));
 

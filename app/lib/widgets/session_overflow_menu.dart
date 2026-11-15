@@ -16,23 +16,6 @@ import '../providers/visible_surface.dart';
 import 'handler/handler_arm_explainer.dart';
 import 'session_mode_control.dart';
 
-/// Identity of the one node in the agent panel that sits under a Carbon scope.
-///
-/// The panel itself is Antgrid-painted, and a Carbon modal takes its theme from
-/// the context that presents it. The arm flow is started from Antgrid surfaces
-/// (the session menu), so it presents from this node rather
-/// than from its own context.
-final handlerSheetHostKeyProvider = Provider<GlobalKey>(
-  (ref) => GlobalKey(debugLabel: 'handlerSheetHost'),
-);
-
-/// A context under a Carbon scope to present Handler's sheets from, or
-/// [fallback] while the panel is not mounted.
-BuildContext _handlerSheetHost(
-  ProviderContainer container,
-  BuildContext fallback,
-) => container.read(handlerSheetHostKeyProvider).currentContext ?? fallback;
-
 /// Escalations waiting on sessions OTHER than the focused one, carried with
 /// the session a tap on them should land in.
 ///
@@ -274,10 +257,12 @@ CarbonMenuEntry? _handlerEntry(BuildContext context, WidgetRef ref) {
       return;
     }
     // Fire-and-forget: past the explainer await everything runs on the
-    // container, never this build's ref.
+    // container, never this build's ref. The sheets present from the kebab's
+    // own context, so a header swap (rotation, unfold) while one is up
+    // disposes it and the flow ends at its `context.mounted` check.
     unawaited(
       armWithSheet(
-        context: _handlerSheetHost(container, context),
+        context: context,
         container: container,
         terminalId: activeId,
         agentObservable: coverage.observable,

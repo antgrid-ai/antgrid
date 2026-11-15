@@ -2,10 +2,9 @@
 //
 // These exercise the real `titleBarProjectActions` seam (the production
 // `WindowTitleBarContents` delegates to it), covering the two independent
-// derivations: the machine-wide remote-access chip (AbStateChip), which hangs
+// derivations: the machine-wide remote-access chip (RemoteAccessControl), which hangs
 // off `localDeviceUuidProvider` alone, and the focus-derived RemoteHostChip,
 // which comes from the selectedRegistrationIdProvider → projectsProvider lookup.
-import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -35,6 +34,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/test_store_overrides.dart';
+
+/// The leading drawer button. A Carbon tooltip is not a Material one, so
+/// `byTooltip` cannot find it; it is named by its semantic label instead.
+final _projectsButton = find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'Projects',
+);
 
 class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   _FakePolicyNotifier(this._policy);
@@ -136,7 +141,7 @@ void main() {
       mobileAccessEnabled: false,
     );
 
-    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     expect(find.text('Remote off'), findsOneWidget);
     expect(find.byType(RemoteHostChip), findsNothing);
   });
@@ -154,7 +159,7 @@ void main() {
       mobileAccessEnabled: true,
     );
 
-    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     expect(find.text('Remote on'), findsOneWidget);
     expect(find.byType(RemoteHostChip), findsNothing);
   });
@@ -176,7 +181,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsOneWidget);
-      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     },
   );
 
@@ -285,7 +290,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     },
   );
 
@@ -303,7 +308,7 @@ void main() {
       localUuid: null,
     );
 
-    expect(find.byType(AbStateChip), findsNothing);
+    expect(find.byKey(const Key('remote-access-chip')), findsNothing);
   });
 
   testWidgets(
@@ -324,7 +329,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbStateChip), findsNothing);
+      expect(find.byKey(const Key('remote-access-chip')), findsNothing);
     },
   );
 
@@ -352,7 +357,7 @@ void main() {
         );
         await tester.pump();
 
-        expect(find.byTooltip('Projects'), findsOneWidget);
+        expect(_projectsButton, findsOneWidget);
         expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -458,7 +463,7 @@ void main() {
 
       expect(find.byType(AgentBar), findsOneWidget);
       expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
-      expect(find.byTooltip('Projects'), findsNothing);
+      expect(_projectsButton, findsNothing);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

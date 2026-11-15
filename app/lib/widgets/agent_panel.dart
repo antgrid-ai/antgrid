@@ -1,13 +1,11 @@
+import 'dart:math' as math;
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
 import '../design/ab_carbon.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_toolbar.dart';
 import '../models/ab_message.dart' show createAbMessage;
 import '../models/device_stats.dart';
 import '../project/project_session_registry.dart';
@@ -85,34 +83,22 @@ class AgentPanel extends ConsumerWidget {
           // mark, mode, handler); the title bar carries none of it and never
           // renders the name.
           if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
-            AbToolbar.custom(
+            const _AgentStrip(
               children: [
-                // Via provider, not Scaffold.of: the mobile drawer is a PageView
-                // page, so there is no ScaffoldState holding it.
-                AbIconButton(
-                  icon: AbIcons.menu,
-                  tooltip: 'Projects',
-                  onTap: ref.watch(openDrawerProvider),
-                ),
-                const SizedBox(width: AbTokens.space6),
-                const SessionAgentMark(),
-                const SizedBox(width: AbTokens.space6),
-                const ActiveSessionApprovalBadge(),
-                // space12, not space8: the work-status badge overhangs the mark
-                // by 2px (see AgentWorkStatusBadge's Positioned offset in
-                // SessionAgentMark) and needs the wider gap to actually clear
-                // the breadcrumb — same convention as _SessionMark's use of
-                // space12 in recent_session_row_widget.dart.
-                const SizedBox(width: AbTokens.space12),
+                _ProjectsButton(),
+                SizedBox(width: CarbonSpacing.spacing03),
+                SessionAgentMark(),
+                // Brings its own leading gap, so nothing sits between the two.
+                ActiveSessionApprovalBadge(),
+                // Clears the work-status dot that overhangs the mark's corner
+                // and, with no badge, is the whole gap to the breadcrumb.
+                SizedBox(width: CarbonSpacing.spacing04),
                 // Branch pill folded into the overflow menu below: it lives
                 // inside the breadcrumb on desktop, but on a phone-width row it
                 // competes with the title for the one flexible slot.
-                const Expanded(
-                  child: TitleBarBreadcrumb(showBranchPill: false),
-                ),
-                const WorkspaceReadinessChip(),
-                const SizedBox(width: AbTokens.space6),
-                const SessionOverflowButton(compact: true),
+                Expanded(child: _TitleAndReadiness()),
+                SizedBox(width: CarbonSpacing.spacing03),
+                SessionOverflowButton(compact: true),
               ],
             )
           else
@@ -172,15 +158,108 @@ class AgentPanel extends ConsumerWidget {
           const HandlerAwayHint(),
           const HandlerPaBar(),
           const CommandTray(),
-          // Last, so nothing above it changes position. Zero-sized: it exists
-          // only to give an Antgrid-painted caller a scoped context.
-          AbCarbonScope(
-            child: SizedBox.shrink(key: ref.watch(handlerSheetHostKeyProvider)),
-          ),
         ],
       ),
     );
   }
+}
+
+/// The phone header's one flexible slot, shared by the session title and the
+/// readiness chip. The chip keeps its whole label while it can, because what
+/// it reports ("Couldn't reach agent") is why the user is looking; it gives way
+/// only so the title keeps [_titleFloor] on the narrowest phones, and never
+/// below half the slot, which keeps it above a tag's own minimum width. The chip is
+/// not a flex child of its own: a flex child is allotted its share of the row
+/// whether or not it draws anything, and the chip draws nothing whenever the
+/// checkout is ready, i.e. nearly always.
+class _TitleAndReadiness extends StatelessWidget {
+  const _TitleAndReadiness();
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) => Row(
+      children: [
+        const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
+        ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: math.max(box.maxWidth - _titleFloor, box.maxWidth / 2),
+          ),
+          child: const WorkspaceReadinessChip(),
+        ),
+      ],
+    ),
+  );
+}
+
+/// What the session title keeps beside the readiness chip: a few characters and
+/// the ellipsis, so the row still says which session it is.
+const _titleFloor = CarbonSpacing.spacing10;
+
+/// The strip's own box, for tests that measure its height and rule.
+@visibleForTesting
+const agentStripKey = Key('agent-strip');
+
+/// The agent panel's header strip, one Carbon surface for both breakpoints.
+///
+/// Drawn the way [WorkspaceTabBar] draws its strip across the divider: the
+/// `background` layer, a `borderSubtle00` rule under it, and
+/// [workspaceStripHeight] in total, so on desktop their tops and bottoms meet.
+/// On a touch platform that height is the 44pt target plus the rule, which is
+/// what lets the kebab's touch trigger keep its full size.
+class _AgentStrip extends StatelessWidget {
+  const _AgentStrip({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    // Read here, outside the scope: the Ab-side token behind it is host layout.
+    final stripHeight = workspaceStripHeight;
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) {
+          final colors = CarbonTheme.of(context).colors;
+          return Container(
+            key: agentStripKey,
+            decoration: BoxDecoration(
+              color: colors.background,
+              border: Border(bottom: BorderSide(color: colors.borderSubtle00)),
+            ),
+            child: SizedBox(
+              height: stripHeight - CarbonBorders.hairline,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: CarbonSpacing.spacing02,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: children,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The leading "Projects" button, which opens the projects drawer.
+class _ProjectsButton extends ConsumerWidget {
+  const _ProjectsButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => CarbonTooltip(
+    message: 'Projects',
+    excludeFromSemantics: true,
+    child: CarbonButton.iconOnly(
+      icon: const CarbonIcon(CarbonIcons.menu),
+      semanticLabel: 'Projects',
+      // Via provider, not Scaffold.of: the mobile drawer is a PageView page,
+      // so there is no ScaffoldState holding it.
+      onPressed: ref.watch(openDrawerProvider),
+    ),
+  );
 }
 
 /// The agent panel's desktop header, mirroring `WorkspaceTabBar` across the
@@ -235,30 +314,23 @@ class AgentBar extends ConsumerWidget {
     final projectActions = titleBarMounted
         ? const <Widget>[]
         : titleBarProjectActions(ref);
-    return AbToolbar.custom(
-      height: workspaceStripHeight,
+    return _AgentStrip(
       children: [
         if (isMobilePlatform) ...[
-          AbIconButton(
-            icon: AbIcons.menu,
-            tooltip: 'Projects',
-            onTap: ref.watch(openDrawerProvider),
-          ),
-          const SizedBox(width: AbTokens.space6),
+          const _ProjectsButton(),
+          const SizedBox(width: CarbonSpacing.spacing03),
         ],
         const SessionAgentMark(),
-        const SizedBox(width: AbTokens.space6),
         const ActiveSessionApprovalBadge(),
-        // space12, not space8 — see the matching comment in AgentPanel's
-        // mobile header above.
-        const SizedBox(width: AbTokens.space12),
+        // See the matching gap in AgentPanel's phone header above.
+        const SizedBox(width: CarbonSpacing.spacing04),
         const Expanded(child: TitleBarBreadcrumb()),
         const WorkspaceReadinessChip(),
-        const SizedBox(width: AbTokens.space6),
+        const SizedBox(width: CarbonSpacing.spacing03),
         const WorkspaceMenuButton(),
         const SessionOverflowButton(compact: false),
         if (projectActions.isNotEmpty) ...[
-          const SizedBox(width: AbTokens.space6),
+          const SizedBox(width: CarbonSpacing.spacing03),
           ...projectActions,
         ],
       ],
@@ -302,7 +374,7 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
     // The spacer belongs to the control it follows, and [_focusedRemoteHost]
     // already withholds the chip until the uuid resolves.
     if (localUuid != null && remoteHost != null)
-      const SizedBox(width: AbTokens.space8),
+      const SizedBox(width: CarbonSpacing.spacing03),
     if (remoteHost != null) _remoteHostChip(ref, remoteHost),
   ];
 }

@@ -46,8 +46,8 @@ Future<void> _pumpSheet(
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
-        // The presenting context sits under a Carbon scope, as the agent panel's
-        // sheet host does in the app.
+        // The presenting context sits under a Carbon scope, as the session
+        // kebab's scoped menu does in the app.
         home: AbCarbonScope(
           child: Builder(
             builder: (context) => Scaffold(

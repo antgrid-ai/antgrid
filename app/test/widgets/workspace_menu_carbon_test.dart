@@ -1,12 +1,13 @@
 // The workspace rail is a Carbon surface: nothing under its scope may build an
-// Ab widget, in either density or brightness, while the trigger beside it stays
-// Ab chrome outside any scope.
+// Ab widget, in either density or brightness, and neither may the trigger that
+// opens it, which scopes itself.
 import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/widgets/workspace_menu_button.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -69,12 +70,15 @@ void main() {
           );
           expect(scope, findsOneWidget);
           expect(abWidgetsInScope(tester, scope: scope), isEmpty);
-          // The trigger is Ab chrome and sits outside the rail's scope.
-          expect(
-            find.descendant(of: scope, matching: find.byType(AbIconButton)),
-            findsNothing,
+          // The trigger is Carbon too, under a scope of its own.
+          expect(find.byType(AbIconButton), findsNothing);
+          expect(find.byType(CarbonButton), findsOneWidget);
+          final triggerScope = find.ancestor(
+            of: find.byKey(WorkspaceMenuButton.buttonKey),
+            matching: find.byType(AbCarbonScope),
           );
-          expect(find.byType(AbIconButton), findsOneWidget);
+          expect(triggerScope, findsOneWidget);
+          expect(abWidgetsInScope(tester, scope: triggerScope), isEmpty);
           await tester.pumpWidget(const SizedBox());
         } finally {
           debugDefaultTargetPlatformOverride = null;

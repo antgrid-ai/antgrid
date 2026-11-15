@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_carbon.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -446,9 +447,11 @@ class _WindowTitleBarContentsState
             // relocating any of them up here.
             KeyedSubtree(
               key: WindowTitleBarContents.chipSlotKey,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: titleBarProjectActions(ref),
+              child: AbCarbonScope(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: titleBarProjectActions(ref),
+                ),
               ),
             ),
             const SizedBox(width: AbTokens.space8),

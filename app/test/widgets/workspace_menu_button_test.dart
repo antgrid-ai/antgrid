@@ -71,8 +71,8 @@ Future<ProviderContainer> _pump(
   return container;
 }
 
-AbIconButton _button(WidgetTester tester) =>
-    tester.widget<AbIconButton>(find.byKey(WorkspaceMenuButton.buttonKey));
+CarbonButton _button(WidgetTester tester) =>
+    tester.widget<CarbonButton>(find.byKey(WorkspaceMenuButton.buttonKey));
 
 /// One row's rendered height, found by its label.
 double _rowHeight(WidgetTester tester, String label) => tester
@@ -520,5 +520,33 @@ void main() {
         expect(_button(tester).selected, isFalse);
       });
     });
+  });
+
+  // The trigger is Carbon chrome like the rail it opens, and scopes itself so
+  // a mount outside the agent bar still finds a Carbon theme.
+  group('trigger', () {
+    for (final platform in [TargetPlatform.windows, TargetPlatform.android]) {
+      testWidgets('is a square Carbon icon button under its own scope '
+          '(${platform.name})', (tester) async {
+        try {
+          debugDefaultTargetPlatformOverride = platform;
+          await _pump(tester, control: _control());
+
+          final button = find.byKey(WorkspaceMenuButton.buttonKey);
+          expect(tester.widget(button), isA<CarbonButton>());
+          expect(find.byType(AbIconButton), findsNothing);
+          final size = tester.getSize(button);
+          expect(size.width, size.height);
+          expect(size.height, greaterThanOrEqualTo(32));
+          expect(
+            find.ancestor(of: button, matching: find.byType(AbCarbonScope)),
+            findsOneWidget,
+          );
+          await tester.pumpWidget(const SizedBox());
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+    }
   });
 }

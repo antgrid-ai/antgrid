@@ -43,8 +43,8 @@ String workspaceViewSemanticLabel(WorkspaceView view, int count) =>
 /// The workspace header strip's total height, border included. One source for
 /// [WorkspaceTabBar] and the agent bar so their tops and bottoms meet across
 /// the resizable divider. Mirrors Carbon's tab height (40 compact, the finger
-/// target on touch) from the same platform test [AbCarbonScope] uses, so the Ab
-/// agent bar can read it without a Carbon scope above it.
+/// target on touch) from the same platform test [AbCarbonScope] uses, so the
+/// agent bar can read it from outside its own scope.
 double get workspaceStripHeight =>
     (AbCarbonScope.platformDensity == CarbonDensity.touch
         ? AbTokens.tapTargetMin

@@ -461,7 +461,7 @@ void main() {
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
             builder: _appToastHost,
-            // Under a Carbon scope, as the agent panel's sheet host is: the sheets
+            // Under a Carbon scope, as the session kebab's scope is: the sheets
             // are Carbon modals and take their theme from the presenting context.
             home: const Scaffold(
               body: AbCarbonScope(
