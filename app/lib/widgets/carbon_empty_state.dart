@@ -17,7 +17,17 @@ class CarbonEmptyState extends StatelessWidget {
     this.icon,
     this.iconWidget,
     this.error = false,
-  });
+  }) : compact = false;
+
+  /// A single quiet line for a pane too short for the full layout, such as a
+  /// log window that has nothing in it yet.
+  const CarbonEmptyState.compact({super.key, required this.heading})
+    : body = null,
+      action = null,
+      icon = null,
+      iconWidget = null,
+      error = false,
+      compact = true;
 
   final String heading;
   final String? body;
@@ -32,9 +42,24 @@ class CarbonEmptyState extends StatelessWidget {
   /// Leads with the error status icon in place of [icon] and [iconWidget].
   final bool error;
 
+  /// Only the [heading], as one centred helper-sized line.
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
     final t = CarbonTheme.of(context);
+    if (compact) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(CarbonSpacing.spacing04),
+          child: Text(
+            heading,
+            textAlign: TextAlign.center,
+            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+          ),
+        ),
+      );
+    }
     final glyph = error
         ? const CarbonStatusIcon(
             CarbonStatusKind.error,

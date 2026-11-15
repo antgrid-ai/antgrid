@@ -4,7 +4,6 @@ import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
 import '../design/ab_carbon.dart';
-import '../design/ab_tokens.dart';
 import '../models/session_entry.dart';
 import '../providers/session_setup.dart';
 import 'transcript/format.dart';
@@ -24,11 +23,12 @@ const double _kLedgerMaxViewportFraction = 0.35;
 /// ours. A reading that comes out negative is the one shape of skew we can
 /// actually detect, and it is answered by saying nothing — an elapsed time is
 /// orientation, and a wrong one is worse than none.
+///
+/// Reads the Carbon theme, so it must sit under an `AbCarbonScope`.
 class SetupElapsed extends StatefulWidget {
-  const SetupElapsed({super.key, required this.startedAt, required this.color});
+  const SetupElapsed({super.key, required this.startedAt});
 
   final int startedAt;
-  final Color color;
 
   @override
   State<SetupElapsed> createState() => _SetupElapsedState();
@@ -57,15 +57,13 @@ class _SetupElapsedState extends State<SetupElapsed> {
     if (startedAt <= 0) return const SizedBox.shrink();
     final elapsed = DateTime.now().millisecondsSinceEpoch - startedAt;
     if (elapsed < 0) return const SizedBox.shrink();
+    final t = CarbonTheme.of(context);
     return Text(
       // The app's one elapsed format, shared with the agent transcript's own
       // "Working for 2m 35s" directly below this strip — two live readouts of
       // the same seconds must not disagree about how to spell them.
       formatDuration(Duration(milliseconds: elapsed)),
-      style: AbTokens.monoStyle(
-        fontSize: AbTokens.fontXxs,
-        color: widget.color,
-      ),
+      style: t.typography.code.copyWith(color: t.colors.textHelper),
     );
   }
 }

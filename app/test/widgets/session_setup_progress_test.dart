@@ -150,15 +150,40 @@ void main() {
       // ours. A negative reading is the one shape of skew we can detect.
       await tester.pumpWidget(
         MaterialApp(
-          home: SetupElapsed(
-            startedAt: DateTime.now().millisecondsSinceEpoch + 600000,
-            color: kDefaultPalette.textMuted,
+          home: AbCarbonScope(
+            child: SetupElapsed(
+              startedAt: DateTime.now().millisecondsSinceEpoch + 600000,
+            ),
           ),
         ),
       );
       expect(find.byType(Text), findsNothing);
       // Unmounted by hand: the ticker is periodic, and a test that ends with
       // one pending fails the suite rather than this expectation.
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('reads in Carbon code type at the helper colour', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [kDefaultPalette]),
+          home: AbCarbonScope(
+            child: SetupElapsed(
+              startedAt:
+                  DateTime.now().millisecondsSinceEpoch -
+                  const Duration(minutes: 2).inMilliseconds,
+            ),
+          ),
+        ),
+      );
+      final t = CarbonTheme.of(tester.element(find.byType(SetupElapsed)));
+      final style = tester.widget<Text>(find.byType(Text)).style!;
+      expect(style.color, t.colors.textHelper);
+      expect(style.fontFamily, t.typography.code.fontFamily);
+      expect(style.fontSize, t.typography.code.fontSize);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });
   });
