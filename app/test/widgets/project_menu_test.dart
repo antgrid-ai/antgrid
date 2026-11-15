@@ -410,7 +410,93 @@ void main() {
     await tester.tap(find.byType(ProjectChip));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('Stopped · last active'), findsOneWidget);
+    expect(find.text('Stopped · 3h ago'), findsOneWidget);
+  });
+
+  testWidgets('local rows list newest first with a terse age', (tester) async {
+    final now = DateTime.now();
+    PickerProject local(String name, Duration? age) => PickerProject(
+      id: 'p-$name',
+      name: name,
+      detail: '/home/me/$name',
+      isLocal: true,
+      lastActiveAt: age == null ? null : now.subtract(age),
+    );
+    await tester.pumpWidget(
+      _host(
+        sources: [
+          PickerSource(
+            id: 'local',
+            label: 'Local',
+            isLocal: true,
+            projects: [
+              local('never', null),
+              local('months', const Duration(days: 65)),
+              local('days', const Duration(days: 2)),
+              local('minutes', const Duration(minutes: 2)),
+            ],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProjectChip));
+    await tester.pumpAndSettle();
+
+    final tops = [
+      for (final name in ['minutes', 'days', 'months', 'never'])
+        tester.getTopLeft(find.text(name)).dy,
+    ];
+    expect(tops, orderedEquals([...tops]..sort()));
+    expect(find.text('2m ago'), findsOneWidget);
+    expect(find.text('2d ago'), findsOneWidget);
+    expect(find.text('2mo ago'), findsOneWidget);
+    expect(find.textContaining('Last active'), findsNothing);
+  });
+
+  testWidgets('remote rows lead with running projects, then newest first', (
+    tester,
+  ) async {
+    final now = DateTime.now();
+    AdvertisedProject advert(String id, {bool running = false, Duration? age}) =>
+        AdvertisedProject(
+          projectId: id,
+          label: id,
+          path: '/$id',
+          running: running,
+          lastActiveAt: age == null
+              ? null
+              : now.subtract(age).toUtc().toIso8601String(),
+        );
+    await tester.pumpWidget(
+      _host(
+        sources: const [_remoteSource],
+        extraOverrides: [
+          controlPlaneStateProvider('u1').overrideWith(
+            (ref) => Stream.value(
+              ControlPlaneState(
+                projects: [
+                  advert('old', age: const Duration(days: 40)),
+                  advert('live', running: true),
+                  advert('recent', age: const Duration(hours: 5)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProjectChip));
+    await tester.pumpAndSettle();
+
+    final tops = [
+      for (final name in ['live', 'recent', 'old'])
+        tester.getTopLeft(find.text(name)).dy,
+    ];
+    expect(tops, orderedEquals([...tops]..sort()));
   });
 }
 

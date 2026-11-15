@@ -117,7 +117,10 @@ class _ProjectChipState extends ConsumerState<ProjectChip> {
             if (source.projects.isEmpty)
               const CarbonMenuItem(label: 'No local projects yet')
             else
-              ...projectRows(source.projects, (p) => _lastActive(p, now)),
+              ...projectRows(
+                _byRecency(source.projects),
+                (p) => _lastActive(p, now),
+              ),
           ],
         ),
       ];
@@ -152,18 +155,39 @@ class _ProjectChipState extends ConsumerState<ProjectChip> {
           else if (rows.isEmpty)
             CarbonMenuItem(label: emptyAdvertHint(cp.value?.remoteAccessEnabled))
           else
-            ...projectRows(rows, (p) => _remoteStatus(p, now)),
+            ...projectRows(_byRecency(rows), (p) => _remoteStatus(p, now)),
         ],
       ),
     ];
   }
 }
 
+/// Newest first, so the times down the trailing column read in order; a
+/// project with no recorded activity sinks to the end. Running rows lead
+/// because their description carries no time to sort by. Ties keep their
+/// source order.
+List<PickerProject> _byRecency(List<PickerProject> rows) {
+  final indexed = rows.indexed.toList()
+    ..sort((a, b) {
+      final (ai, ap) = a;
+      final (bi, bp) = b;
+      if (ap.running != bp.running) return ap.running ? -1 : 1;
+      final at = ap.lastActiveAt;
+      final bt = bp.lastActiveAt;
+      if (at != null && bt != null && at != bt) return bt.compareTo(at);
+      if ((at == null) != (bt == null)) return at == null ? 1 : -1;
+      return ai.compareTo(bi);
+    });
+  return [for (final (_, p) in indexed) p];
+}
+
 /// Local rows carry no running/stopped state (always openable), so recency is
-/// their only secondary text.
+/// their only secondary text. Terse because Carbon's menu row has no second
+/// line: the description sits beside the name and every character it takes
+/// is one the name loses to truncation.
 String? _lastActive(PickerProject p, DateTime now) {
   final last = p.lastActiveAt;
-  return last == null ? null : 'Last active ${relativeTime(last, now: now)}';
+  return last == null ? null : compactRelativeTime(last, now: now);
 }
 
 /// A stopped project still carries its own `lastActiveAt` from the advert, so
@@ -173,5 +197,5 @@ String _remoteStatus(PickerProject p, DateTime now) {
   final last = p.lastActiveAt;
   return last == null
       ? 'Stopped'
-      : 'Stopped · last active ${relativeTime(last, now: now)}';
+      : 'Stopped · ${compactRelativeTime(last, now: now)}';
 }
