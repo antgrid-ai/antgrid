@@ -20,7 +20,6 @@ import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../widgets/carbon_empty_state.dart';
-import '../widgets/session_setup_progress.dart';
 import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
@@ -378,19 +377,17 @@ class _NoSessionEmptyState extends ConsumerWidget {
     );
   }
 }
-
 /// Rendered inside the terminal pane while an isolated session's agent is
 /// QUEUED behind its checkout's `worktree.setup` run.
 ///
-/// The pane IS the transcript here rather than the banner's one-line tail: for
-/// the whole run the setup PTY is the only live output the session has, and the
-/// state this replaced left it collapsed behind a chevron above an empty pane
-/// that called the session stopped.
+/// Deliberately calm: the run's progress, step list, log and cancel all live in
+/// the setup strip floating above this pane (`SessionSetupBanner`), so what is
+/// left to say here is when the agent starts and the one way to hurry it.
 ///
-/// Both verbs it offers end the wait, and they are not the same answer: `skip`
-/// releases the agent and lets the run finish anyway ("the deps are cached"),
-/// `cancel` kills the run first. The bridge has accepted `cancel` since the
-/// verb shipped; this is the first surface to offer it.
+/// The verb releases the agent and lets the run finish anyway ("the deps are
+/// cached"); it does not stop the run. It shares the banner's one-in-flight
+/// guard, since this and the strip's cancel are alternatives for a run only one
+/// of them can end.
 class _ProvisioningSessionState extends ConsumerStatefulWidget {
   const _ProvisioningSessionState({super.key, required this.sessionId});
 
@@ -403,19 +400,26 @@ class _ProvisioningSessionState extends ConsumerStatefulWidget {
 
 class _ProvisioningSessionStateState
     extends ConsumerState<_ProvisioningSessionState> {
-  /// The verb in flight, or null. Held as the verb rather than a bool so the
-  /// busy spinner lands on the control the user actually pressed — and shared
-  /// across both, since they are alternatives and a second press would race the
-  /// first for a run only one of them can end.
-  SessionSetupAction? _acting;
+  /// Whether THIS pane's verb is in flight, so the busy spinner lands on the
+  /// control the user pressed rather than on a press made elsewhere.
+  bool _starting = false;
 
-  Future<void> _act(SessionSetupAction verb) async {
-    if (_acting != null) return;
-    setState(() => _acting = verb);
+  Future<void> _start() async {
+    final container = ref.container;
+    final ui = container.read(sessionSetupBannerUiProvider.notifier);
+    if (_starting ||
+        container
+            .read(sessionSetupBannerUiProvider)
+            .actingVerbs
+            .containsKey(widget.sessionId)) {
+      return;
+    }
+    const verb = SessionSetupAction.skip;
+    setState(() => _starting = true);
+    ui.setActing(widget.sessionId, verb);
     // Captured before the first await: a settling run rebuilds this pane away
     // — the agent spawns, the session flips `running` — and a `ref` read after
     // that throws.
-    final container = ref.container;
     final entryId = container.read(selectedRegistrationIdProvider);
     try {
       if (entryId == null) {
@@ -450,145 +454,68 @@ class _ProvisioningSessionStateState
         '${sessionSetupFailureCopy(verb)} — ${result.error}',
       );
     } finally {
-      // The success path usually never reaches this: releasing the agent
-      // spawns the PTY, which flips `running` and renders the terminal over
-      // this widget.
-      if (mounted) setState(() => _acting = null);
+      // The success path usually never reaches the setState: releasing the
+      // agent spawns the PTY, which flips `running` and renders the terminal
+      // over this widget.
+      ui.setActing(widget.sessionId, null);
+      if (mounted) setState(() => _starting = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final setup = ref.watch(sessionSetupProvider(widget.sessionId));
-    final terminalId = setup?.terminalId;
-    final terminalService = serviceWhenReady(ref, terminalServiceProvider);
-    final tabs =
-        ref.watch(terminalStateProvider).value?.tabs ??
-        const <String, TerminalTab>{};
-    final tab = terminalId == null ? null : tabs[terminalId];
-    return Column(
-      children: [
-        // Above the transcript, not below it: the ledger is orientation the
-        // user reads once, and the log is the thing that keeps moving.
-        if (setup != null) SetupStepLedger(setup: setup),
-        Expanded(
-          child: tab == null || terminalService == null
-              // Not a dead end: the run has yet to report the PTY it spawned,
-              // or a reconnect has yet to recover the transcript. The wait
-              // itself is the same either way, so the copy states it rather
-              // than reporting the missing log.
-              ? const _PaneSurface(
-                  child: CarbonEmptyState(
-                    heading: 'Preparing workspace…',
-                    body: 'The agent starts when provisioning finishes.',
-                  ),
-                )
-              : TerminalViewWrapper(
-                  key: ValueKey(tab.terminalId),
-                  tab: tab,
-                  terminalService: terminalService,
-                ),
-        ),
-        _buildActions(),
-      ],
-    );
-  }
-
-  Widget _buildActions() {
-    final acting = _acting;
-    return AbCarbonScope(
+    final otherVerbActing =
+        !_starting &&
+        ref.watch(
+          sessionSetupBannerUiProvider.select(
+            (s) => s.actingVerbs.containsKey(widget.sessionId),
+          ),
+        );
+    return _PaneSurface(
       child: Builder(
         builder: (context) {
           final t = CarbonTheme.of(context);
-          return DecoratedBox(
-            decoration: BoxDecoration(
-              color: t.colors.layer01,
-              border: Border(
-                top: BorderSide(color: t.borderSubtle(CarbonLayer.of(context))),
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: CarbonSpacing.spacing04,
-                vertical: CarbonSpacing.spacing03,
-              ),
-              // One row while the label and the set fit side by side at their
-              // natural widths, since every pixel of this bar comes out of the
-              // terminal above it. Narrower, the set drops to a full-width line
-              // of its own, where it stacks itself if its buttons still don't
-              // fit.
-              child: OverflowBar(
-                alignment: MainAxisAlignment.spaceBetween,
-                overflowAlignment: OverflowBarAlignment.start,
-                spacing: CarbonSpacing.spacing05,
-                overflowSpacing: CarbonSpacing.spacing03,
-                children: [
-                  Text(
-                    'Waiting for workspace setup',
-                    style: t.typography.helper.copyWith(
-                      color: t.colors.textSecondary,
+          return SizedBox.expand(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'The agent starts when setup ends',
+                      textAlign: TextAlign.center,
+                      style: t.typography.body.copyWith(
+                        color: t.colors.textSecondary,
+                      ),
                     ),
-                  ),
-                  // A bounded set fills its width, which the bar would read as
-                  // never fitting beside the label; at its natural width it
-                  // still stacks once the bar is narrower than that.
-                  IntrinsicWidth(
-                    child: CarbonButtonSet(
-                      children: [
-                        _action(
-                          SessionSetupAction.cancel,
-                          'Cancel setup',
-                          CarbonIcons.close,
-                          acting,
-                          CarbonButtonKind.secondary,
-                        ),
-                        _action(
-                          SessionSetupAction.skip,
-                          'Start agent now',
-                          CarbonIcons.play,
-                          acting,
-                          CarbonButtonKind.primary,
-                        ),
-                      ],
+                    const SizedBox(height: CarbonSpacing.spacing05),
+                    CarbonButton(
+                      label: 'Start now',
+                      kind: CarbonButtonKind.tertiary,
+                      icon: const CarbonIcon(CarbonIcons.play),
+                      // Busy rather than disabled: a disabled button dims, and
+                      // dimming on a control the user just pressed reads as one
+                      // that died under the press.
+                      busy: _starting,
+                      // `onPressed` is a VoidCallback, so nothing awaits this —
+                      // detached rather than an `async` closure whose rejection
+                      // would reach PlatformDispatcher.onError as a fatal.
+                      onPressed: otherVerbActing
+                          ? null
+                          : () => detached(
+                              'TerminalScreen',
+                              'session:setup ${SessionSetupAction.skip.wire} failed',
+                              _start,
+                            ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           );
         },
       ),
-    );
-  }
-
-  Widget _action(
-    SessionSetupAction verb,
-    String label,
-    CarbonIcons icon,
-    SessionSetupAction? acting,
-    CarbonButtonKind kind,
-  ) {
-    return CarbonButton(
-      label: label,
-      kind: kind,
-      icon: CarbonIcon(icon),
-      // Busy rather than disabled: a disabled button dims, and dimming on a
-      // control the user just pressed reads as one that died under the press.
-      // The other verb goes inert, since the two are alternatives. The icon is
-      // what busy swaps, so the label stays readable.
-      busy: acting == verb,
-      // `onPressed` is a VoidCallback, so nothing awaits this — detached rather
-      // than an `async` closure whose rejection would reach
-      // PlatformDispatcher.onError as a fatal.
-      // Kept non-null on the pressed one: a null handler paints disabled even
-      // when busy, and busy already swallows the tap.
-      onPressed: acting != null && acting != verb
-          ? null
-          : () => detached(
-              'TerminalScreen',
-              'session:setup ${verb.wire} failed',
-              () => _act(verb),
-            ),
     );
   }
 }

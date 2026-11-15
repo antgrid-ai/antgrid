@@ -23,6 +23,9 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/services/sessions_service.dart';
+import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:antgrid/widgets/session_setup_progress.dart';
+import 'package:antgrid/widgets/terminal_view_wrapper.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
@@ -32,6 +35,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/test_store_overrides.dart';
 import '../helpers/toast_host.dart';
 
 const _projectId = 'P';
@@ -97,10 +101,9 @@ class _SpyMachineConnectionNotifier extends MachineConnectionNotifier {
 /// session on a fake wire, so a press is asserted where it lands rather than
 /// against a stub.
 ///
-/// `terminalStateProvider` is overridden with an empty state: no tab means the
-/// pane takes its transcript-less arm, which is the state a run reaches before
-/// it has reported the PTY it spawned — and the one every assertion here is
-/// about. The transcript arm is the banner's own `_buildLog` widget.
+/// `terminalStateProvider` is overridden with an empty state: no tab means a
+/// panel opened over it shows its empty log window rather than a live
+/// terminal.
 Future<FakeAgentTransport> pumpPane(
   WidgetTester tester,
   SessionSetup? setup, {
@@ -217,22 +220,22 @@ void main() {
 
     expect(find.text('Session stopped'), findsNothing);
     expect(find.text('Start'), findsNothing);
-    expect(find.text('Preparing workspace…'), findsOneWidget);
-    expect(find.text('Start agent now'), findsOneWidget);
-    // The bridge has accepted `cancel` since the verb shipped and no surface
-    // offered it; this pane is the one that does.
-    expect(find.text('Cancel setup'), findsOneWidget);
+    expect(find.text('Start now'), findsOneWidget);
+    // Cancel lives behind the strip's chevron, with the rest of the run.
+    expect(find.text('Cancel setup'), findsNothing);
   });
 
-  // The pane is what the user stares at for the whole run, so it is where the
-  // ledger belongs: "2 of 4" says how far along the run is and nothing about
-  // what is left, which on a real block is the question being asked.
-  testWidgets('the pane says what is still to come', (tester) async {
+  // The strip floating above carries everything about the run; the pane says
+  // when the agent starts and offers the one way to hurry it, nothing else.
+  testWidgets('the waiting pane is calm: a line and one button', (tester) async {
     await pumpPane(tester, _setup(pendingStart: true));
 
-    expect(find.text('Copy env files'), findsOneWidget);
-    expect(find.text('Generate client'), findsOneWidget);
-    expect(find.text('Build assets'), findsOneWidget);
+    expect(find.text('The agent starts when setup ends'), findsOneWidget);
+    expect(find.byType(CarbonButton), findsOneWidget);
+    expect(find.byType(SetupStepLedger), findsNothing);
+    expect(find.byType(TerminalViewWrapper), findsNothing);
+    expect(find.text('Waiting for workspace setup'), findsNothing);
+    expect(find.text('Preparing workspace…'), findsNothing);
   });
 
   testWidgets('the empty and stopped states paint the Carbon background', (
@@ -308,101 +311,90 @@ void main() {
     _expectNoAbWidgets(tester);
   });
 
-  testWidgets('the preparing state and its action bar are Carbon surfaces', (
-    tester,
-  ) async {
+  testWidgets('the waiting pane is a Carbon surface', (tester) async {
     await pumpPane(tester, _setup(pendingStart: true));
 
-    _expectCarbonBackdrop(tester, find.text('Preparing workspace…'));
+    _expectCarbonBackdrop(
+      tester,
+      find.text('The agent starts when setup ends'),
+    );
     _expectNoAbWidgets(tester);
-    // Three islands (ledger, empty state, action bar), none of them around a
-    // live terminal.
-    expect(find.byType(AbCarbonScope), findsNWidgets(3));
+    expect(find.byType(AbCarbonScope), findsOneWidget);
   });
 
-  testWidgets('the action bar pairs a secondary Cancel before a primary Start', (
+  testWidgets('Start now is a tertiary play button centred in the pane', (
     tester,
   ) async {
     await pumpPane(tester, _setup(pendingStart: true));
 
-    final cancel = tester.widget<CarbonButton>(
-      find.widgetWithText(CarbonButton, 'Cancel setup'),
-    );
     final start = tester.widget<CarbonButton>(
-      find.widgetWithText(CarbonButton, 'Start agent now'),
+      find.widgetWithText(CarbonButton, 'Start now'),
     );
-    expect(cancel.kind, CarbonButtonKind.secondary);
-    expect(start.kind, CarbonButtonKind.primary);
-
-    // Wide enough to sit side by side, in reading order.
-    final c = _rectOf(tester, 'Cancel setup');
-    final st = _rectOf(tester, 'Start agent now');
-    expect(c.right, lessThanOrEqualTo(st.left + 1));
-    expect(c.top, closeTo(st.top, 0.5));
+    expect(start.kind, CarbonButtonKind.tertiary);
+    expect(
+      start.icon,
+      isA<CarbonIcon>().having((i) => i.icon, 'icon', CarbonIcons.play),
+    );
+    final pane = tester.getRect(find.byType(TerminalScreen));
+    final line = tester.getRect(find.text('The agent starts when setup ends'));
+    final button = _rectOf(tester, 'Start now');
+    expect(line.center.dx, closeTo(pane.center.dx, 1));
+    expect(button.center.dx, closeTo(pane.center.dx, 1));
+    expect(line.bottom, lessThanOrEqualTo(button.top));
   });
 
-  testWidgets("a wide action bar keeps its label on the buttons' row", (
+  testWidgets('the waiting pane does not overflow at 320x640 with 2x text', (
     tester,
   ) async {
     await pumpPane(
       tester,
       _setup(pendingStart: true),
-      size: const Size(1400, 900),
-    );
-
-    // Every line this bar takes comes out of the terminal above it.
-    final label = tester.getRect(find.text('Waiting for workspace setup'));
-    final st = _rectOf(tester, 'Start agent now');
-    expect(label.center.dy, inInclusiveRange(st.top, st.bottom));
-    expect(label.right, lessThanOrEqualTo(_rectOf(tester, 'Cancel setup').left));
-  });
-
-  testWidgets('the action bar stacks at 320 wide with 2x text, no overflow', (
-    tester,
-  ) async {
-    await pumpPane(
-      tester,
-      _setup(pendingStart: true),
-      size: const Size(320, 900),
+      size: const Size(320, 640),
       textScale: 2,
     );
 
     expect(tester.takeException(), isNull);
-    final c = _rectOf(tester, 'Cancel setup');
-    final st = _rectOf(tester, 'Start agent now');
-    // Stacked with the primary on top, each spanning the bar.
-    expect(st.bottom, lessThanOrEqualTo(c.top + 1));
-    expect(st.width, closeTo(c.width, 0.5));
-    expect(st.right, lessThanOrEqualTo(320));
-    expect(c.left, greaterThanOrEqualTo(0));
+    final button = _rectOf(tester, 'Start now');
+    expect(button.left, greaterThanOrEqualTo(0));
+    expect(button.right, lessThanOrEqualTo(320));
   });
 
-  testWidgets('a pending release shows busy on its own button only', (
-    tester,
-  ) async {
+  testWidgets('a pending release shows busy on its button', (tester) async {
     final transport = await pumpPane(tester, _setup(pendingStart: true));
 
-    await tester.tap(find.text('Start agent now'));
+    await tester.tap(find.text('Start now'));
     await tester.pump();
 
     final start = tester.widget<CarbonButton>(
-      find.widgetWithText(CarbonButton, 'Start agent now'),
-    );
-    final cancel = tester.widget<CarbonButton>(
-      find.widgetWithText(CarbonButton, 'Cancel setup'),
+      find.widgetWithText(CarbonButton, 'Start now'),
     );
     expect(start.busy, isTrue);
     // Busy is not disabled: a null handler would paint the dimmed state.
     expect(start.onPressed, isNotNull);
-    expect(cancel.busy, isFalse);
-    // The two verbs are alternatives, so the other one is inert meanwhile.
-    expect(cancel.onPressed, isNull);
+
+    final sent = transport.sent.firstWhere((m) => m['type'] == 'session:setup');
+    transport.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': true,
+      'session': _entry(_setup(pendingStart: false)).toJson(),
+    });
+    await tester.pump();
+  });
+
+  // A second press while the first is unanswered must not put a second verb on
+  // the wire: the run can only be ended once.
+  testWidgets('a second press does not race the first', (tester) async {
+    final transport = await pumpPane(tester, _setup(pendingStart: true));
+
+    await tester.tap(find.text('Start now'));
+    await tester.pump();
+    await tester.tap(find.text('Start now'));
+    await tester.pump();
+    await tester.pump();
+
     expect(
-      find.ancestor(
-        of: find.text('Start agent now'),
-        matching: find.byWidgetPredicate((w) => w is Visibility && !w.visible),
-      ),
-      findsNothing,
+      transport.sent.where((m) => m['type'] == 'session:setup'),
+      hasLength(1),
     );
 
     final sent = transport.sent.firstWhere((m) => m['type'] == 'session:setup');
@@ -422,7 +414,7 @@ void main() {
 
     expect(find.text('Session stopped'), findsOneWidget);
     expect(find.text('Start'), findsOneWidget);
-    expect(find.text('Start agent now'), findsNothing);
+    expect(find.text('Start now'), findsNothing);
   });
 
   // A shared session reports no setup at all, and must reach the same stopped
@@ -436,7 +428,7 @@ void main() {
   testWidgets('the release asks the bridge to skip the gate', (tester) async {
     final transport = await pumpPane(tester, _setup(pendingStart: true));
 
-    await tester.tap(find.text('Start agent now'));
+    await tester.tap(find.text('Start now'));
     await tester.pump();
     await tester.pump();
 
@@ -453,30 +445,12 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('cancelling asks the bridge to stop the run', (tester) async {
-    final transport = await pumpPane(tester, _setup(pendingStart: true));
-
-    await tester.tap(find.text('Cancel setup'));
-    await tester.pump();
-    await tester.pump();
-
-    final sent = transport.sent.firstWhere((m) => m['type'] == 'session:setup');
-    expect(sent['action'], 'cancel');
-
-    transport.emit('session:result', {
-      'requestId': sent['requestId'],
-      'ok': true,
-      'session': _entry(_setup(pendingStart: false)).toJson(),
-    });
-    await tester.pump();
-  });
-
   // Nothing else on screen moves when a setup verb is refused, so a refusal
   // that only reached the log would be indistinguishable from a dropped press.
   testWidgets('a refusal is named rather than swallowed', (tester) async {
     final transport = await pumpPane(tester, _setup(pendingStart: true));
 
-    await tester.tap(find.text('Start agent now'));
+    await tester.tap(find.text('Start now'));
     await tester.pump();
     await tester.pump();
 
@@ -495,6 +469,199 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  group('with the setup strip', () {
+    /// The whole agent panel over a resolved project, so the strip, its
+    /// overlay position and the pane are all the production ones.
+    Future<FakeAgentTransport> pumpPanel(
+      WidgetTester tester,
+      SessionEntry entry, {
+      Size size = const Size(1000, 800),
+    }) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+      final transport = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: _projectId,
+        transport: transport,
+        mode: ProjectSessionMode.local,
+        cachedSessionsStore: cache,
+        onClose: () async => await transport.dispose(),
+      );
+      addTearDown(() => unawaited(session.close()));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...stores.overrides,
+            selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
+            projectSessionProvider(
+              _projectId,
+            ).overrideWith((ref) async => session),
+            activeSessionIdProvider.overrideWith(
+              () => ValueController<String?>(_sessionId),
+            ),
+            freshSessionsStateProvider.overrideWithValue(
+              SessionsState(projectId: _projectId, sessions: [entry]),
+            ),
+            terminalStateProvider.overrideWith(
+              (ref) => Stream.value(const TerminalState()),
+            ),
+            checkoutReadinessProvider.overrideWithValue(
+              CheckoutReadiness.ready,
+            ),
+          ],
+          child: MaterialApp(
+            builder: abToastHostBuilder,
+            theme: ThemeData.dark().copyWith(
+              extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+            ),
+            home: const Scaffold(body: AgentPanel()),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      return transport;
+    }
+
+    SessionEntry runningEntry(SessionSetup? setup) => SessionEntry(
+      id: _sessionId,
+      name: 'Fix auth bug',
+      createdAt: 0,
+      lastUsedAt: 0,
+      archived: false,
+      running: true,
+      checkoutId: 'worktree-1',
+      checkoutKind: 'managed-worktree',
+      setup: setup,
+    );
+
+    Finder button(String name) => find.byWidgetPredicate(
+      (w) => w is CarbonButton && (w.label ?? w.semanticLabel) == name,
+      description: 'CarbonButton "$name"',
+    );
+
+    // A height change on the terminal sends `terminal:resize`, so the strip
+    // appearing, opening and going must not move the terminal at all.
+    testWidgets('overlays the terminal area instead of pushing it down', (
+      tester,
+    ) async {
+      await pumpPanel(tester, runningEntry(null));
+      final bare = tester.getRect(find.byType(TerminalScreen));
+      await tester.pumpWidget(const SizedBox.shrink());
+
+      await pumpPanel(tester, runningEntry(_setup(pendingStart: false)));
+      expect(find.byType(SetupElapsed), findsOneWidget);
+      expect(tester.getRect(find.byType(TerminalScreen)), bare);
+      // The strip sits on the terminal's top edge, inside its rect.
+      expect(
+        tester.getTopLeft(find.byType(SetupElapsed)).dy,
+        inInclusiveRange(bare.top, bare.bottom),
+      );
+
+      await tester.tap(button('View setup details'));
+      await tester.pump();
+      expect(find.byType(SetupStepLedger), findsOneWidget);
+      expect(tester.getRect(find.byType(TerminalScreen)), bare);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('the waiting pane hides ledger and log until the chevron opens', (
+      tester,
+    ) async {
+      final transport = await pumpPanel(
+        tester,
+        _entry(_setup(pendingStart: true)),
+      );
+
+      expect(button('Start now'), findsOneWidget);
+      expect(find.byType(SetupStepLedger), findsNothing);
+      expect(find.byType(TerminalViewWrapper), findsNothing);
+      expect(find.text('Cancel setup'), findsNothing);
+      // The strip is the only setup chrome above the pane.
+      expect(find.byType(CarbonNotification), findsNothing);
+      expect(
+        find.text('Setting up workspace · 2 of 4 · Install dependencies'),
+        findsOneWidget,
+      );
+
+      await tester.tap(button('View setup details'));
+      await tester.pump();
+
+      expect(find.byType(SetupStepLedger), findsOneWidget);
+      expect(find.text('Copy env files'), findsOneWidget);
+      expect(find.text('Build assets'), findsOneWidget);
+      expect(find.text('Cancel setup'), findsOneWidget);
+      // The open panel covers the pane's release, so it carries its own.
+      final panelStart = find.descendant(
+        of: find.byKey(const ValueKey('setup-panel')),
+        matching: find.text('Start now'),
+      );
+      expect(button('Start now'), findsNWidgets(2));
+      expect(panelStart, findsOneWidget);
+      expect(panelStart.hitTestable(), findsOneWidget);
+
+      await tester.tap(find.text('Cancel setup'));
+      await tester.pump();
+      await tester.pump();
+      final sent = transport.sent.firstWhere(
+        (m) => m['type'] == 'session:setup',
+      );
+      expect(sent['action'], 'cancel');
+      transport.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': true,
+        'session': _entry(_setup(pendingStart: false)).toJson(),
+      });
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    // Both verbs end the same wait; the panel's release and cancel share one
+    // in-flight slot. The release is tapped through the panel, the only copy
+    // an open panel leaves hit-testable.
+    testWidgets('a cancel in flight keeps the release from racing it', (
+      tester,
+    ) async {
+      final transport = await pumpPanel(
+        tester,
+        _entry(_setup(pendingStart: true)),
+      );
+      await tester.tap(button('View setup details'));
+      await tester.pump();
+
+      final release = find.descendant(
+        of: find.byKey(const ValueKey('setup-panel')),
+        matching: find.text('Start now'),
+      );
+      expect(release.hitTestable(), findsOneWidget);
+
+      await tester.tap(find.text('Cancel setup'));
+      await tester.pump();
+      await tester.tap(release);
+      await tester.pump();
+      await tester.pump();
+
+      final sent = transport.sent
+          .where((m) => m['type'] == 'session:setup')
+          .toList();
+      expect(sent, hasLength(1));
+      expect(sent.single['action'], 'cancel');
+
+      transport.emit('session:result', {
+        'requestId': sent.single['requestId'],
+        'ok': true,
+        'session': _entry(_setup(pendingStart: false)).toJson(),
+      });
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
   });
 
   // On a local target `retryAgentConnection` opens with

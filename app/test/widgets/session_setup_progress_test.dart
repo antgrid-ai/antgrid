@@ -108,9 +108,8 @@ void main() {
       expect(find.byType(CarbonIcon), findsNothing);
     });
 
-    // The terminal pane's provisioning column sits beside the unscoped live
-    // terminal, so a scope above the ledger cannot be assumed: without its own,
-    // CarbonTheme.of throws.
+    // The setup panel sits beside the unscoped live terminal, so a scope above
+    // the ledger cannot be assumed: without its own, CarbonTheme.of throws.
     testWidgets('carries its own Carbon scope and builds no Ab widget', (
       tester,
     ) async {

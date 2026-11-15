@@ -75,7 +75,11 @@ class AgentPanel extends ConsumerWidget {
     );
 
     return DisplayVisibility(
-      child: Column(
+      // The column's own height is the only honest bound for the setup panel
+      // in chat: a non-flex child is otherwise measured unbounded and would
+      // size itself against the screen, keyboard and all.
+      child: LayoutBuilder(
+        builder: (context, box) => Column(
         children: [
           // Two headers, one layout: mobile needs a button for its slide-in
           // drawer, desktop toggles that drawer from the window title bar
@@ -103,7 +107,14 @@ class AgentPanel extends ConsumerWidget {
             )
           else
             const AgentBar(),
-          const SessionSetupBanner(),
+          // In the column ONLY for chat: overlays never paint over the
+          // transcript, so the strip makes room for it there. Terminal mode
+          // floats it inside the Stack below instead.
+          if (isChat && activeId != null)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: box.maxHeight),
+              child: const SessionSetupBanner(),
+            ),
           Expanded(
             child: isChat && activeId != null
                 // Keyed by session so switching sessions rebuilds the State —
@@ -152,6 +163,23 @@ class AgentPanel extends ConsumerWidget {
                       // another.
                       HandlerEscalationOverlay(key: ValueKey(activeId)),
                       const CommandOutputOverlay(),
+                      // Floats for the reason the escalation card does: a
+                      // height change on the terminal sends `terminal:resize`,
+                      // and a strip that appears, expands or goes would cost
+                      // one each time. Last, so its panel paints over the
+                      // bottom overlays too.
+                      //
+                      // Filled and top-aligned rather than pinned by `top`: a
+                      // Stack measures a child pinned on one edge unbounded, so
+                      // the panel could not tell how much terminal it floats
+                      // over. Align takes no hits of its own, so the terminal
+                      // below the strip stays reachable.
+                      const Positioned.fill(
+                        child: Align(
+                          alignment: Alignment.topCenter,
+                          child: SessionSetupBanner(),
+                        ),
+                      ),
                     ],
                   ),
           ),
@@ -159,6 +187,7 @@ class AgentPanel extends ConsumerWidget {
           const HandlerPaBar(),
           const CommandTray(),
         ],
+        ),
       ),
     );
   }

@@ -8,7 +8,7 @@ import '../models/session_entry.dart';
 import '../providers/session_setup.dart';
 import 'transcript/format.dart';
 
-/// How much of the provisioning pane the ledger may take before it scrolls.
+/// How much of the viewport the ledger may take before it scrolls.
 /// A `worktree.setup` block is a list a human wrote, so it is short in
 /// practice — but nothing bounds it, and the transcript underneath is the
 /// thing the user is actually watching.
@@ -79,9 +79,8 @@ class _SetupElapsedState extends State<SetupElapsed> {
 /// the field. A ledger of blanks answers less than the progress rule already
 /// above it.
 ///
-/// Carries its own Carbon scope because the terminal pane's provisioning column
-/// that mounts it also holds the live terminal, which stays outside Carbon, so
-/// no scope exists above the ledger.
+/// Carries its own Carbon scope so it can be mounted anywhere, including beside
+/// a live terminal, which stays outside Carbon.
 class SetupStepLedger extends StatelessWidget {
   const SetupStepLedger({super.key, required this.setup});
 
