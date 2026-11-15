@@ -25,7 +25,7 @@ import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
-import 'package:antgrid/widgets/window_title_bar.dart';
+import 'package:antgrid/widgets/session_breadcrumb.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -587,7 +587,6 @@ void main() {
         await pumpWide(tester);
 
         expect(find.byType(SessionModeControl), findsNothing);
-        expect(find.byType(HandlerHeaderControl), findsNothing);
         expect(find.byTooltip('Session options'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;

@@ -1018,15 +1018,10 @@ final sidebarControlProvider =
 /// Whether the desktop [AgentBar] is on screen, published by WorkspaceShell the
 /// same way as [contextPanelControlProvider].
 ///
-/// That bar owns the session controls — agent mark, mode control, handler
-/// shield. The window title bar carries no fallback for the mark or the
-/// handler shield (they live only in the agent bar); it drops and restores
-/// only its copy of the mode control while this flag flips: the New Session
-/// route and the settings overlay render without an agent bar and would
-/// otherwise leave the session with no mode switch at all.
-///
-/// The session's NAME is deliberately not part of this handover — it lives only
-/// in the agent bar, above the transcript it names (see `TitleBarBreadcrumb`).
+/// Nothing in `app/lib` reads it: the session controls (agent mark, breadcrumb,
+/// the overflow menu holding the mode switch and Handler row) live only in the
+/// agent bar, and the window title bar carries no copy of any of them to hand
+/// over. Do not build behaviour on it without first giving it a reader.
 final agentBarMountedProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(false),
 );

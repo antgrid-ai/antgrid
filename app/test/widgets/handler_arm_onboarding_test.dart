@@ -13,15 +13,12 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/handler_discovery.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/session_opening_prompt.dart';
-import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
-import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
@@ -367,15 +364,6 @@ void main() {
         handlerEntitlementNotice(const HandlerEntitlement()),
         contains("isn't available"),
       );
-    });
-  });
-
-  group('shieldShowsLabel', () {
-    test('labels only before the first arm and never while armed', () {
-      expect(shieldShowsLabel(armedOnce: false, sessionArmed: false), isTrue);
-      expect(shieldShowsLabel(armedOnce: true, sessionArmed: false), isFalse);
-      expect(shieldShowsLabel(armedOnce: false, sessionArmed: true), isFalse);
-      expect(shieldShowsLabel(armedOnce: true, sessionArmed: true), isFalse);
     });
   });
 
@@ -1345,43 +1333,6 @@ void main() {
 
         await confirmArmed(tester, transport);
       });
-    });
-  });
-
-  group('HandlerHeaderControl shield form', () {
-    List<Override> overrides(FirstRunStore store) => [
-      firstRunStoreProvider.overrideWithValue(store),
-      activeSessionIdProvider.overrideWith(
-        () => ValueController<String?>('t1'),
-      ),
-      activeSessionProvider.overrideWith((_) => null),
-      handlerStateProvider.overrideWith(
-        (_) => Stream.value(const HandlerState.initial()),
-      ),
-    ];
-
-    testWidgets('labeled Handler button before the first arm', (tester) async {
-      useInMemoryPrefs();
-      final store = await FirstRunStore.open();
-      await tester.pumpWidget(
-        _wrap(const HandlerHeaderControl(), overrides: overrides(store)),
-      );
-      await tester.pump();
-      expect(find.text('Handler'), findsOneWidget);
-    });
-
-    testWidgets('collapses to the bare shield once armed anywhere', (
-      tester,
-    ) async {
-      useInMemoryPrefs();
-      final store = await FirstRunStore.open();
-      await store.write(const FirstRunState(handlerArmedOnce: true));
-      await tester.pumpWidget(
-        _wrap(const HandlerHeaderControl(), overrides: overrides(store)),
-      );
-      await tester.pump();
-      expect(find.text('Handler'), findsNothing);
-      expect(find.byTooltip('Arm Handler'), findsOneWidget);
     });
   });
 }

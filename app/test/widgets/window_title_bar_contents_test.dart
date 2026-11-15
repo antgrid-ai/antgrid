@@ -13,6 +13,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
+import 'package:antgrid/widgets/session_breadcrumb.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';
 import 'package:flutter/foundation.dart';
