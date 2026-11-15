@@ -26,6 +26,8 @@ import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/session_breadcrumb.dart';
+import 'package:antgrid/widgets/session_overflow_menu.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -587,7 +589,13 @@ void main() {
         await pumpWide(tester);
 
         expect(find.byType(SessionModeControl), findsNothing);
-        expect(find.byTooltip('Session options'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(SessionOverflowButton),
+            matching: find.byType(CarbonOverflowMenu),
+          ),
+          findsOneWidget,
+        );
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }

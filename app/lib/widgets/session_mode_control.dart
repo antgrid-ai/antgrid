@@ -1,9 +1,8 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_menu.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
@@ -96,70 +95,62 @@ class SessionModeControl extends ConsumerWidget {
   }
 }
 
-/// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
-/// text-menu host (the mobile overflow popup) instead of a segmented
+/// [SessionModeControl]'s state, redone as a single [CarbonMenuItem] for a
+/// text-menu host (the session overflow menu) instead of a segmented
 /// control. A menu row has no room to show the option NOT being picked, so
 /// the label names the action ("Switch to Terminal"/"Switch to Chat UI")
 /// instead of the two-state choice. Same visibility/capability rules as
 /// [SessionModeControl] — keep the two in lockstep by hand; neither is a
 /// special case of the other's build method.
-class SessionModeMenuItem extends ConsumerWidget {
-  const SessionModeMenuItem({super.key});
+///
+/// Null when the session's conversation can no longer be resumed. Call it from
+/// the consumer that owns the menu so the watches below rebuild the entry.
+/// [context] presents the confirm dialog, and runs after the menu has closed,
+/// so it must be the trigger's: the menu is an overlay, so the row has no
+/// route of its own to pop and no context that outlives it.
+///
+/// A flip in flight disables the row with a reason rather than pulsing it: a
+/// Carbon menu row cannot animate, and a disabled row cannot queue a second
+/// flip.
+CarbonMenuEntry? sessionModeMenuEntry(BuildContext context, WidgetRef ref) {
+  final active = ref.watch(activeSessionProvider);
+  if (active == null || !active.agentSessionResumable) return null;
+  final pending = ref.watch(pendingSessionModeProvider);
+  final inFlight = pending?.sessionId == active.id;
+  final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
+      ? 'chat'
+      : 'terminal';
+  final target = mode == 'chat' ? 'terminal' : 'chat';
+  final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
+  final agent =
+      ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
+      sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
+  final chatEnabled = mode == 'chat' || chatCapable == true;
+  // Switching TO terminal is always reachable; switching to chat carries
+  // the same capability gate as the segmented control's Chat cell.
+  final targetEnabled = target == 'terminal' || chatEnabled;
+  final container = ref.container;
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final active = ref.watch(activeSessionProvider);
-    if (active == null || !active.agentSessionResumable) {
-      return const SizedBox.shrink();
-    }
-    final pending = ref.watch(pendingSessionModeProvider);
-    final inFlight = pending?.sessionId == active.id;
-    final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
-        ? 'chat'
-        : 'terminal';
-    final target = mode == 'chat' ? 'terminal' : 'chat';
-    final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
-    final agent =
-        ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
-        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
-    final chatEnabled = mode == 'chat' || chatCapable == true;
-    // Switching TO terminal is always reachable; switching to chat carries
-    // the same capability gate as the segmented control's Chat cell.
-    final targetEnabled = target == 'terminal' || chatEnabled;
-
-    final row = AbLiveMenuRow(
-      label: target == 'chat' ? 'Switch to Chat UI' : 'Switch to Terminal',
-      icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
-      enabled: targetEnabled,
-      disabledReason: chatCapable == null
-          ? "This machine hasn't said whether $agent supports chat sessions — "
-                'it may still be connecting, or its bridge may be too old to '
-                'answer.'
-          : "$agent doesn't support chat sessions.",
-      onTap: () {
-        // Inert while a flip is in flight, so a second tap can't queue a
-        // second one — same contract as SessionModeControl.
-        if (inFlight) return;
-        // The popup route closes BEFORE the confirm dialog opens. This row is
-        // the content of a `showAbPanel` PopupRoute, which its own doc says
-        // pops itself; leaving it up stacks the dialog over a live modal
-        // barrier and then leaves the menu covering the session it just
-        // changed. The dialog anchors on the NAVIGATOR's context, which
-        // outlives the route being popped, and the container is read before
-        // the pop for the same reason.
-        final navigator = Navigator.of(context);
-        final host = navigator.context;
-        final container = ref.container;
-        navigator.pop();
-        detached(
-          'SessionModeMenuItem',
-          'switch session mode',
-          () => _switchMode(host, container, active, target),
-        );
-      },
-    );
-    return inFlight ? PulsingOpacity(child: row) : row;
-  }
+  return CarbonMenuItem(
+    label: target == 'chat' ? 'Switch to Chat UI' : 'Switch to Terminal',
+    icon: CarbonIcon(
+      target == 'chat' ? CarbonIcons.chat : CarbonIcons.terminal,
+    ),
+    onPressed: targetEnabled && !inFlight
+        ? () => detached(
+            'SessionModeMenuItem',
+            'switch session mode',
+            () => _switchMode(context, container, active, target),
+          )
+        : null,
+    disabledReason: inFlight
+        ? 'Switching mode…'
+        : chatCapable == null
+        ? "This machine hasn't said whether $agent supports chat sessions — "
+              'it may still be connecting, or its bridge may be too old to '
+              'answer.'
+        : "$agent doesn't support chat sessions.",
+  );
 }
 
 /// Marker text of the `session:set-mode` failure where the old runtime never
