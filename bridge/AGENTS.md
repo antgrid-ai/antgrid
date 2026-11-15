@@ -395,7 +395,9 @@ Three couplings reach into `app/` and so are gated by nothing on this side:
 - Its owner row in `terminalOwners` SURVIVES its exit, unlike every other
   terminal's: `sendStatus` routes by that row, so dropping it prunes the
   transcript the banner's "View setup log" reads — exactly when the run failed.
-- **The start gate lives on the bridge, in memory.** A `session:start` during a
+- **The start gate lives on the bridge, in memory.** Under `startAgent:
+  afterSetup` (the default `immediate` seeds the gate open and records nothing), a
+  `session:start` during a
   run records `pendingStart` (with its `initialPrompt`) and replies `ok: true`; a
   start carrying NO prompt never clears one already queued, because the app gates
   its auto-start paths on `sessionStartQueued` and this is the backstop for the

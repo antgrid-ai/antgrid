@@ -4610,8 +4610,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       checkoutSetupPolicy: (checkout) => {
         // A config that will not parse cannot say there is nothing to run, nor
         // that the agent may skip the wait: the doubt is reported as "declares"
-        // so the user gets the banner, and as the gating default so it does not
-        // also launch an agent into a tree nothing can vouch for.
+        // so the user gets the banner, and as "afterSetup" regardless of the
+        // schema default, so it does not also launch an agent into a tree
+        // nothing can vouch for.
         try {
           const setup = setupRunner.resolveSetup(checkout);
           // An EMPTY `steps` list is a declaration of nothing, and the same
