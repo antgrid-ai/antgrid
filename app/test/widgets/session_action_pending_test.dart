@@ -146,7 +146,7 @@ void main() {
     await tester.tap(find.text('Session 1'));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'Renamed');
+    await tester.enterText(find.byType(EditableText), 'Renamed');
     await tester.tap(find.text('Rename'));
     // Let the dialog route finish popping before matching on text: its field
     // holds the same string. The rename stays in flight throughout — the 15s
@@ -167,7 +167,7 @@ void main() {
     // would race the first rename.
     await tester.tap(find.text('Renamed'), warnIfMissed: false);
     await tester.pump();
-    expect(find.byType(TextField), findsNothing);
+    expect(find.byType(EditableText), findsNothing);
 
     // Unanswered: the committed name comes back with the reason, rather than a
     // name the bridge never confirmed sticking on screen.

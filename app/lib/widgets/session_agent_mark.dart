@@ -1,16 +1,16 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
+import '../design/ab_carbon.dart';
 import '../design/widgets/ab_agent_mark.dart';
-import '../design/widgets/ab_tooltip.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/focused_tools.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/project_work_status.dart';
 import '../providers/sessions.dart';
-import 'agent_work_status_dot.dart';
+import 'carbon_status_dot.dart';
 
 /// Which agent is driving the focused session, as a mark beside the mode
 /// control, corner-badged with its live work status.
@@ -20,20 +20,17 @@ import 'agent_work_status_dot.dart';
 /// coming back is Claude Code's or Codex's — which changes how you read it.
 /// A glyph is the whole answer here because the name is the tooltip. The
 /// recent-sessions rows draw the same mark + badge for the same reason
-/// (`_SessionMark` in `recent_session_row_widget.dart`) — this mirrors that
+/// (`_SessionMark` in `recent_sessions/carbon_recent_session_row.dart`) — this mirrors that
 /// layout so the two read identically: mark leads, breadcrumb follows.
 ///
-/// Status is per-session when a session is focused, else the project rollup
-/// (mirrors the breadcrumb's old inline dot, which this replaces) — always
-/// shown, `done`/idle included, so an idle session reads the same hollow-grey
-/// here as it does in the Recent list.
+/// Status is per-session when a session is focused, else the project rollup —
+/// always shown, `done`/idle included, so an idle session reads the same
+/// hollow ring here as it does in the Recent list.
 ///
 /// Without a mark (custom launch command, or nothing focused) this falls back
-/// to the bare status dot, matching `_SessionMark`'s markless case.
+/// to the bare status dot, matching the Recent row's markless case.
 class SessionAgentMark extends ConsumerWidget {
-  const SessionAgentMark({super.key, this.size = 14});
-
-  final double size;
+  const SessionAgentMark({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -55,7 +52,7 @@ class SessionAgentMark extends ConsumerWidget {
     if (active == null || tool == null || tool.isEmpty) {
       return workStatus == null
           ? const SizedBox.shrink()
-          : AgentWorkStatusDot(status: workStatus);
+          : AbCarbonScope(child: CarbonWorkStatusDot(status: workStatus));
     }
     // The focused machine's own label first, the merged catalog second — the
     // same resolution the mode control uses, so one session cannot be named two
@@ -64,31 +61,38 @@ class SessionAgentMark extends ConsumerWidget {
         ref.watch(focusedMachineToolsProvider).value?.labels[tool] ??
         sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
 
-    final mark = AbTooltip(
-      message: label,
-      child: AbAgentMark(
-        key: const Key('session-agent-mark'),
-        toolKey: tool,
-        label: label,
-        size: size,
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) {
+          final t = CarbonTheme.of(context);
+          final mark = CarbonTooltip(
+            message: label,
+            child: AbAgentMark(
+              key: const Key('session-agent-mark'),
+              toolKey: tool,
+              label: label,
+              size: t.iconSize,
+              color: t.colors.iconSecondary,
+            ),
+          );
+          if (workStatus == null) return mark;
+          return Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.center,
+            children: [
+              mark,
+              // Hung off the corner rather than inset, so the dot eats as
+              // little of the mark as it can. The overhang is decorative and
+              // clears the gap the header leaves after the mark.
+              Positioned(
+                right: -CarbonSpacing.spacing01,
+                bottom: -CarbonSpacing.spacing01,
+                child: CarbonWorkStatusDot(status: workStatus),
+              ),
+            ],
+          );
+        },
       ),
-    );
-
-    if (workStatus == null) return mark;
-    return Stack(
-      clipBehavior: Clip.none,
-      alignment: Alignment.center,
-      children: [
-        mark,
-        Positioned(
-          right: -2,
-          bottom: -2,
-          child: AgentWorkStatusBadge(
-            status: workStatus,
-            ringColor: context.antgrid.bgDeep,
-          ),
-        ),
-      ],
     );
   }
 }
