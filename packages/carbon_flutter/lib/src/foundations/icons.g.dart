@@ -229,6 +229,16 @@ enum CarbonIcons {
   characterSentenceCase,
   /// Carbon `asterisk`.
   asterisk,
+  /// Carbon `attachment`.
+  attachment,
+  /// Carbon `paste`.
+  paste,
+  /// Carbon `mobile`.
+  mobile,
+  /// Carbon `cell-tower`.
+  cellTower,
+  /// Carbon `workspace`.
+  workspace,
   ;
 
   /// Whether the glyph points along the reading direction and so mirrors
@@ -588,5 +598,20 @@ const Map<CarbonIcons, _CarbonGlyph> _glyphs = <CarbonIcons, _CarbonGlyph>{
   ),
   CarbonIcons.asterisk: _CarbonGlyph(
     <_CarbonIconPath>[_CarbonIconPath('M28.316 13.949 27.684 12.051 17 15.612 17 4 15 4 15 15.612 4.316 12.051 3.684 13.949 14.368 17.51 7.2 27.066 8.8 28.267 16 18.667 23.2 28.267 24.8 27.066 17.632 17.51 28.316 13.949z')],
+  ),
+  CarbonIcons.attachment: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M28.1,18.9L13.1,3.9c-2.5-2.6-6.6-2.6-9.2-0.1S1.3,10.5,3.9,13c0,0,0.1,0.1,0.1,0.1L6.8,16l1.4-1.4l-2.9-2.9 C3.6,10,3.6,7.1,5.3,5.4s4.6-1.8,6.3-0.1c0,0,0,0,0.1,0.1l14.9,14.9c1.8,1.7,1.8,4.6,0.1,6.3c-1.7,1.8-4.6,1.8-6.3,0.1 c0,0,0,0-0.1-0.1l-7.4-7.4c-1-1-0.9-2.6,0-3.5c1-0.9,2.5-0.9,3.5,0l4.1,4.1l1.4-1.4c0,0-4.2-4.2-4.2-4.2c-1.8-1.7-4.6-1.6-6.3,0.2 c-1.6,1.7-1.6,4.4,0,6.2l7.5,7.5c2.5,2.6,6.6,2.6,9.2,0.1S30.7,21.5,28.1,18.9C28.1,19,28.1,18.9,28.1,18.9L28.1,18.9z')],
+  ),
+  CarbonIcons.paste: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M26,20H17.83l2.58-2.59L19,16l-5,5,5,5,1.41-1.41L17.83,22H26v8h2V22A2,2,0,0,0,26,20Z'), _CarbonIconPath('M23.71,9.29l-7-7A1,1,0,0,0,16,2H6A2,2,0,0,0,4,4V28a2,2,0,0,0,2,2h8V28H6V4h8v6a2,2,0,0,0,2,2h6v2h2V10A1,1,0,0,0,23.71,9.29ZM16,4.41,21.59,10H16Z')],
+  ),
+  CarbonIcons.mobile: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M22,4H10A2.002,2.002,0,0,0,8,6V28a2.0023,2.0023,0,0,0,2,2H22a2.0027,2.0027,0,0,0,2-2V6A2.0023,2.0023,0,0,0,22,4Zm0,2,0,2H10V6ZM10,28V10H22l0,18Z')],
+  ),
+  CarbonIcons.cellTower: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M25 11 25 16 17 16 17 11 15 11 15 16 7 16 7 11 5 11 5 23 7 23 7 18 10 18 10 30 12 30 12 18 15 18 15 23 17 23 17 18 20 18 20 30 22 30 22 18 25 18 25 23 27 23 27 11z'), _CarbonIconPath('M16,6c-1.7,0-3.2,0.7-4.2,1.8l1.4,1.4C13.9,8.4,14.9,8,16,8s2.1,0.4,2.8,1.2l1.4-1.4C19.2,6.7,17.7,6,16,6z'), _CarbonIconPath('M8.9,4.9l1.4,1.4C11.8,4.9,13.8,4,16,4s4.2,0.9,5.7,2.3l1.4-1.4C21.3,3.1,18.8,2,16,2S10.7,3.1,8.9,4.9z')],
+  ),
+  CarbonIcons.workspace: _CarbonGlyph(
+    <_CarbonIconPath>[_CarbonIconPath('M16,17v8H6V17H16m0-2H6a2,2,0,0,0-2,2v8a2,2,0,0,0,2,2H16a2,2,0,0,0,2-2V17a2,2,0,0,0-2-2Z'), _CarbonIconPath('M27,6v5H17V6H27m0-2H17a2,2,0,0,0-2,2v5a2,2,0,0,0,2,2H27a2,2,0,0,0,2-2V6a2,2,0,0,0-2-2Z'), _CarbonIconPath('M27,17v5H22V17h5m0-2H22a2,2,0,0,0-2,2v5a2,2,0,0,0,2,2h5a2,2,0,0,0,2-2V17a2,2,0,0,0-2-2Z'), _CarbonIconPath('M11,6v5H6V6h5m0-2H6A2,2,0,0,0,4,6v5a2,2,0,0,0,2,2h5a2,2,0,0,0,2-2V6a2,2,0,0,0-2-2Z')],
   ),
 };

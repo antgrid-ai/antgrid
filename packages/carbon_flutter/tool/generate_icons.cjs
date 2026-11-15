@@ -130,6 +130,11 @@ const ICONS = [
   ['characterUpperCase', 'character--upper-case', false],
   ['characterSentenceCase', 'character--sentence-case', false],
   ['asterisk', 'asterisk', false],
+  ['attachment', 'attachment', false],
+  ['paste', 'paste', false],
+  ['mobile', 'mobile', false],
+  ['cellTower', 'cell-tower', false],
+  ['workspace', 'workspace', false],
 ];
 
 const attr = (el, name) => {

@@ -282,6 +282,92 @@ void main() {
       handle.dispose();
     });
 
+    group('badge', () {
+      Widget menu({int? count, CarbonBadgeTone? tone, bool enabled = true}) =>
+          CarbonOverflowMenu(
+            entries: _entries(<String>[]),
+            semanticLabel: 'Session options',
+            enabled: enabled,
+            badgeCount: count,
+            badgeTone: tone ?? CarbonBadgeTone.error,
+          );
+
+      Finder dot() => find.descendant(
+        of: find.byType(CarbonButton),
+        matching: find.byWidgetPredicate(
+          (w) =>
+              w is SizedBox &&
+              w.width == CarbonSpacing.spacing03 &&
+              w.height == CarbonSpacing.spacing03,
+        ),
+      );
+
+      testWidgets('no badge by default; a dot at 0 leaves the footprint', (
+        tester,
+      ) async {
+        await _pump(tester, menu());
+        final before = tester.getSize(find.byType(CarbonButton));
+        expect(dot(), findsNothing);
+        await _pump(tester, menu(count: 0));
+        expect(dot(), findsOneWidget);
+        expect(tester.getSize(find.byType(CarbonButton)), before);
+      });
+
+      testWidgets('a count paints in the trigger corner and is announced', (
+        tester,
+      ) async {
+        final handle = tester.ensureSemantics();
+        await _pump(tester, menu(count: 3));
+        expect(find.text('3'), findsOneWidget);
+        final box = tester.getRect(find.byType(CarbonButton));
+        final pill = tester.getRect(
+          find
+              .ancestor(of: find.text('3'), matching: find.byType(DecoratedBox))
+              .first,
+        );
+        expect(pill.top - box.top, CarbonSpacing.spacing02);
+        expect(box.right - pill.right, CarbonSpacing.spacing02);
+        expect(find.bySemanticsLabel('Session options, 3'), findsOneWidget);
+        handle.dispose();
+      });
+
+      testWidgets('tone picks the fill', (tester) async {
+        final colors = CarbonThemeData().colors;
+        Color fillOf(WidgetTester t) =>
+            (t
+                    .widget<DecoratedBox>(
+                      find
+                          .ancestor(
+                            of: find.text('2'),
+                            matching: find.byType(DecoratedBox),
+                          )
+                          .first,
+                    )
+                    .decoration
+                as BoxDecoration)
+            .color!;
+        await _pump(tester, menu(count: 2));
+        expect(fillOf(tester), colors.supportError);
+        await _pump(tester, menu(count: 2, tone: CarbonBadgeTone.brand));
+        expect(fillOf(tester), colors.backgroundBrand);
+      });
+
+      testWidgets('a disabled trigger shows no badge', (tester) async {
+        await _pump(tester, menu(count: 2));
+        expect(find.text('2'), findsOneWidget);
+        await _pump(tester, menu(count: 2, enabled: false));
+        expect(find.text('2'), findsNothing);
+      });
+
+      testWidgets('the badge still opens the menu', (tester) async {
+        await _pump(tester, menu(count: 0));
+        expect(dot(), findsOneWidget);
+        await tester.tap(find.byType(CarbonButton));
+        await _settle(tester);
+        expect(find.text('Rename'), findsOneWidget);
+      });
+    });
+
     testWidgets('custom name and horizontal glyph', (tester) async {
       final handle = tester.ensureSemantics();
       await _pump(

@@ -46,7 +46,10 @@ node tool/generate_colors.cjs <scratch-directory> lib/src/foundations/colors.dar
 ```
 
 Icons (append names to `ICONS` in the script to bundle more; the bundled set
-includes `user`, `login` and `download` for account and update affordances):
+includes `user`, `login` and `download` for account and update affordances,
+`attachment`, `paste` and `mobile` for clipboard and device cues, `cellTower`
+(`cell-tower`) for a machine reachable remotely and `workspace` for the
+workspace views):
 
 ```bash
 npm pack @carbon/icons@<version> && tar xzf carbon-icons-<version>.tgz

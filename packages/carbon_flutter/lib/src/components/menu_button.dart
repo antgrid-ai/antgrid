@@ -311,7 +311,12 @@ class CarbonOverflowMenu extends StatelessWidget {
     this.onOpenChanged,
     this.semanticLabel,
     this.menuLabel,
-  });
+    this.badgeCount,
+    this.badgeTone = CarbonBadgeTone.error,
+  }) : assert(
+         badgeCount == null || badgeCount >= 0,
+         'badgeCount is a non-negative count',
+       );
 
   final List<CarbonMenuEntry> entries;
 
@@ -343,6 +348,15 @@ class CarbonOverflowMenu extends StatelessWidget {
 
   /// The open menu's accessible name.
   final String? menuLabel;
+
+  /// A badge on the trigger, with the meaning of [CarbonButton.badgeCount]:
+  /// null shows none, 0 a dot, a positive count the number, announced after
+  /// the trigger's name. It paints outside layout, so the footprint is
+  /// unchanged, and a disabled trigger shows none (deviation C01-badge).
+  final int? badgeCount;
+
+  /// The badge fill; see [CarbonButton.badgeTone].
+  final CarbonBadgeTone badgeTone;
 
   @override
   Widget build(BuildContext context) {
@@ -388,6 +402,8 @@ class CarbonOverflowMenu extends StatelessWidget {
                   ),
               semanticLabel: name,
               size: size,
+              badgeCount: badgeCount,
+              badgeTone: badgeTone,
               focusNode: node,
               // An open trigger stays on the layer fill the wrapper paints;
               // Carbon's open-and-hover rule outranks the ghost hover and
