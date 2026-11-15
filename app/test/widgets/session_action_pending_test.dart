@@ -3,7 +3,6 @@
 // second press can't queue a second request behind the first. Same shape
 // SessionModeControl uses for a mode flip: show what the user asked for, pulse
 // it, and take the control out of play until it is answered.
-import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/design/widgets/pulsing_opacity.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/terminal_models.dart';
@@ -16,6 +15,7 @@ import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_breadcrumb.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -35,6 +35,15 @@ SessionEntry _session({bool running = false, String name = 'Session 1'}) =>
       running: running,
       mode: 'terminal',
     );
+
+CarbonButton _start(WidgetTester tester) => tester.widget<CarbonButton>(
+  find.ancestor(
+    of: find.byWidgetPredicate(
+      (w) => w is Text && (w.data == 'Start' || w.data == 'Starting…'),
+    ),
+    matching: find.byType(CarbonButton),
+  ),
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -81,7 +90,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Start'), findsOneWidget);
-    expect(find.byType(AbLoadingDot), findsNothing);
+    expect(_start(tester).busy, isFalse);
 
     await tester.tap(find.text('Start'));
     await tester.pump();
@@ -94,9 +103,21 @@ void main() {
     expect(find.text('Starting…'), findsOneWidget);
     expect(find.text('Start'), findsNothing);
     expect(
-      find.byType(AbLoadingDot),
-      findsOneWidget,
-      reason: 'the dot is what separates busy from a button that died',
+      _start(tester).busy,
+      isTrue,
+      reason: 'the spinner is what separates busy from a button that died',
+    );
+    // Busy, not disabled: a null handler would paint the dimmed state.
+    expect(_start(tester).onPressed, isNotNull);
+    // The pending label has to stay readable: a text-only Carbon button hides
+    // its label while busy, so the button leads with an icon the spinner
+    // replaces.
+    expect(
+      find.ancestor(
+        of: find.text('Starting…'),
+        matching: find.byWidgetPredicate((w) => w is Visibility && !w.visible),
+      ),
+      findsNothing,
     );
 
     // Inert: a second press must not queue a second start behind the first.
@@ -112,7 +133,7 @@ void main() {
     await tester.pump(const Duration(seconds: 20));
     await tester.pump();
     expect(find.text('Start'), findsOneWidget);
-    expect(find.byType(AbLoadingDot), findsNothing);
+    expect(_start(tester).busy, isFalse);
     expect(find.textContaining("didn't answer"), findsOneWidget);
   });
 

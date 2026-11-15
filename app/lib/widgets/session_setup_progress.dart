@@ -1,11 +1,10 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
+import '../design/ab_carbon.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon.dart';
 import '../models/session_entry.dart';
 import '../providers/session_setup.dart';
 import 'transcript/format.dart';
@@ -81,6 +80,10 @@ class _SetupElapsedState extends State<SetupElapsed> {
 /// steps ran but not what they were called, and so does a bridge that predates
 /// the field. A ledger of blanks answers less than the progress rule already
 /// above it.
+///
+/// Carries its own Carbon scope because the terminal pane's provisioning column
+/// that mounts it also holds the live terminal, which stays outside Carbon, so
+/// no scope exists above the ledger.
 class SetupStepLedger extends StatelessWidget {
   const SetupStepLedger({super.key, required this.setup});
 
@@ -90,36 +93,48 @@ class SetupStepLedger extends StatelessWidget {
   Widget build(BuildContext context) {
     final names = setup.stepNames;
     if (names.isEmpty) return const SizedBox.shrink();
-    final colors = context.antgrid;
     final phase = sessionSetupPhase(setup);
     final current = setup.stepIndex;
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.bgElevated,
-        border: Border(bottom: BorderSide(color: colors.borderSubtle)),
-      ),
-      constraints: BoxConstraints(
-        maxHeight:
-            MediaQuery.sizeOf(context).height * _kLedgerMaxViewportFraction,
-      ),
-      width: double.infinity,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space12,
-          vertical: AbTokens.space8,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (var i = 0; i < names.length; i++)
-              _StepRow(
-                name: names[i],
-                state: _stateOf(i, current, phase),
-                colors: colors,
+    final maxHeight =
+        MediaQuery.sizeOf(context).height * _kLedgerMaxViewportFraction;
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) {
+          final t = CarbonTheme.of(context);
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              color: t.colors.layer01,
+              border: Border(
+                bottom: BorderSide(
+                  color: t.borderSubtle(CarbonLayer.of(context)),
+                ),
               ),
-          ],
-        ),
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxHeight),
+              child: SizedBox(
+                width: double.infinity,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: CarbonSpacing.spacing04,
+                    vertical: CarbonSpacing.spacing03,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (var i = 0; i < names.length; i++)
+                        _StepRow(
+                          name: names[i],
+                          state: _stateOf(i, current, phase),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -142,47 +157,51 @@ class SetupStepLedger extends StatelessWidget {
 enum _StepState { done, current, pending, failed }
 
 class _StepRow extends StatelessWidget {
-  const _StepRow({
-    required this.name,
-    required this.state,
-    required this.colors,
-  });
+  const _StepRow({required this.name, required this.state});
 
   final String name;
   final _StepState state;
-  final AbColors colors;
 
   @override
   Widget build(BuildContext context) {
-    final (icon, iconColor, textColor) = switch (state) {
-      _StepState.done => (AbIcons.check, colors.success, colors.textMuted),
-      _StepState.current => (
-        AbIcons.chevronRight,
-        colors.accent,
-        colors.textPrimary,
+    final t = CarbonTheme.of(context);
+    final glyph = switch (state) {
+      _StepState.done => CarbonStatusIcon(
+        CarbonStatusKind.success,
+        size: t.iconSize,
       ),
-      _StepState.failed => (AbIcons.error, colors.error, colors.textPrimary),
-      _StepState.pending => (
-        AbIcons.circle,
-        colors.textDisabled,
-        colors.textDisabled,
+      _StepState.current => CarbonIcon(
+        CarbonIcons.inProgress,
+        size: t.iconSize,
+        color: t.colors.interactive,
+      ),
+      _StepState.failed => CarbonStatusIcon(
+        CarbonStatusKind.error,
+        size: t.iconSize,
+      ),
+      _StepState.pending => CarbonIcon(
+        CarbonIcons.circleDash,
+        size: t.iconSize,
+        color: t.colors.iconDisabled,
       ),
     };
+    final textColor = switch (state) {
+      _StepState.done => t.colors.textSecondary,
+      _StepState.current || _StepState.failed => t.colors.textPrimary,
+      _StepState.pending => t.colors.textDisabled,
+    };
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+      padding: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing02),
       child: Row(
         children: [
-          AbIcon(icon, size: AbTokens.fontSm, color: iconColor),
-          const SizedBox(width: AbTokens.space8),
+          glyph,
+          const SizedBox(width: CarbonSpacing.spacing03),
           Expanded(
             child: Text(
               name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: textColor,
-              ),
+              style: t.typography.label.copyWith(color: textColor),
             ),
           ),
         ],

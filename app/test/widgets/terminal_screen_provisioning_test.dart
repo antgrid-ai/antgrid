@@ -8,6 +8,7 @@
 // `new_session_queued_start_test.dart` and `session_setup_test.dart`.
 import 'dart:async';
 
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/terminal_models.dart';
@@ -24,10 +25,12 @@ import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/toast_host.dart';
 
@@ -100,8 +103,33 @@ class _SpyMachineConnectionNotifier extends MachineConnectionNotifier {
 /// about. The transcript arm is the banner's own `_buildLog` widget.
 Future<FakeAgentTransport> pumpPane(
   WidgetTester tester,
-  SessionSetup? setup,
-) async {
+  SessionSetup? setup, {
+  Size? size,
+  double textScale = 1,
+}) => pumpPaneWith(
+  tester,
+  sessions: [_entry(setup)],
+  activeId: _sessionId,
+  size: size,
+  textScale: textScale,
+);
+
+/// [pumpPane] with the inputs that pick WHICH state the pane is in.
+/// [hangSession] never resolves the project, which is the bootstrap wait.
+Future<FakeAgentTransport> pumpPaneWith(
+  WidgetTester tester, {
+  required List<SessionEntry> sessions,
+  required String? activeId,
+  CheckoutReadiness readiness = CheckoutReadiness.ready,
+  bool hangSession = false,
+  Size? size,
+  double textScale = 1,
+}) async {
+  if (size != null) {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+  }
   final transport = FakeAgentTransport();
   final cache = await CachedSessionsStore.open();
   final session = ProjectSession(
@@ -117,23 +145,33 @@ Future<FakeAgentTransport> pumpPane(
     ProviderScope(
       overrides: [
         selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
-        projectSessionProvider(_projectId).overrideWith((ref) async => session),
+        projectSessionProvider(_projectId).overrideWith(
+          (ref) => hangSession ? Completer<ProjectSession>().future : Future.value(session),
+        ),
         activeSessionIdProvider.overrideWith(
-          () => ValueController<String?>(_sessionId),
+          () => ValueController<String?>(activeId),
         ),
         freshSessionsStateProvider.overrideWithValue(
-          SessionsState(projectId: _projectId, sessions: [_entry(setup)]),
+          SessionsState(projectId: _projectId, sessions: sessions),
         ),
         terminalStateProvider.overrideWith(
           (ref) => Stream.value(const TerminalState()),
         ),
+        checkoutReadinessProvider.overrideWithValue(readiness),
       ],
       child: MaterialApp(
         builder: abToastHostBuilder,
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
-        home: const Scaffold(body: TerminalScreen()),
+        home: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(textScale)),
+            child: const Scaffold(body: TerminalScreen()),
+          ),
+        ),
       ),
     ),
   );
@@ -142,6 +180,32 @@ Future<FakeAgentTransport> pumpPane(
   await tester.pump();
   return transport;
 }
+
+/// The pane paints Carbon's background, not the terminal's: a pane that is
+/// not the live terminal must not read as one.
+void _expectCarbonBackdrop(WidgetTester tester, Finder inner) {
+  final background = CarbonTheme.of(tester.element(inner)).colors.background;
+  final colors = tester
+      .widgetList<ColoredBox>(
+        find.ancestor(of: inner, matching: find.byType(ColoredBox)),
+      )
+      .map((b) => b.color)
+      .toList();
+  expect(colors, contains(background));
+  expect(colors, isNot(contains(kDefaultPalette.bgDeepest)));
+}
+
+/// Every Carbon scope on screen, none of which may build an Ab widget.
+void _expectNoAbWidgets(WidgetTester tester) {
+  final scopes = find.byType(AbCarbonScope);
+  expect(scopes, findsWidgets);
+  for (var i = 0; i < scopes.evaluate().length; i++) {
+    expect(abWidgetsInScope(tester, scope: scopes.at(i)), isEmpty);
+  }
+}
+
+Rect _rectOf(WidgetTester tester, String label) =>
+    tester.getRect(find.widgetWithText(CarbonButton, label));
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -169,6 +233,185 @@ void main() {
     expect(find.text('Copy env files'), findsOneWidget);
     expect(find.text('Generate client'), findsOneWidget);
     expect(find.text('Build assets'), findsOneWidget);
+  });
+
+  testWidgets('the empty and stopped states paint the Carbon background', (
+    tester,
+  ) async {
+    await pumpPane(tester, _setup(pendingStart: false));
+    _expectCarbonBackdrop(tester, find.text('Session stopped'));
+    _expectNoAbWidgets(tester);
+    // Has an icon, so a busy press swaps the glyph and keeps the label.
+    expect(
+      tester
+          .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Start'))
+          .icon,
+      isA<CarbonIcon>().having((i) => i.icon, 'icon', CarbonIcons.play),
+    );
+  });
+
+  testWidgets('a stopped chat offers Restart with the restart glyph', (
+    tester,
+  ) async {
+    await pumpPaneWith(
+      tester,
+      sessions: [
+        SessionEntry(
+          id: _sessionId,
+          name: 'Fix auth bug',
+          createdAt: 0,
+          lastUsedAt: 0,
+          archived: false,
+          running: false,
+          mode: 'chat',
+        ),
+      ],
+      activeId: _sessionId,
+    );
+
+    expect(find.text('Chat stopped'), findsOneWidget);
+    _expectCarbonBackdrop(tester, find.text('Chat stopped'));
+    expect(
+      tester
+          .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Restart'))
+          .icon,
+      isA<CarbonIcon>().having((i) => i.icon, 'icon', CarbonIcons.restart),
+    );
+  });
+
+  testWidgets('with no session the pane says so on the Carbon background', (
+    tester,
+  ) async {
+    await pumpPaneWith(tester, sessions: const [], activeId: null);
+
+    expect(find.text('No active session'), findsOneWidget);
+    expect(find.widgetWithText(CarbonButton, 'New session'), findsOneWidget);
+    _expectCarbonBackdrop(tester, find.text('No active session'));
+    _expectNoAbWidgets(tester);
+  });
+
+  testWidgets('the bootstrap wait is a small Carbon loading on Carbon ground', (
+    tester,
+  ) async {
+    await pumpPaneWith(
+      tester,
+      sessions: const [],
+      activeId: null,
+      readiness: CheckoutReadiness.openingSession,
+      hangSession: true,
+    );
+
+    expect(find.text('opening session'), findsOneWidget);
+    final loading = tester.widget<CarbonLoading>(find.byType(CarbonLoading));
+    expect(loading.size, CarbonLoadingSize.small);
+    _expectCarbonBackdrop(tester, find.text('opening session'));
+    _expectNoAbWidgets(tester);
+  });
+
+  testWidgets('the preparing state and its action bar are Carbon surfaces', (
+    tester,
+  ) async {
+    await pumpPane(tester, _setup(pendingStart: true));
+
+    _expectCarbonBackdrop(tester, find.text('Preparing workspace…'));
+    _expectNoAbWidgets(tester);
+    // Three islands (ledger, empty state, action bar), none of them around a
+    // live terminal.
+    expect(find.byType(AbCarbonScope), findsNWidgets(3));
+  });
+
+  testWidgets('the action bar pairs a secondary Cancel before a primary Start', (
+    tester,
+  ) async {
+    await pumpPane(tester, _setup(pendingStart: true));
+
+    final cancel = tester.widget<CarbonButton>(
+      find.widgetWithText(CarbonButton, 'Cancel setup'),
+    );
+    final start = tester.widget<CarbonButton>(
+      find.widgetWithText(CarbonButton, 'Start agent now'),
+    );
+    expect(cancel.kind, CarbonButtonKind.secondary);
+    expect(start.kind, CarbonButtonKind.primary);
+
+    // Wide enough to sit side by side, in reading order.
+    final c = _rectOf(tester, 'Cancel setup');
+    final st = _rectOf(tester, 'Start agent now');
+    expect(c.right, lessThanOrEqualTo(st.left + 1));
+    expect(c.top, closeTo(st.top, 0.5));
+  });
+
+  testWidgets("a wide action bar keeps its label on the buttons' row", (
+    tester,
+  ) async {
+    await pumpPane(
+      tester,
+      _setup(pendingStart: true),
+      size: const Size(1400, 900),
+    );
+
+    // Every line this bar takes comes out of the terminal above it.
+    final label = tester.getRect(find.text('Waiting for workspace setup'));
+    final st = _rectOf(tester, 'Start agent now');
+    expect(label.center.dy, inInclusiveRange(st.top, st.bottom));
+    expect(label.right, lessThanOrEqualTo(_rectOf(tester, 'Cancel setup').left));
+  });
+
+  testWidgets('the action bar stacks at 320 wide with 2x text, no overflow', (
+    tester,
+  ) async {
+    await pumpPane(
+      tester,
+      _setup(pendingStart: true),
+      size: const Size(320, 900),
+      textScale: 2,
+    );
+
+    expect(tester.takeException(), isNull);
+    final c = _rectOf(tester, 'Cancel setup');
+    final st = _rectOf(tester, 'Start agent now');
+    // Stacked with the primary on top, each spanning the bar.
+    expect(st.bottom, lessThanOrEqualTo(c.top + 1));
+    expect(st.width, closeTo(c.width, 0.5));
+    expect(st.right, lessThanOrEqualTo(320));
+    expect(c.left, greaterThanOrEqualTo(0));
+  });
+
+  testWidgets('a pending release shows busy on its own button only', (
+    tester,
+  ) async {
+    final transport = await pumpPane(tester, _setup(pendingStart: true));
+
+    await tester.tap(find.text('Start agent now'));
+    await tester.pump();
+
+    final start = tester.widget<CarbonButton>(
+      find.widgetWithText(CarbonButton, 'Start agent now'),
+    );
+    final cancel = tester.widget<CarbonButton>(
+      find.widgetWithText(CarbonButton, 'Cancel setup'),
+    );
+    expect(start.busy, isTrue);
+    // Busy is not disabled: a null handler would paint the dimmed state.
+    expect(start.onPressed, isNotNull);
+    expect(cancel.busy, isFalse);
+    // The two verbs are alternatives, so the other one is inert meanwhile.
+    expect(cancel.onPressed, isNull);
+    expect(
+      find.ancestor(
+        of: find.text('Start agent now'),
+        matching: find.byWidgetPredicate((w) => w is Visibility && !w.visible),
+      ),
+      findsNothing,
+    );
+
+    final sent = transport.sent.firstWhere((m) => m['type'] == 'session:setup');
+    transport.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': true,
+      'session': _entry(_setup(pendingStart: false)).toJson(),
+    });
+    await tester.pump();
   });
 
   // The gate is the ONLY thing this branch keys on. A session stopped for any
@@ -319,6 +562,9 @@ void main() {
 
       expect(find.text("couldn't reach the agent"), findsOneWidget);
       expect(find.text('Retry'), findsOneWidget);
+      _expectCarbonBackdrop(tester, find.text("couldn't reach the agent"));
+      _expectNoAbWidgets(tester);
+      expect(find.byType(CarbonStatusIcon), findsOneWidget);
 
       final terminalService = session.servicesForCheckout('main').terminalService;
       // Nothing has subscribed to the real service's own stream (the pane
