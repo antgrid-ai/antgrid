@@ -204,7 +204,8 @@ test("parseVerboseModels reads every model, LF or CRLF", () => {
 });
 
 // OpenCode 2.2.6 `opencode api --standalone <operation>` output: the request's
-// location, then `data`. Field sets as 2.2.6 prints them; the content is invented.
+// location, then `data`; `debug agents --standalone` prints the agent records as a
+// bare array. Field sets as 2.2.6-2.3.0 print them; the content is invented.
 const LOCATION = { directory: join("scratch", "naming") };
 
 function v2Model(providerID: string, id: string, family?: string, extra: Record<string, unknown> = {}) {
@@ -229,7 +230,10 @@ function v2Probe(opts: {
 }): NamingModelProbe & { runs: string[][] } {
   const runs: string[][] = [];
   const answers: Record<string, unknown> = {
-    "agent.list": { location: LOCATION, data: opts.agents ?? V2_AGENTS },
+    // 2.2.7 and 2.3.0 answer a one-shot `api --standalone agent.list` before the
+    // agent registry has loaded: an empty list, never the title agent.
+    "agent.list": { location: LOCATION, data: [] },
+    "debug agents": opts.agents ?? V2_AGENTS,
     "model.default": opts.defaultModel && { location: LOCATION, data: opts.defaultModel },
     "model.list": { location: LOCATION, data: opts.models ?? [] },
   };
@@ -237,9 +241,10 @@ function v2Probe(opts: {
     runs,
     async run(args) {
       runs.push(args);
-      if (args[0] !== "api" || args[1] !== "--standalone") return undefined;
-      const answer = answers[args[2]!];
-      return args[2] === opts.fail || answer === undefined ? undefined : JSON.stringify(answer, null, 2);
+      const key = args[0] === "api" && args[1] === "--standalone" && args.length === 3 ? args[2]!
+        : args.join(" ") === "debug agents --standalone" ? "debug agents" : undefined;
+      const answer = key && answers[key];
+      return key === opts.fail || answer === undefined ? undefined : JSON.stringify(answer, null, 2);
     },
     async readText() { return undefined; },
   };
@@ -309,7 +314,7 @@ describe("resolveOpencodeNamingModel (OpenCode 2)", () => {
     expect(await resolveOpencodeNamingModel(v2Probe({
       agents: V2_AGENTS.filter((agent) => agent.id !== "title"), defaultModel: SMOKE[0], models: SMOKE,
     }))).toBeUndefined();
-    for (const fail of ["agent.list", "model.default", "model.list"]) {
+    for (const fail of ["debug agents", "model.default", "model.list"]) {
       expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: SMOKE[0], models: SMOKE, fail }))).toBeUndefined();
     }
   });

@@ -3,6 +3,10 @@ import { OpencodeStartupError, startOpencodeServer, type OpencodeServerOptions }
 import type { OpencodeClientLike, OpencodePromptOpts } from "./chat-backend";
 import { normalizeMessage, OpencodeV2Events } from "./v2-events";
 
+// A location's registries load well under a second after it boots; this waits up to three.
+const REGISTRY_POLLS = 30;
+const REGISTRY_POLL_MS = 100;
+
 export interface SpawnedOpencode {
   client: OpencodeClientLike;
 }
@@ -41,6 +45,21 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
     const model: ModelRef = { ...current, ...(selection.variant ? { variant: selection.variant } : {}) };
     await client.session.switchModel({ sessionID, model }, request);
   };
+  // A location loads its agent and command registries after it boots, and the
+  // list routes answer before that with nothing (agents from 2.2.7, commands
+  // since 2.0). OpenCode always has built-in agents, so the first non-empty
+  // agent list is the sign both have loaded. Bounded: a slow load still leaves
+  // the session usable, only without those pickers.
+  let registries: Promise<void> | undefined;
+  const registriesLoaded = () => registries ??= (async () => {
+    for (let attempt = 0; attempt < REGISTRY_POLLS; attempt++) {
+      if ((await client.agent.list({ location }, request)).data.length) return;
+      await Bun.sleep(REGISTRY_POLL_MS);
+    }
+  })().catch((error) => {
+    registries = undefined;
+    throw error;
+  });
 
   const like: OpencodeClientLike = {
     createSession: async ({ title, parentID }) => {
@@ -69,8 +88,15 @@ export function connectOpencode(server: Awaited<ReturnType<typeof startOpencodeS
       await select(sessionID, selection);
       await client.session.prompt({ sessionID, text }, request);
     },
-    listCommands: async () => (await client.command.list({ location }, request)).data,
-    listAgents: async () => (await client.agent.list({ location }, request)).data.map((agent) => ({ ...agent, name: agent.id })),
+    listCommands: async () => {
+      // An agent route that fails must not take the command list down with it.
+      await registriesLoaded().catch(() => {});
+      return (await client.command.list({ location }, request)).data;
+    },
+    listAgents: async () => {
+      await registriesLoaded();
+      return (await client.agent.list({ location }, request)).data.map((agent) => ({ ...agent, name: agent.id }));
+    },
     listProviders: async () => {
       const [providers, models] = await Promise.all([
         client.provider.list({ location }, request), client.model.list({ location }, request),
