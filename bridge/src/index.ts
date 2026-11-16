@@ -11,6 +11,7 @@ import { HostServer } from "./host-server";
 import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog, watchOwnerStdin } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
+import { sweepLeakedPtyLibs } from "./pty-native-lib";
 import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
 
 // Component-tagged child for this module's own lifecycle logs.
@@ -152,6 +153,12 @@ program
     ) {
       log.debug("crash reporting enabled");
     }
+
+    // Only the host sweeps: it starts once per app launch, where a hook or MCP
+    // launch sits on an agent's critical path.
+    void sweepLeakedPtyLibs().then((removed) => {
+      if (removed > 0) log.info({ removed }, "removed leaked pty libraries from temp");
+    });
 
     const host = new HostServer({
       desktopOwned: payload.ownerPid !== undefined,
