@@ -1,6 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { readdir, stat, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { resolveAbDir } from "./antgrid-dir";
 import { atomicWriteFile } from "./discovery";
@@ -16,10 +14,6 @@ import { atomicWriteFile } from "./discovery";
 type BunPty = typeof import("bun-pty");
 
 const PTY_LIB_ENV = "BUN_PTY_LIB";
-// Bun's extraction name; the size match in the sweep keeps it to our library.
-const LEAKED_NAME = /^\.[0-9a-f]{16}-[0-9a-f]+\.(dll|so|dylib)$/i;
-// Clear of a copy another launch has extracted but not yet loaded.
-const SWEEP_MIN_AGE_MS = 10 * 60_000;
 
 const compiled = process.env.ANTGRID_BRIDGE_COMPILED === "1";
 
@@ -80,47 +74,4 @@ function holdsBytes(path: string, bytes: Buffer): boolean {
   } catch {
     return false;
   }
-}
-
-function sizeOf(path: string): number | null {
-  try {
-    return statSync(path).size;
-  } catch {
-    return null;
-  }
-}
-
-function compiledPtyLibSize(): number | null {
-  if (!compiled) return null;
-  try {
-    return sizeOf(embeddedPtyLibPath());
-  } catch {
-    return null;
-  }
-}
-
-/** Removes the copies Bun extracted before the library was cached, which stay
- *  in temp forever. Bun never reuses an extracted name, so an unlocked one is
- *  garbage; a copy still held by a running process fails to unlink on Windows
- *  and is skipped. Returns how many were removed. */
-export async function sweepLeakedPtyLibs(
-  dir = tmpdir(),
-  size: number | null = compiledPtyLibSize(),
-): Promise<number> {
-  if (size === null) return 0;
-  const cutoff = Date.now() - SWEEP_MIN_AGE_MS;
-  let removed = 0;
-  for (const name of await readdir(dir).catch(() => [] as string[])) {
-    if (!LEAKED_NAME.test(name)) continue;
-    const path = join(dir, name);
-    try {
-      const st = await stat(path);
-      if (!st.isFile() || st.size !== size || st.mtimeMs > cutoff) continue;
-      await unlink(path);
-      removed++;
-    } catch {
-      // Locked by a live process, or gone already.
-    }
-  }
-  return removed;
 }
