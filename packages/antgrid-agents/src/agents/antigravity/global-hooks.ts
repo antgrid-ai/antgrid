@@ -15,9 +15,10 @@ export interface AntigravityCommandHook {
 export const ANTIGRAVITY_HOOK_GROUP = "antgrid-session-title";
 
 /**
- * agy's hook runner splits its command string on whitespace with NO quote
- * handling (a quoted path reaches `node` with the literal quotes attached — see
- * antigravityHookCommand), so a script path containing a space is unusable. On
+ * agy's hook runner (before 1.5.8 on Windows; see antigravityHookCommand)
+ * splits its command string on whitespace with NO quote handling (a quoted
+ * path reaches `node` with the literal quotes attached), so a script path
+ * containing a space is unusable. On
  * Windows a packaged bridge can live under a profile path that has one
  * (`C:\Users\John Doe\...`). Fold the path to its 8.3 short form, which never
  * contains a space, so the unquoted command survives. Best-effort and never
@@ -51,8 +52,10 @@ export function antigravityScriptPath(directory: string): string {
  * quoted: confirmed live that agy's command parser does naive whitespace
  * splitting, not shell-style parsing — a quoted path arrives at `node` with
  * the literal `"` characters still attached (`Cannot find module 'C:\...\"C:\
- * ...post-title.js"'`), breaking module resolution entirely. Quoting can't be
- * the fix, so a spaced path is instead neutralized upstream — antigravityScriptPath
+ * ...post-title.js"'`), breaking module resolution entirely. agy 1.5.8+ on
+ * Windows hands the string to cmd.exe as written, where a quoted path works,
+ * but older installs still split it, so the one command that runs on both is
+ * unquoted; a spaced path is instead neutralized upstream — antigravityScriptPath
  * folds it to a space-free 8.3 short path on Windows (see spaceSafePath).
  */
 export function antigravityHookCommand(scriptPath: string, event: "PreInvocation" | "Stop"): string {
