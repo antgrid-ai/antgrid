@@ -33,6 +33,13 @@ void main() {
     expect(await detect(), 'UTC');
   });
 
+  test('a legacy link name is detected as reported, not dropped', () async {
+    // Windows reports India as Asia/Calcutta; a null here downgraded the
+    // editor's "your time" caption to "machine time".
+    messenger.setMockMethodCallHandler(channel, (_) async => 'Asia/Calcutta');
+    expect(await detect(), 'Asia/Calcutta');
+  });
+
   test('unknown native zones remain distinct from local UTC', () async {
     messenger.setMockMethodCallHandler(channel, (_) async => 'Etc/Unknown');
     expect(await detect(), isNull);

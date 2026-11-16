@@ -13,7 +13,7 @@ class PreviewEmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return const CarbonEmptyState(
       icon: CarbonIcons.applicationWeb,
-      heading: 'Open a Preview',
+      heading: 'Open a preview',
       body: 'Enter a dev server port above\nto preview it here',
     );
   }

@@ -232,8 +232,10 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
             padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing05),
             child: _toolbar(t, all),
           ),
+        // The screen shows its own empty state when nothing is filtered, so
+        // an empty list here is one schedule's.
         if (all.isEmpty)
-          _note(t, schedulerNoRunsHint, CarbonSpacing.spacing07)
+          _note(t, schedulerNoRunsForSchedule, CarbonSpacing.spacing07)
         else if (shown.isEmpty)
           _note(t, 'No runs match this filter', CarbonSpacing.spacing05)
         else
@@ -448,6 +450,36 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     );
   }
 
+  /// The phone card's actions. A ghost button's label sits a button's padding
+  /// in from its edge, out of line with the card's other lines, so the
+  /// everyday Open session is a link flush with them. Needs input keeps the
+  /// primary button: it is the one state a person must act on.
+  Widget _tileActions(ScheduleRun r) {
+    if (r.sessionId == null || r.status == 'needs-input') return _actions(r);
+    return Wrap(
+      spacing: CarbonSpacing.spacing05,
+      runSpacing: CarbonSpacing.spacing03,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        CarbonLink(
+          key: ValueKey('scheduler-run-open-${r.id}'),
+          label: 'Open session',
+          icon: const CarbonIcon(CarbonIcons.launch),
+          semanticLabel: 'Open session for ${_name(r)}',
+          onPressed: widget.enabled ? () => widget.onOpenSession(r) : null,
+        ),
+        if (r.active)
+          _action(
+            r,
+            key: ValueKey('scheduler-run-stop-${r.id}'),
+            label: 'Stop',
+            onTap: widget.onStop,
+            kind: CarbonButtonKind.dangerGhost,
+          ),
+      ],
+    );
+  }
+
   Widget _detailsToggle(ScheduleRun r) {
     final open = _expanded.contains(r.id);
     return CarbonButton(
@@ -501,6 +533,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
         ? schedulerActiveRunLine(r, widget.now)
         : schedulerRunStatusWord(r.status, trigger: r.trigger);
     final trigger = _trigger(r);
+    final took = !r.active && _elapsed(r) != null ? _duration(r) : null;
     return DecoratedBox(
       key: ValueKey('scheduler-run-${r.id}'),
       decoration: BoxDecoration(
@@ -539,28 +572,30 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
               ],
             ),
             _title(t, r),
-            // Wraps: neither text can shrink, and at large text on a narrow
-            // phone the pair is wider than the row.
-            Wrap(
-              spacing: CarbonSpacing.spacing03,
-              children: [
-                if (trigger.isNotEmpty)
-                  Text(
-                    trigger,
-                    style: t.typography.helper.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
-                if (!r.active && _elapsed(r) != null)
-                  Text(
-                    _duration(r),
-                    style: t.typography.code.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
-              ],
-            ),
-            if (hasActions) _actions(r),
+            if (trigger.isNotEmpty || took != null)
+              // "took" because a bare "Scheduled 1m 28s" reads as a countdown.
+              // The duration stays mono but at the line's size, so the pair
+              // reads as one sentence.
+              Text.rich(
+                TextSpan(
+                  children: [
+                    if (trigger.isNotEmpty) TextSpan(text: trigger),
+                    if (took != null) ...[
+                      TextSpan(text: trigger.isEmpty ? 'Took ' : ' · took '),
+                      TextSpan(
+                        text: took,
+                        style: t.typography.code.copyWith(
+                          fontSize: t.typography.helper.fontSize,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                style: t.typography.helper.copyWith(
+                  color: t.colors.textSecondary,
+                ),
+              ),
+            if (hasActions) _tileActions(r),
             if (_isCatchUp(r)) _detailsToggle(r),
             if (_isCatchUp(r) && open) _details(t, r),
           ],

@@ -59,6 +59,62 @@ List<_ChangeRow> _flattenChanges(
   ];
 }
 
+/// [path]'s file name and the folder holding it, null at the root. Empty
+/// segments are dropped, as [_flattenChanges] drops them.
+({String name, String? folder}) gitPathParts(String path) {
+  final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+  if (segments.isEmpty) return (name: path, folder: null);
+  return (
+    name: segments.last,
+    folder: segments.length == 1
+        ? null
+        : segments.sublist(0, segments.length - 1).join('/'),
+  );
+}
+
+/// A changed path as one line, name first and its folder dimmed after it, so
+/// a path too long for the row ellipsizes the folder and never the file name.
+class GitPathTitle extends StatelessWidget {
+  const GitPathTitle({
+    super.key,
+    required this.name,
+    required this.folder,
+    this.deleted = false,
+  });
+
+  final String name;
+  final String? folder;
+
+  /// Strikes the name through, as a deleted file reads in the Changes list.
+  final bool deleted;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final type = theme.typography;
+    final folder = this.folder;
+    return Text.rich(
+      TextSpan(
+        text: name,
+        style: type.code.copyWith(
+          color: colors.textPrimary,
+          decoration: deleted ? TextDecoration.lineThrough : null,
+        ),
+        children: [
+          if (folder != null)
+            TextSpan(
+              text: '  $folder',
+              style: type.code.copyWith(color: colors.textSecondary),
+            ),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
 /// Closes whichever row's swipe tray is open. The panel calls this when the
 /// list scrolls: the row a tray belongs to slides away under the finger
 /// otherwise.
@@ -339,24 +395,10 @@ class _GitChangeRow extends StatelessWidget {
 
     final entry = entries.isEmpty ? null : entries.first;
     final status = entry?.status ?? '';
-    final nameStyle = type.code.copyWith(
-      color: colors.textPrimary,
-      decoration: status == 'D' ? TextDecoration.lineThrough : null,
-    );
-    final title = Text.rich(
-      TextSpan(
-        text: name,
-        style: nameStyle,
-        children: [
-          if (folder != null)
-            TextSpan(
-              text: '  $folder',
-              style: type.code.copyWith(color: colors.textSecondary),
-            ),
-        ],
-      ),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
+    final title = GitPathTitle(
+      name: name,
+      folder: folder,
+      deleted: status == 'D',
     );
     // Touch has no hover, and its long-press already opens the menu.
     final content = touch ? title : CarbonTooltip(message: path, child: title);
@@ -371,25 +413,25 @@ class _GitChangeRow extends StatelessWidget {
             if (onResolvePath != null)
               GitIconAction(
                 icon: CarbonIcons.checkmark,
-                label: 'Mark Resolved',
+                label: 'Mark resolved',
                 onPressed: onResolvePath,
               ),
             if (onStagePath != null)
               GitIconAction(
                 icon: CarbonIcons.add,
-                label: 'Stage Changes',
+                label: 'Stage changes',
                 onPressed: onStagePath,
               ),
             if (onUnstagePath != null)
               GitIconAction(
                 icon: CarbonIcons.subtract,
-                label: 'Unstage Changes',
+                label: 'Unstage changes',
                 onPressed: onUnstagePath,
               ),
             if (onDiscardPath != null)
               GitIconAction(
                 icon: CarbonIcons.undo,
-                label: 'Discard Changes',
+                label: 'Discard changes',
                 onPressed: onDiscardPath,
               ),
           ];
@@ -461,25 +503,25 @@ class _GitChangeRow extends StatelessWidget {
       entries: [
         if (onResolvePath != null)
           CarbonMenuItem(
-            label: 'Mark Resolved',
+            label: 'Mark resolved',
             icon: const CarbonIcon(CarbonIcons.checkmark),
             onPressed: onResolvePath,
           ),
         if (onStagePath != null)
           CarbonMenuItem(
-            label: 'Stage Changes',
+            label: 'Stage changes',
             icon: const CarbonIcon(CarbonIcons.add),
             onPressed: onStagePath,
           ),
         if (onUnstagePath != null)
           CarbonMenuItem(
-            label: 'Unstage Changes',
+            label: 'Unstage changes',
             icon: const CarbonIcon(CarbonIcons.subtract),
             onPressed: onUnstagePath,
           ),
         if (onDiscardPath != null)
           CarbonMenuItem(
-            label: 'Discard Changes',
+            label: 'Discard changes',
             icon: const CarbonIcon(CarbonIcons.undo),
             kind: CarbonMenuItemKind.danger,
             onPressed: onDiscardPath,

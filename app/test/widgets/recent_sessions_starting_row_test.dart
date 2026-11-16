@@ -95,13 +95,13 @@ void main() {
       expect(abWidgetsInScope(tester), isEmpty);
       expect(find.text('Fix the parser'), findsOneWidget);
       expect(find.text('mac-studio · antgrid'), findsOneWidget);
-      expect(_phaseText(tester), 'Waking mac-studio...');
+      expect(_phaseText(tester), 'Waking mac-studio…');
 
       container
           .read(newSessionStartProgressProvider.notifier)
           .advance(NewSessionStartPhase.preparing);
       await tester.pump();
-      expect(_phaseText(tester), 'Preparing workspace...');
+      expect(_phaseText(tester), 'Preparing workspace…');
 
       container.read(newSessionStartProgressProvider.notifier).end();
       await tester.pump();
@@ -118,7 +118,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('antgrid'), findsOneWidget);
-    expect(_phaseText(tester), 'Opening antgrid...');
+    expect(_phaseText(tester), 'Opening antgrid…');
   });
 
   testWidgets('is not tappable', (tester) async {
@@ -175,7 +175,7 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(startingSessionRowKey), findsOneWidget);
-    expect(_phaseText(tester), 'Creating session...');
+    expect(_phaseText(tester), 'Creating session…');
     expect(find.textContaining('No recent sessions'), findsOneWidget);
 
     debugDefaultTargetPlatformOverride = null;

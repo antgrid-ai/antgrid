@@ -1123,8 +1123,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditor> {
         ref.watch(schedulerMachinesProvider)[widget.machineId] ??
         'this machine';
     final labels = ref.watch(agentLabelsProvider);
-    final localZone =
-        localTimezone.value ?? widget.snapshot.capabilities.timezone;
+    final localZone = schedulerShownZone(
+      localTimezone.value ?? widget.snapshot.capabilities.timezone,
+    );
     final agents = widget.snapshot.capabilities.agents;
     final modes =
         agents.where((a) => a.agentId == _agent).firstOrNull?.modes ??

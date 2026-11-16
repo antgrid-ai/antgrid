@@ -7,6 +7,7 @@ import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_toast.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
+import '../providers/auth.dart';
 import '../providers/remote_access.dart';
 import 'remote_access_panel.dart';
 
@@ -42,9 +43,16 @@ class RemoteAccessControl extends ConsumerWidget {
 
     final async = ref.watch(remoteAccessPolicyProvider);
     final policy = async.value;
-    final enabled = policy?.enabled == true;
+    // Admission is account trust, so with no account there is no other device
+    // the switch could let in: "on" would claim a reach the machine does not
+    // have. Only a definite sign-out counts — an unconfirmed session (cold
+    // start, offline) keeps reporting the switch.
+    final signedOut = ref.watch(signedInProvider) == false;
+    final enabled = !signedOut && policy?.enabled == true;
 
-    final tooltip = policy == null
+    final tooltip = signedOut
+        ? 'Sign in to reach this machine from your other devices'
+        : policy == null
         ? 'Remote access — checking this machine…'
         : enabled
         ? 'Any device signed in to your account can drive this machine'
@@ -61,7 +69,9 @@ class RemoteAccessControl extends ConsumerWidget {
           // gone the user has no affordance and no retry surface on a
           // persistent host error, and a chip that looks decided while knowing
           // nothing is worse than one that admits it doesn't know yet.
-          label: policy == null
+          label: signedOut
+              ? 'Remote: sign in'
+              : policy == null
               ? 'Remote'
               : enabled
               ? 'Remote on'

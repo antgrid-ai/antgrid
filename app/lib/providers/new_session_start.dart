@@ -349,26 +349,26 @@ final newSessionStartInFlightProvider = Provider<bool>(
 /// The one place New Session phase copy lives — chrome prose, so sans at every
 /// call site.
 String phaseLabel(NewSessionStartProgress p) {
-  if (p.cancelRequested) return 'Cancelling...';
+  if (p.cancelRequested) return 'Cancelling…';
   switch (p.phase) {
     case NewSessionStartPhase.switchingBranch:
       final branch = p.branch;
-      return branch == null ? 'Switching branch...' : 'Switching to $branch...';
+      return branch == null ? 'Switching branch…' : 'Switching to $branch…';
     case NewSessionStartPhase.activating:
       // A local target has no machine to wake; the work is the same, the story
       // isn't.
       return p.deviceName.isEmpty
-          ? 'Opening ${p.targetName}...'
-          : 'Waking ${p.deviceName}...';
+          ? 'Opening ${p.targetName}…'
+          : 'Waking ${p.deviceName}…';
     case NewSessionStartPhase.connecting:
-      return 'Starting project...';
+      return 'Starting project…';
     case NewSessionStartPhase.preparing:
-      return 'Preparing workspace...';
+      return 'Preparing workspace…';
     case NewSessionStartPhase.creating:
-      return 'Creating session...';
+      return 'Creating session…';
     case NewSessionStartPhase.launching:
       return p.agentLabel.isEmpty
-          ? 'Launching agent...'
-          : 'Launching ${p.agentLabel}...';
+          ? 'Launching agent…'
+          : 'Launching ${p.agentLabel}…';
   }
 }

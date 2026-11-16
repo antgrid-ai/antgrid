@@ -15,7 +15,11 @@ import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
-  Future<void> pumpFooter(WidgetTester tester, {bool signedIn = false}) async {
+  Future<void> pumpFooter(
+    WidgetTester tester, {
+    bool signedIn = false,
+    double? width,
+  }) async {
     useInMemoryPrefs();
     await tester.pumpWidget(
       ProviderScope(
@@ -32,12 +36,12 @@ void main() {
           subscriptionProvider.overrideWith((_) async => null),
           pricingCatalogProvider.overrideWith((_) async => null),
         ],
-        child: const MaterialApp(
+        child: MaterialApp(
           home: Scaffold(
             body: AbCarbonScope(
               child: Align(
                 alignment: Alignment.bottomCenter,
-                child: AccountFooter(),
+                child: SizedBox(width: width, child: const AccountFooter()),
               ),
             ),
           ),
@@ -82,6 +86,28 @@ void main() {
     expect(find.byType(CarbonMenu), findsOneWidget);
     expect(find.text('Pro'), findsOneWidget);
     expect(find.text('dev@example.com'), findsOneWidget);
+  });
+
+  testWidgets('signed out, the row names the state and Sign in appears once', (
+    tester,
+  ) async {
+    await pumpFooter(tester);
+    expect(find.text('Not signed in'), findsOneWidget);
+    expect(find.text('Sign in'), findsOneWidget);
+  });
+
+  testWidgets('the menu spans the row it opens from', (tester) async {
+    await pumpFooter(tester, width: 288);
+    final panel = find.ancestor(
+      of: find.text('App settings…'),
+      matching: find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_MenuPanel',
+      ),
+    );
+    final row = tester.getRect(find.byType(AccountFooter));
+    final menu = tester.getRect(panel.first);
+    expect(menu.left, row.left);
+    expect(menu.right, row.right);
   });
 
   testWidgets('account footer menu omits Mobile devices on desktop', (

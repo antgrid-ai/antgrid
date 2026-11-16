@@ -214,6 +214,29 @@ void main() {
     });
   });
 
+  // iOS has no system Back, and the swipe is invisible — the bottom bar's agent
+  // item is the one on-screen way back to the conversation.
+  testWidgets('the bottom bar agent item returns to the conversation', (
+    tester,
+  ) async {
+    await onAndroid(() async {
+      final c = await pumpMobile(tester);
+
+      await swipeLeft(tester);
+      expect(c.read(agentSurfaceVisibleProvider), isFalse);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(MobileBottomNav),
+          matching: find.text('Agent'),
+        ),
+      );
+      await settleShell(tester);
+      expect(c.read(agentSurfaceVisibleProvider), isTrue);
+      expect(c.read(visibleWorkspaceViewProvider), isNull);
+    });
+  });
+
   // MobileBottomNav used to carry its own leading hamburger into the drawer,
   // redundant with the agent header's one page over — removed entirely
   // (no `onOpenDrawer` parameter left to wire back up). Pinned so a future

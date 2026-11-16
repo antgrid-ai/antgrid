@@ -195,12 +195,12 @@ void main() {
     tester,
   ) async {
     await pump(tester, sync: syncState(hasUpstream: false));
-    expect(find.text('Publish Branch'), findsOneWidget);
+    expect(find.text('Publish branch'), findsOneWidget);
     // Push and Pull measure against an upstream that does not exist.
     expect(tip('Push'), findsNothing);
     expect(tip('Pull'), findsNothing);
 
-    await tester.tap(find.text('Publish Branch'));
+    await tester.tap(find.text('Publish branch'));
     await tester.pump();
     expect(sentOfType('git:sync')?['op'], 'push');
     await finishSync(tester);

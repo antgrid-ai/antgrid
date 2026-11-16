@@ -97,6 +97,53 @@ void main() {
     handle.dispose();
   });
 
+  // The workspace page had no visible way back to the conversation — only a
+  // swipe and Android's system Back, which iOS does not have.
+  testWidgets('leads with an agent item that returns to the conversation', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    var agentTaps = 0;
+    final selected = <WorkspaceView>[];
+    await _pump(
+      tester,
+      MobileBottomNav(
+        selected: WorkspaceView.terminals,
+        onSelected: selected.add,
+        onAgent: () => agentTaps++,
+      ),
+    );
+
+    expect(
+      tester.getTopLeft(find.text('Agent')).dx,
+      lessThan(tester.getTopLeft(find.text(WorkspaceView.values.first.label)).dx),
+    );
+    // An action, not a tab: no selected state to announce as "not selected".
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Back to agent')),
+      matchesSemantics(
+        label: 'Back to agent',
+        isButton: true,
+        hasTapAction: true,
+      ),
+    );
+
+    await tester.tap(find.text('Agent'));
+    expect(agentTaps, 1);
+    expect(selected, isEmpty);
+    handle.dispose();
+  });
+
+  testWidgets('no agent item without a way back to wire it to', (
+    tester,
+  ) async {
+    await _pump(
+      tester,
+      MobileBottomNav(selected: WorkspaceView.terminals, onSelected: (_) {}),
+    );
+    expect(find.text('Agent'), findsNothing);
+  });
+
   // The count is drawn as a bare number floating over the glyph — read on its
   // own it is a stray digit, not this tab's backlog.
   testWidgets('a badge is folded into the tab it belongs to', (tester) async {

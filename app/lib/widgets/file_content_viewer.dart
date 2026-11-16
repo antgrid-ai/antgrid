@@ -622,7 +622,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
           child: CarbonSearch(
             controller: fc.findInputController,
             focusNode: _searchFocusNode,
-            placeholder: 'Find...',
+            placeholder: 'Find…',
             semanticLabel: 'Find in file',
             // No onChanged needed — CodeFindController already listens
             // to its own findInputController and triggers search internally.

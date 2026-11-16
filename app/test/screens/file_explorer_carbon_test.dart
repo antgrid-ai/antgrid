@@ -1,4 +1,5 @@
 import 'package:antgrid/models/file_tree_models.dart';
+import 'package:antgrid/models/search_models.dart';
 import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -45,6 +46,7 @@ Future<Widget> _host(
   double width = 900,
   Brightness brightness = Brightness.light,
   FakeAgentTransport? transport,
+  SearchState? searchState,
 }) async {
   useInMemoryPrefs();
   transport ??= FakeAgentTransport();
@@ -77,6 +79,8 @@ Future<Widget> _host(
         },
       ),
       fileServiceProvider.overrideWithValue(session.fileService),
+      if (searchState != null)
+        searchStateProvider.overrideWith((ref) => Stream.value(searchState)),
     ],
     child: MaterialApp(
       themeMode: brightness == Brightness.dark
@@ -189,7 +193,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
     await tester.pump();
 
-    expect(_button('Case Sensitive'), findsOneWidget);
+    expect(_button('Case sensitive'), findsOneWidget);
     expect(abWidgetsInScope(tester), isEmpty);
   });
 
@@ -211,4 +215,30 @@ void main() {
     expect(find.text('Copy path'), findsOneWidget);
     expect(abWidgetsInScope(tester), isEmpty);
   });
+
+  for (final (matches, files, label) in [
+    (1, 1, '1 match in 1 file'),
+    (3, 1, '3 matches in 1 file'),
+    (5, 2, '5 matches in 2 files'),
+  ]) {
+    testWidgets('the content-search count reads "$label"', (tester) async {
+      await tester.pumpWidget(
+        await _host(
+          const AsyncData(FileTreeState(root: _tree)),
+          searchState: SearchState(
+            query: 'needle',
+            totalMatches: matches,
+            totalFiles: files,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(_button('Search in files'));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+
+      expect(find.text(label), findsOneWidget);
+    });
+  }
 }

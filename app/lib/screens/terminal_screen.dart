@@ -144,7 +144,7 @@ class TerminalScreen extends ConsumerWidget {
           ),
         );
       }
-      return const _PaneWait(message: 'waiting for agent...');
+      return const _PaneWait(message: 'Waiting for agent…');
     }
 
     return ClipRect(
@@ -206,7 +206,7 @@ String _bootstrapWaitMessage(CheckoutReadiness readiness) =>
       CheckoutReadiness.blocked ||
       CheckoutReadiness.loadingScreen ||
       CheckoutReadiness.stalled ||
-      CheckoutReadiness.ready => 'waiting for agent...',
+      CheckoutReadiness.ready => 'Waiting for agent…',
     };
 
 /// Rendered inside the terminal/chat pane when the focused session is in the

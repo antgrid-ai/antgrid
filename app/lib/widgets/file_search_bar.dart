@@ -53,7 +53,7 @@ class _FileSearchBarState extends State<FileSearchBar> {
   Widget build(BuildContext context) {
     return CarbonSearch(
       controller: _controller,
-      placeholder: 'Filter files...',
+      placeholder: 'Filter files…',
       semanticLabel: 'Filter files',
       size: CarbonFieldSize.small,
       onChanged: _onChanged,

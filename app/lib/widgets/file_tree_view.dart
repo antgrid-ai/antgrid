@@ -254,22 +254,60 @@ class _RowLabel extends StatelessWidget {
           }),
         ),
       ],
-      child: Text(
-        node.name,
-        maxLines: 1,
-        softWrap: false,
-        overflow: TextOverflow.ellipsis,
-        style: theme.typography.code.copyWith(
-          // An ignored row dims, unless it is the open one: selection
-          // outranks the dim.
-          color: node.ignored && !highlighted
-              ? theme.colors.textPlaceholder
-              : inherited.color,
-          fontWeight: inherited.fontWeight,
-        ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final style = inherited.merge(
+            theme.typography.code.copyWith(
+              // An ignored row dims, unless it is the open one: selection
+              // outranks the dim.
+              color: node.ignored && !highlighted
+                  ? theme.colors.textPlaceholder
+                  : inherited.color,
+              fontWeight: inherited.fontWeight,
+            ),
+          );
+          // Deep siblings sharing a prefix (drawable-mdpi, drawable-night…)
+          // ellipsize to identical rows, so a cut name carries its whole
+          // self on hover. Not on touch, where a long press already opens
+          // the copy-path menu.
+          final clipped =
+              !theme.isTouch &&
+              _overflows(context, node.name, style, constraints.maxWidth);
+          return CarbonTooltip(
+            message: node.name,
+            enabled: clipped,
+            // The row is already announced by its name.
+            excludeFromSemantics: true,
+            child: Text(
+              node.name,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: style,
+            ),
+          );
+        },
       ),
     );
   }
+}
+
+bool _overflows(
+  BuildContext context,
+  String text,
+  TextStyle style,
+  double maxWidth,
+) {
+  if (!maxWidth.isFinite) return false;
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: Directionality.maybeOf(context) ?? TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout(maxWidth: maxWidth);
+  final overflows = painter.didExceedMaxLines;
+  painter.dispose();
+  return overflows;
 }
 
 /// One rendered row. A [truncationNotice] row stands in for the entries the

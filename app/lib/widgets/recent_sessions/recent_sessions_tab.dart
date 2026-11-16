@@ -7,14 +7,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../connection/supervisor_state.dart';
 import '../../constants/breakpoints.dart';
 import '../../demo/demo_identity.dart';
+import '../../launcher/host_controller.dart' show HostPhase;
 import '../../models/recent_session_row.dart';
+import '../../providers/control_plane.dart' show hostControllerProvider;
 import '../../providers/demo_mode.dart';
+import '../../providers/host_status.dart' show hostStatusProvider;
 import '../../providers/new_session_picker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
 import '../../util/detached.dart';
+import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart';
 import '../agent_work_status_indicator.dart';
 import '../first_run_checklist.dart';
@@ -136,7 +140,40 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       // fixture session:list lands, and after a mobile background evicts the
       // warm demo), and offering the way in from inside is worse than offering
       // nothing.
-      final offerDemo = !hasTarget && !ref.watch(demoModeProvider);
+      final demo = ref.watch(demoModeProvider);
+      final offerDemo = !hasTarget && !demo;
+      // This computer's sessions reach the list only through its own bridge,
+      // so with that bridge down an empty list says nothing about whether any
+      // exist. Mobile runs no local bridge.
+      final hostPhase = demo || isMobilePlatform
+          ? null
+          : ref.watch(hostStatusProvider).value?.phase;
+      final empty = switch (hostPhase) {
+        HostPhase.starting || HostPhase.restarting => const _RecentsEmptyState(
+          title: 'Loading recent sessions…',
+          subtitle: "Waiting for this computer's bridge to start.",
+        ),
+        HostPhase.failed => _RecentsEmptyState(
+          title: "Couldn't load this computer's sessions",
+          subtitle: 'The local bridge stopped.',
+          actionLabel: 'Restart bridge',
+          onAction: () => detached(
+            'recents',
+            'restart bridge',
+            () => ref.read(hostControllerProvider).retryNow(),
+          ),
+        ),
+        _ => _RecentsEmptyState(
+          title: 'No recent sessions',
+          subtitle: hasTarget
+              ? 'Describe a task below to start your first session.'
+              : 'Pick a project, then describe a task below.',
+          // Nothing picked means every path into a session is still dead -
+          // offer the one that needs no machine at all.
+          actionLabel: offerDemo ? kDemoEntryLabel : null,
+          onAction: offerDemo ? () => enterDemoMode(ref.container) : null,
+        ),
+      };
       // A scrollable empty state so the ancestor RefreshIndicator (in
       // new_session_content.dart) always has a gesture target: the empty
       // state is a bare Center with no Scrollable of its own, so pull-to-refresh
@@ -180,20 +217,7 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
                       child: Center(
                         child: showChecklist
                             ? const MobileFirstRunChecklist()
-                            : _RecentsEmptyState(
-                                title: 'No recent sessions',
-                                subtitle: hasTarget
-                                    ? 'Describe a task below to start your '
-                                          'first session.'
-                                    : 'Pick a project, then describe a task '
-                                          'below.',
-                                // Nothing picked means every path into a
-                                // session is still dead - offer the one that
-                                // needs no machine at all.
-                                onEnterDemo: offerDemo
-                                    ? () => enterDemoMode(ref.container)
-                                    : null,
-                              ),
+                            : empty,
                       ),
                     ),
                   ),
@@ -378,12 +402,14 @@ class _RecentsEmptyState extends StatelessWidget {
   const _RecentsEmptyState({
     required this.title,
     required this.subtitle,
-    this.onEnterDemo,
+    this.actionLabel,
+    this.onAction,
   });
 
   final String title;
   final String subtitle;
-  final VoidCallback? onEnterDemo;
+  final String? actionLabel;
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -413,12 +439,12 @@ class _RecentsEmptyState extends StatelessWidget {
                   color: t.colors.textSecondary,
                 ),
               ),
-              if (onEnterDemo != null) ...[
+              if (actionLabel != null && onAction != null) ...[
                 const SizedBox(height: CarbonSpacing.spacing05),
                 CarbonButton(
-                  label: kDemoEntryLabel,
+                  label: actionLabel!,
                   kind: CarbonButtonKind.tertiary,
-                  onPressed: onEnterDemo,
+                  onPressed: onAction,
                 ),
               ],
             ],

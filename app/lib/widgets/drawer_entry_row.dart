@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
+import '../demo/demo_identity.dart'
+    show isDemoEntryId, kDemoBaseName, kDemoDisplayName;
 import '../design/widgets/ab_toast.dart';
 import '../models/agent_work_status.dart';
 import '../models/drawer_entry.dart';
@@ -55,6 +57,7 @@ import 'drawer/drawer_metrics.dart';
 import 'projects_drawer.dart' show closeDrawerIfOverlay;
 import 'recent_sessions/recent_sessions_summary.dart' show workStatusLabel;
 import 'session_isolation_badge.dart' show sessionIsIsolated;
+import 'yielding_pair.dart';
 
 /// A status dot is 8px on a pointer and 10px on touch, where the whole row
 /// grows to 44.
@@ -434,9 +437,14 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
     final offersNewSession = machineUuid == null;
     final isRemote = entry.kind == EntryKind.remote;
     final configMessage = status.configErrorMessage;
+    // The spoken name keeps the full display name; only the painted one moves
+    // the suffix into a tag, which the + and Memory actions cannot squeeze out.
+    final sample =
+        isDemoEntryId(entry.id) && entry.displayName == kDemoDisplayName;
 
     return _ProjectRow(
-      name: entry.displayName,
+      name: sample ? kDemoBaseName : entry.displayName,
+      nameTag: sample ? const _SampleTag() : null,
       spokenName: _spokenProjectName(
         entry.displayName,
         extras: [
@@ -531,6 +539,7 @@ class _ProjectRow extends StatelessWidget {
     required this.expanded,
     required this.warm,
     required this.onToggle,
+    this.nameTag,
     this.error,
     this.marks = const <Widget>[],
     this.actions = const <Widget>[],
@@ -546,6 +555,10 @@ class _ProjectRow extends StatelessWidget {
   /// The project holds an open session, so its folder is not dimmed.
   final bool warm;
   final VoidCallback onToggle;
+
+  /// Part of what the project is called, set beside the name at its natural
+  /// width so the name ellipsizes before it does.
+  final Widget? nameTag;
 
   /// Shown beside the title rather than in the trailing slot: the trailing
   /// marks are covered by the actions under the pointer, and this one is the
@@ -576,7 +589,25 @@ class _ProjectRow extends StatelessWidget {
       content: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Flexible(child: Text(name)),
+          Flexible(
+            child: nameTag == null
+                ? Text(name)
+                // The tag is the part a phone row lost, so the name gives way
+                // first — but keeps a few characters, so the row still names
+                // its project.
+                : YieldingPair(
+                    leading: Text(name),
+                    trailing: Padding(
+                      padding: const EdgeInsetsDirectional.only(
+                        start: CarbonSpacing.spacing02,
+                      ),
+                      child: ExcludeSemantics(child: nameTag!),
+                    ),
+                    yielding: YieldingSide.leading,
+                    keep: CarbonSpacing.spacing08,
+                    keepFraction: 1 / 2,
+                  ),
+          ),
           if (error != null) ...[
             const SizedBox(width: CarbonSpacing.spacing02),
             error!,
@@ -654,6 +685,19 @@ class _AttentionDot extends StatelessWidget {
       hollowFill: _transparentFill(t),
     );
   }
+}
+
+/// Marks the offline sample project in place of its name's "(sample)" suffix.
+class _SampleTag extends StatelessWidget {
+  const _SampleTag();
+
+  @override
+  Widget build(BuildContext context) => const CarbonTag(
+    key: Key('drawer-sample-tag'),
+    label: 'Sample',
+    size: CarbonTagSize.small,
+    color: CarbonTagColor.outline,
+  );
 }
 
 /// The small tag that says a legacy per-project row lives on another machine.

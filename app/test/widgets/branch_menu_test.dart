@@ -35,7 +35,7 @@ void main() {
 
     await tester.pumpWidget(_wrap(const BranchChip(), container));
     expect(find.byType(BranchChip), findsOneWidget);
-    expect(find.text('Loading branches...'), findsNothing);
+    expect(find.text('Loading branches…'), findsNothing);
   });
 
   testWidgets('BranchChip shows loaded current branch', (tester) async {

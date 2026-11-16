@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:push/push.dart';
 
@@ -11,6 +12,16 @@ import '../project/project_session.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'push_identity.dart';
+
+/// Whether [error] is FCM's token read failing because the build carries no
+/// `google-services.json`. FCM is opt-in per deployment (see
+/// `android/app/build.gradle.kts`), so such a build is expected, not broken;
+/// Firebase answers it by refusing `FirebaseMessaging.getInstance()`, which
+/// `push` surfaces as this exception.
+@visibleForTesting
+bool isFcmUnconfigured(Object error) =>
+    error is PlatformException &&
+    (error.message ?? '').contains('FirebaseApp is not initialized');
 
 class PushMessagingService {
   final PushIdentity _pushIdentity;
@@ -166,6 +177,18 @@ class PushMessagingService {
       // early, so the whole push path goes quiet with nothing to show for it.
       AbLog.warn('PushMessagingService', 'token read timed out after 30s');
       token = null;
+    } on PlatformException catch (e) {
+      if (!isFcmUnconfigured(e)) rethrow;
+      // One line, not the error: its details carry the whole Java stack, and
+      // this is an expected build, not a fault — no token can ever arrive, so
+      // the refresh listener goes too.
+      AbLog.info(
+        'PushMessagingService',
+        'push off: this build has no Firebase config',
+      );
+      _unsubscribeToken?.call();
+      _unsubscribeToken = null;
+      return;
     }
     if (token != null) {
       await setTokenAndRegister(token, sessions(), provider: _provider);

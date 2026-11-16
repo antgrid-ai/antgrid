@@ -101,7 +101,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   Widget _buildContent(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
-      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...'));
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading changes…'));
     }
     final draft = _drafts.putIfAbsent(fileService, TextEditingController.new);
     final panel = _PanelContext(
@@ -138,7 +138,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           panel: panel,
           counts: counts,
           git: git ?? GitPaneState.empty,
-          body: const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...')),
+          body: const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading changes…')),
         ),
         error: (error, _) => _GitPanelScaffold(
           panel: panel,
@@ -176,7 +176,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // SERVICE's lifetime, and the service outlives this panel. Skipping the
     // send because the panel unmounted inside the frame (a view switch, a
     // session switch) spends the claim with nothing sent, and history then
-    // sits on its "loading history..." placeholder forever — that is exactly
+    // sits on its "Loading history…" placeholder forever — that is exactly
     // the state a service which never asked reports, and nothing asks again.
     // `loadHistory` touches no BuildContext; a disposed service drops it.
     WidgetsBinding.instance.addPostFrameCallback(
@@ -346,7 +346,7 @@ class _GitBranchBar extends StatelessWidget {
       // to show — one action, named for what it does, matching VS Code.
       if (sync.canPublish)
         CarbonButton(
-          label: syncBusy ? 'Publishing…' : 'Publish Branch',
+          label: syncBusy ? 'Publishing…' : 'Publish branch',
           kind: CarbonButtonKind.secondary,
           icon: const CarbonIcon(CarbonIcons.upload),
           busy: syncBusy,
@@ -624,14 +624,14 @@ class _StagedGroupHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GitSectionHeader(
-      label: 'Staged Changes',
+      label: 'Staged changes',
       count: '${staged.changedCount}',
       expanded: expanded,
       onToggle: onToggle,
       actions: [
         GitIconAction(
           icon: CarbonIcons.subtract,
-          label: 'Unstage All Changes',
+          label: 'Unstage all changes',
           onPressed: () =>
               fileService.unstageFiles(staged.byPath.keys.toList()),
         ),
@@ -674,7 +674,7 @@ class _UnstagedGroupHeader extends StatelessWidget {
           'Discard the unstaged changes in $count file${count == 1 ? '' : 's'}? '
           'New files are deleted; staged changes are kept. '
           'This cannot be undone.',
-      confirmLabel: 'Discard All',
+      confirmLabel: 'Discard all',
       danger: true,
     );
     if (confirmed) fileService.discard(paths);
@@ -704,7 +704,7 @@ class _UnstagedGroupHeader extends StatelessWidget {
             : 'Stage all changes? ${unresolved.length} of them are still '
                   'unresolved merge conflicts — staging one marks it resolved, '
                   'and git will commit whatever the file holds now.',
-        confirmLabel: 'Stage All',
+        confirmLabel: 'Stage all',
       );
       if (!confirmed) return;
     }
@@ -721,7 +721,7 @@ class _UnstagedGroupHeader extends StatelessWidget {
       actions: [
         GitIconAction(
           icon: CarbonIcons.undo,
-          label: 'Discard All Changes',
+          label: 'Discard all changes',
           onPressed: unstaged.revertablePaths.isEmpty
               ? null
               : () => detached(
@@ -732,7 +732,7 @@ class _UnstagedGroupHeader extends StatelessWidget {
         ),
         GitIconAction(
           icon: CarbonIcons.add,
-          label: 'Stage All Changes',
+          label: 'Stage all changes',
           onPressed: () => detached(
             'GitPanel',
             'stage all confirm',
@@ -744,7 +744,7 @@ class _UnstagedGroupHeader extends StatelessWidget {
   }
 }
 
-/// The History section's header — its fold, and Collapse All for commits
+/// The History section's header — its fold, and Collapse all for commits
 /// expanded in the list. No bulk "expand all": expanding a commit fetches its
 /// file list, so expanding every loaded commit at once would fire one request
 /// per row for a list the user hasn't scrolled to yet.
@@ -762,7 +762,7 @@ class _GitHistorySectionHeader extends StatelessWidget {
   /// Whether the WHOLE section is folded shut — see
   /// [GitPaneState.historyCollapsed]. Distinct from
   /// [GitHistoryState.expandedShas], which folds individual commits within an
-  /// already-visible list — "Collapse All" below acts on that, not on this.
+  /// already-visible list — "Collapse all" below acts on that, not on this.
   final bool collapsed;
 
   /// Null where History already has the whole column to itself (the compact
@@ -780,7 +780,7 @@ class _GitHistorySectionHeader extends StatelessWidget {
         if (!collapsed && history.expandedShas.isNotEmpty)
           GitIconAction(
             icon: CarbonIcons.collapseAll,
-            label: 'Collapse All',
+            label: 'Collapse all',
             onPressed: fileService.collapseAllHistory,
           ),
       ],
@@ -948,8 +948,12 @@ class _GitPanelBody extends ConsumerWidget {
           );
         }
 
-        // Compact: the viewer replaces the column while a diff is open.
+        // Compact: the viewer replaces the column while a diff is open. A
+        // loaded diff's own header carries the path and the way back; the bar
+        // stands in only while there is no header to carry them.
         if (git.diffPath case final diffPath?) {
+          final viewer = _buildDiffViewer(ref, closeAsBack: true);
+          if (viewer != null) return viewer;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1205,7 +1209,7 @@ class _GitPanelBody extends ConsumerWidget {
     );
     final confirmed = await showCarbonConfirm(
       context,
-      title: 'Mark resolved',
+      title: 'Mark as resolved?',
       body: deletionConflict
           ? 'One side of the merge deleted "$path" while the other changed it. '
                 'Marking it resolved keeps exactly what is on disk now — delete '
@@ -1213,7 +1217,7 @@ class _GitPanelBody extends ConsumerWidget {
           : 'Mark "$path" as resolved? Open it first and make sure no conflict '
                 'markers (<<<<<<<) are left — git will commit whatever the file '
                 'holds now.',
-      confirmLabel: 'Mark Resolved',
+      confirmLabel: 'Mark resolved',
     );
     if (confirmed) fileService.stageFiles([path]);
   }
@@ -1276,42 +1280,52 @@ class _GitPanelBody extends ConsumerWidget {
       if (git.diffLoading) {
         return const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
       }
-      if (git.diffContent != null) {
-        // A commit-scoped diff's status letter comes from that commit's own
-        // file list, never `state.gitFileStatuses` — the working tree's
-        // status for the same path (or none at all) describes a different
-        // change.
-        final commitSha = git.diffCommitSha;
-        final gitStatus = commitSha == null
-            ? state.gitFileStatuses[git.diffPath!]
-            : git.history.filesBySha[commitSha]
-                  ?.where((f) => f.path == git.diffPath)
-                  .firstOrNull
-                  ?.status;
-        return DiffViewer(
-          path: git.diffPath!,
-          gitStatus: gitStatus,
-          diff: git.diffContent!,
-          additions: git.diffAdditions ?? 0,
-          deletions: git.diffDeletions ?? 0,
-          // The file opens where files live, and that tab comes forward with
-          // it; the diff stays put for the way back to Git.
-          onViewFile: () {
-            revealWorkspaceView(ref, WorkspaceView.files);
-            fileService.selectFile(git.diffPath!);
-          },
-          onClose: () => fileService.clearDiff(),
-          onSendToAgent: (context, message) => sendCaptureToAgent(
-            context: context,
-            container: ref.container,
-            text: message,
-          ),
-        );
-      }
+      final viewer = _buildDiffViewer(ref);
+      if (viewer != null) return viewer;
       return Center(child: Text('No changes', style: message));
     }
 
     return Center(child: Text('Select a file to view', style: message));
+  }
+
+  /// The open diff, or null while there is none loaded to show.
+  Widget? _buildDiffViewer(WidgetRef ref, {bool closeAsBack = false}) {
+    final git = state.git;
+    final diffPath = git.diffPath;
+    final diffContent = git.diffContent;
+    if (diffPath == null || git.diffLoading || diffContent == null) {
+      return null;
+    }
+    // A commit-scoped diff's status letter comes from that commit's own file
+    // list, never `state.gitFileStatuses` — the working tree's status for the
+    // same path (or none at all) describes a different change.
+    final commitSha = git.diffCommitSha;
+    final gitStatus = commitSha == null
+        ? state.gitFileStatuses[diffPath]
+        : git.history.filesBySha[commitSha]
+              ?.where((f) => f.path == diffPath)
+              .firstOrNull
+              ?.status;
+    return DiffViewer(
+      path: diffPath,
+      gitStatus: gitStatus,
+      diff: diffContent,
+      additions: git.diffAdditions ?? 0,
+      deletions: git.diffDeletions ?? 0,
+      // The file opens where files live, and that tab comes forward with it;
+      // the diff stays put for the way back to Git.
+      onViewFile: () {
+        revealWorkspaceView(ref, WorkspaceView.files);
+        fileService.selectFile(diffPath);
+      },
+      onClose: () => fileService.clearDiff(),
+      closeAsBack: closeAsBack,
+      onSendToAgent: (context, message) => sendCaptureToAgent(
+        context: context,
+        container: ref.container,
+        text: message,
+      ),
+    );
   }
 }
 
@@ -1443,7 +1457,7 @@ class _HistoryListState extends State<_HistoryList> {
   Widget build(BuildContext context) {
     final history = widget.git.history;
     if (history.initialLoad && history.commits.isEmpty) {
-      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading history...'));
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading history…'));
     }
     if (history.error != null && history.commits.isEmpty) {
       return CarbonEmptyState(
@@ -1781,11 +1795,13 @@ class _CommitFileRow extends StatelessWidget {
     final colors = theme.colors;
     final type = theme.typography;
     final oldPath = file.oldPath;
-    final path = Text(
-      file.path,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: type.code.copyWith(color: colors.textPrimary),
+    final (:name, :folder) = gitPathParts(file.path);
+    // Name first, as the Changes list shows it: deep paths share their
+    // leading folders, so cutting the end hid the one part that differs.
+    final path = GitPathTitle(
+      name: name,
+      folder: folder,
+      deleted: file.status == 'D',
     );
     return Padding(
       // Indented under the commit's own chevron so the file list reads as

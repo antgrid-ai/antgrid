@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/analytics/crash_reporting.dart';
 import 'package:antgrid/models/agent_hello.dart';
@@ -19,6 +20,36 @@ const _connected = ProjectStatus(agentHello: AgentHello(version: '0'));
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(useInMemoryPrefs);
+
+  // A build without google-services.json logged the whole Java stack on every
+  // launch; that refusal is an expected build, recognised and logged as one
+  // line, while any other token failure still reaches the caller.
+  group('isFcmUnconfigured', () {
+    test('recognises the refusal of a build with no Firebase config', () {
+      expect(
+        isFcmUnconfigured(
+          PlatformException(
+            code: 'IllegalStateException',
+            message:
+                'java.lang.IllegalStateException: Default FirebaseApp is not '
+                'initialized in this process ai.radhaai.antgrid. Make sure to '
+                'call FirebaseApp.initializeApp(Context) first.',
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('leaves every other token failure alone', () {
+      expect(
+        isFcmUnconfigured(
+          PlatformException(code: 'IllegalStateException', message: 'boom'),
+        ),
+        isFalse,
+      );
+      expect(isFcmUnconfigured(TimeoutException('slow')), isFalse);
+    });
+  });
 
   test(
     'registerToken sends push:register with token+provider+pushPubkey on each session',

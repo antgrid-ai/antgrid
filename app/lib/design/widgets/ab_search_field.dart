@@ -18,7 +18,7 @@ class AbSearchField extends StatefulWidget {
     super.key,
     this.controller,
     this.focusNode,
-    this.hint = 'Search...',
+    this.hint = 'Search…',
     this.prefixIcon = AbIcons.search,
     this.showClearButton = true,
     this.autofocus = false,

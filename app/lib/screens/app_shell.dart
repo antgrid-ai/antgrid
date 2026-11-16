@@ -29,6 +29,7 @@ import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/project_resolve.dart';
 import '../navigation/back_intent.dart';
+import '../navigation/nav_controller.dart';
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../design/widgets/ab_window_controls.dart';
@@ -93,6 +94,11 @@ class _AppShellState extends ConsumerState<AppShell> {
     // Post-frame so the kick's invalidates never run mid-build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _kickEagerDials();
+    });
+    // Post-frame: initState runs inside the tree's build, where Riverpod
+    // refuses a write to state the title bar is watching.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(navControllerProvider.notifier).recordLanding();
     });
     // Cold start: nothing else would notice a device revoked while the app was
     // closed — the session cookie outlives the device row, so the account still

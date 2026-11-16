@@ -3,8 +3,13 @@
 // the feature and these cover it end to end.
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/navigation/nav_controller.dart';
+import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/session_search.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/widgets/session_search_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -165,6 +170,52 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(find.byKey(SessionSearchField.popupKey), findsNothing);
+  });
+
+  // The barrier only catches clicks: a shortcut, deep link or notification
+  // moved the app under the open popup and left it covering the new screen.
+  testWidgets('a navigation that is not a click closes the popup', (
+    tester,
+  ) async {
+    await pump(tester, rows: [_row('Refactor the relay')]);
+    await focusField(tester);
+    expect(find.byKey(SessionSearchField.popupKey), findsOneWidget);
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SessionSearchField)),
+    );
+    container
+        .read(navControllerProvider.notifier)
+        .applyDeepLink(const NavLocation(surface: WorkbenchSurface.scheduler));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(SessionSearchField.popupKey), findsNothing);
+  });
+
+  // The controller filling in a session a project switch resolved later edits
+  // the current entry in place; that is not the user going anywhere.
+  testWidgets('a session filled into the current entry leaves it open', (
+    tester,
+  ) async {
+    await pump(tester, rows: [_row('Refactor the relay')]);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SessionSearchField)),
+    );
+    container
+        .read(navControllerProvider.notifier)
+        .commit(
+          const NavLocation(
+            target: LocalProject('antgrid'),
+            surface: WorkbenchSurface.workspace,
+          ),
+        );
+    await focusField(tester);
+
+    container.read(activeSessionIdProvider.notifier).set('s1');
+    await tester.pumpAndSettle();
+
+    expect(container.read(navControllerProvider).current?.sessionId, 's1');
+    expect(find.byKey(SessionSearchField.popupKey), findsOneWidget);
   });
 
   test('sessionMatchesQuery is a case-insensitive name match', () {

@@ -44,6 +44,7 @@ Widget _host({
   int deletions = 1,
   VoidCallback? onViewFile,
   TextScaler textScaler = TextScaler.noScaling,
+  bool closeAsBack = false,
 }) => MaterialApp(
   home: Scaffold(
     body: Center(
@@ -61,6 +62,7 @@ Widget _host({
               deletions: deletions,
               onViewFile: onViewFile ?? () {},
               onClose: () {},
+              closeAsBack: closeAsBack,
               onSendToAgent: (context, message) async {},
             ),
           ),
@@ -294,17 +296,32 @@ void main() {
       expect(narrow, wide);
     });
 
-    testWidgets('numbers each row once, and shows both scrollbars', (
-      tester,
-    ) async {
+    testWidgets('numbers old and new lines in their own gutters, and shows '
+        'both scrollbars', (tester) async {
       await tester.pumpWidget(_host());
       await tester.pumpAndSettle();
 
       expect(find.text('@@ -1,3 +1,3 @@'), findsOneWidget);
-      // One gutter, not two: line 1 is the context line, and the removed and
-      // added lines both sit at 2 — the removed one by where it used to be.
-      expect(find.text('1'), findsOneWidget);
-      expect(find.text('2'), findsNWidgets(2));
+      // Line 1 is context, so it is numbered in both gutters. The removed and
+      // added lines are both line 2, each numbered only in its own gutter:
+      // the removed one's in the old column, the added one's in the new.
+      expect(find.text('1'), findsNWidgets(2));
+      final twos = tester
+          .widgetList(find.text('2'))
+          .map((w) => tester.getRect(find.byWidget(w)))
+          .toList();
+      expect(twos, hasLength(2));
+      final ones = tester
+          .widgetList(find.text('1'))
+          .map((w) => tester.getRect(find.byWidget(w)).left)
+          .toList()
+        ..sort();
+      final (oldColumn, newColumn) = (ones.first, ones.last);
+      expect(newColumn, greaterThan(oldColumn));
+      // Rows run top to bottom: the removal comes first, in the old column.
+      twos.sort((a, b) => a.top.compareTo(b.top));
+      expect(twos.first.left, oldColumn);
+      expect(twos.last.left, newColumn);
 
       final bars = tester.widgetList<RawScrollbar>(find.byType(RawScrollbar));
       expect(bars.length, 2);
@@ -315,10 +332,26 @@ void main() {
       );
     });
 
-    // The row tint is a 15%-alpha wash and the single gutter shows the line as
-    // it stands now either way, so without the marker an addition and a
-    // deletion differ by colour ALONE — nothing a red/green-blind eye or a
-    // washed-out screen can read.
+    // The row tint is a 15%-alpha wash, so without the marker an addition and
+    // a deletion differ by colour and gutter position alone — nothing a
+    // red/green-blind eye or a washed-out screen reads at a glance.
+    testWidgets('a host that replaces its list gets one way back, at the start', (
+      tester,
+    ) async {
+      Finder button(String label) => find.byWidgetPredicate(
+        (w) => w is CarbonButton && w.semanticLabel == label,
+      );
+      await tester.pumpWidget(_host(closeAsBack: true));
+      await tester.pumpAndSettle();
+
+      expect(button('Back to changed files'), findsOneWidget);
+      expect(button('Close diff'), findsNothing);
+      expect(
+        tester.getRect(button('Back to changed files')).left,
+        lessThan(tester.getRect(find.text('lib/a.dart')).left),
+      );
+    });
+
     testWidgets('marks added and removed rows with more than colour', (
       tester,
     ) async {

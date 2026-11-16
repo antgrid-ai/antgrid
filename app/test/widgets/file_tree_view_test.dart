@@ -957,4 +957,49 @@ void main() {
       expect(abWidgetsInScope(tester), isEmpty);
     });
   });
+
+  // Deep siblings with a shared prefix ellipsize to identical rows in a
+  // narrow pane; only a cut name offers its full self on hover.
+  testWidgets('a truncated name carries a tooltip and a whole one does not', (
+    tester,
+  ) async {
+    const tree = FileNode(
+      name: 'project',
+      path: 'project',
+      type: FileNodeType.directory,
+      children: [
+        FileNode(
+          name: 'drawable-night-xxxhdpi-v31-landscape',
+          path: 'project/drawable-night-xxxhdpi-v31-landscape',
+          type: FileNodeType.directory,
+        ),
+        FileNode(name: 'a.md', path: 'project/a.md', type: FileNodeType.file),
+      ],
+    );
+    await tester.pumpWidget(
+      host(
+        SizedBox(
+          width: 160,
+          child: FileTreeView(
+            root: tree,
+            expandedPaths: const {},
+            onToggleExpanded: (_) {},
+            onFileSelected: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    CarbonTooltip tooltipFor(String name) => tester.widget<CarbonTooltip>(
+      find
+          .ancestor(of: find.text(name), matching: find.byType(CarbonTooltip))
+          .first,
+    );
+    expect(tooltipFor('drawable-night-xxxhdpi-v31-landscape').enabled, isTrue);
+    expect(
+      tooltipFor('drawable-night-xxxhdpi-v31-landscape').message,
+      'drawable-night-xxxhdpi-v31-landscape',
+    );
+    expect(tooltipFor('a.md').enabled, isFalse);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 }

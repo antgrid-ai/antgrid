@@ -96,9 +96,9 @@ void main() {
       );
 
       await hoverRow(tester, find.byKey(const ValueKey('a.dart')));
-      await tester.tap(action('Stage Changes'));
+      await tester.tap(action('Stage changes'));
       await tester.pump();
-      await tester.tap(action('Discard Changes'));
+      await tester.tap(action('Discard changes'));
       await tester.pump();
 
       expect(staged, ['a.dart']);
@@ -116,9 +116,9 @@ void main() {
 
       await hoverRow(tester, find.byKey(const ValueKey('c.dart')));
 
-      expect(action('Mark Resolved'), findsOneWidget);
-      expect(action('Stage Changes'), findsNothing);
-      expect(action('Discard Changes'), findsNothing);
+      expect(action('Mark resolved'), findsOneWidget);
+      expect(action('Stage changes'), findsNothing);
+      expect(action('Discard changes'), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -129,8 +129,8 @@ void main() {
       GitFileStatusEntry(path: 'a.dart', status: 'M', staged: false),
     ]);
 
-    expect(action('Stage Changes'), findsNothing);
-    expect(action('Discard Changes'), findsNothing);
+    expect(action('Stage changes'), findsNothing);
+    expect(action('Discard changes'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
   });
@@ -369,11 +369,11 @@ void main() {
       await tester.longPress(find.text('a.dart'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Stage Changes'), findsOneWidget);
-      expect(find.text('Discard Changes'), findsOneWidget);
+      expect(find.text('Stage changes'), findsOneWidget);
+      expect(find.text('Discard changes'), findsOneWidget);
       expect(find.text('Copy path'), findsOneWidget);
-      expect(find.text('Unstage Changes'), findsNothing);
-      expect(find.text('Mark Resolved'), findsNothing);
+      expect(find.text('Unstage changes'), findsNothing);
+      expect(find.text('Mark resolved'), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -388,9 +388,9 @@ void main() {
       await tester.longPress(find.text('a.dart'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Unstage Changes'), findsOneWidget);
-      expect(find.text('Stage Changes'), findsNothing);
-      expect(find.text('Discard Changes'), findsOneWidget);
+      expect(find.text('Unstage changes'), findsOneWidget);
+      expect(find.text('Stage changes'), findsNothing);
+      expect(find.text('Discard changes'), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -405,10 +405,10 @@ void main() {
       await tester.longPress(find.text('a.dart'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Mark Resolved'), findsOneWidget);
+      expect(find.text('Mark resolved'), findsOneWidget);
       expect(find.text('Copy path'), findsOneWidget);
-      expect(find.text('Stage Changes'), findsNothing);
-      expect(find.text('Discard Changes'), findsNothing);
+      expect(find.text('Stage changes'), findsNothing);
+      expect(find.text('Discard changes'), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
     });

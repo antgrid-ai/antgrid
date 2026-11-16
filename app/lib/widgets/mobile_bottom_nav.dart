@@ -20,10 +20,16 @@ class MobileBottomNav extends ConsumerWidget {
     required this.selected,
     required this.onSelected,
     this.badges = const {},
+    this.onAgent,
   });
 
   final WorkspaceView selected;
   final ValueChanged<WorkspaceView> onSelected;
+
+  /// Returns to the agent conversation, the PageView's other page. When set,
+  /// the bar leads with an item for it: the only other ways back are a swipe
+  /// nothing on screen hints at and Android's system Back, which iOS lacks.
+  final VoidCallback? onAgent;
 
   /// Same map the desktop [WorkspaceTabBar] renders. Mobile is the surface
   /// Handler exists for, and the kebab's attention row lives in the agent
@@ -56,10 +62,24 @@ class MobileBottomNav extends ConsumerWidget {
             ),
             child: Row(
               children: [
+                if (onAgent case final onAgent?)
+                  Expanded(
+                    child: _NavItem(
+                      icon: CarbonIcons.chat,
+                      label: 'Agent',
+                      semanticLabel: 'Back to agent',
+                      onTap: onAgent,
+                    ),
+                  ),
                 for (final view in views)
                   Expanded(
                     child: _NavItem(
-                      view: view,
+                      icon: view.carbonIcon,
+                      label: view.label,
+                      semanticLabel: workspaceViewSemanticLabel(
+                        view,
+                        badges[view] ?? 0,
+                      ),
                       isActive: view == selected,
                       badgeCount: badges[view] ?? 0,
                       onTap: () => onSelected(view),
@@ -76,23 +96,32 @@ class MobileBottomNav extends ConsumerWidget {
 
 class _NavItem extends StatelessWidget {
   const _NavItem({
-    required this.view,
-    required this.isActive,
-    required this.badgeCount,
+    required this.icon,
+    required this.label,
+    required this.semanticLabel,
     required this.onTap,
+    this.isActive,
+    this.badgeCount = 0,
   });
 
-  final WorkspaceView view;
-  final bool isActive;
-  final int badgeCount;
+  final CarbonIcons icon;
+  final String label;
+  final String semanticLabel;
   final VoidCallback onTap;
+
+  /// Null for an action rather than a tab: the agent item leaves this page and
+  /// is never the open view, so announcing it as "not selected" would present
+  /// it as one more tab.
+  final bool? isActive;
+  final int badgeCount;
 
   @override
   Widget build(BuildContext context) {
     final theme = CarbonTheme.of(context);
     final colors = theme.colors;
-    final iconColor = isActive ? colors.iconPrimary : colors.iconSecondary;
-    final textColor = isActive ? colors.textPrimary : colors.textSecondary;
+    final active = isActive ?? false;
+    final iconColor = active ? colors.iconPrimary : colors.iconSecondary;
+    final textColor = active ? colors.textPrimary : colors.textSecondary;
 
     return Semantics(
       button: true,
@@ -101,7 +130,7 @@ class _NavItem extends StatelessWidget {
       // stray digit next to the tab name; folding it into the label is what
       // makes it read as this tab's count. A bare GestureDetector announces as
       // nothing at all, so the role and selected state are stated here too.
-      label: workspaceViewSemanticLabel(view, badgeCount),
+      label: semanticLabel,
       // Excluding the subtree takes the GestureDetector's tap action with it,
       // which would leave a button assistive tech can see and cannot press.
       excludeSemantics: true,
@@ -117,7 +146,7 @@ class _NavItem extends StatelessWidget {
               right: 0,
               height: CarbonBorders.indicator,
               child: ColoredBox(
-                color: isActive ? colors.borderInteractive : colors.layer01,
+                color: active ? colors.borderInteractive : colors.layer01,
               ),
             ),
             Center(
@@ -130,7 +159,7 @@ class _NavItem extends StatelessWidget {
                   Stack(
                     clipBehavior: Clip.none,
                     children: [
-                      CarbonIcon(view.carbonIcon, color: iconColor),
+                      CarbonIcon(icon, color: iconColor),
                       if (badgeCount > 0)
                         Positioned(
                           top: -CarbonSpacing.spacing02,
@@ -150,12 +179,12 @@ class _NavItem extends StatelessWidget {
                   // it at any larger one. Ellipsized, it shortens; unbounded,
                   // it overflows.
                   Text(
-                    view.label,
+                    label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.typography.helper.copyWith(
                       color: textColor,
-                      fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                      fontWeight: active ? FontWeight.w600 : FontWeight.w400,
                     ),
                   ),
                 ],

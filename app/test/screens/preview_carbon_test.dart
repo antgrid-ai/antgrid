@@ -181,7 +181,7 @@ void main() {
         );
         await tester.pump();
 
-        expect(find.text('Open a Preview'), findsOneWidget);
+        expect(find.text('Open a preview'), findsOneWidget);
         expectGuardEmpty(tester);
       });
 

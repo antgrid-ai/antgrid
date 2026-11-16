@@ -2,7 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   FileFinder,
   buildFindRipgrepArgs,
-  buildFindGitArgs,
+  buildFindGitPasses,
+  buildFindRipgrepPasses,
   walkFiles,
   deriveDirectories,
   matchFindEntries,
@@ -338,19 +339,180 @@ describe("FileFinder", () => {
     expect(after.entries.map((e) => e.path)).toContain("tracked.txt");
   });
 
-  test("buildFindGitArgs is NUL-delimited and excludes the state dir on both flag values", () => {
+  test("buildFindGitPasses is NUL-delimited and excludes the state dir on every pass", () => {
     // `-z` is not cosmetic: core.quotePath defaults on, so without it a path
     // holding a byte above 0x7F comes back C-quoted and octal-escaped. This is
     // the engine that runs on any machine without ripgrep, so it is the
     // exclusion that runs in practice.
     for (const includeIgnored of [false, true]) {
-      const args = buildFindGitArgs(includeIgnored, ["state", "nested/dir"]);
-      expect(args).toContain("-z");
-      expect(args).toContain(":(exclude,literal)state");
-      expect(args).toContain(":(exclude,literal)nested/dir");
+      for (const args of buildFindGitPasses(includeIgnored, ["state", "nested/dir"])) {
+        expect(args).toContain("-z");
+        expect(args).toContain("--exclude-standard");
+        expect(args).toContain(":(exclude,literal)state");
+        expect(args).toContain(":(exclude,literal)nested/dir");
+      }
     }
-    expect(buildFindGitArgs(false, [])).toContain("--exclude-standard");
-    expect(buildFindGitArgs(true, [])).not.toContain("--exclude-standard");
+  });
+
+  test("ignored paths are listed in a pass of their own, after the tracked and unignored ones", () => {
+    // One unfiltered `--cached --others` is sorted by path, so build output
+    // under `app/build/` came first and the scan cap cut off the tracked
+    // files behind it.
+    const [unignored, ignored, ...rest] = buildFindGitPasses(true, []);
+    expect(rest).toHaveLength(0);
+    expect(unignored).toContain("--cached");
+    expect(unignored).not.toContain("--ignored");
+    expect(ignored).toContain("--ignored");
+    expect(ignored).not.toContain("--cached");
+    expect(buildFindGitPasses(false, [])).toHaveLength(1);
+
+    const rg = buildFindRipgrepPasses(true, []);
+    expect(rg).toHaveLength(2);
+    expect(rg[0]).not.toContain("--no-ignore");
+    expect(rg[1]).toContain("--no-ignore");
+    expect(buildFindRipgrepPasses(false, [])).toHaveLength(1);
+  });
+
+  test("when the scan cap hits, it drops ignored paths, never tracked ones, and says so", async () => {
+    // Sorted ahead of every tracked path, and more of them than the cap.
+    writeFileSync(join(TEST_DIR, ".gitignore"), "ignored.txt\naaa_out/\n");
+    mkdirSync(join(TEST_DIR, "aaa_out"), { recursive: true });
+    for (let i = 0; i < 10; i++) writeFileSync(join(TEST_DIR, "aaa_out", `pubspec${i}.yaml`), "x\n");
+    mkdirSync(join(TEST_DIR, "pkg"), { recursive: true });
+    writeFileSync(join(TEST_DIR, "pkg", "pubspec.yaml"), "name: pkg\n");
+    execSync("git add pkg/pubspec.yaml tracked.txt && git commit -qm init", { cwd: TEST_DIR, stdio: "ignore" });
+
+    const capped = new FileFinder(TEST_DIR, "test-project", (msg) => messages.push(msg), [], () => 0, {
+      maxScanned: 8,
+    });
+    await capped.find({
+      projectId: "test-project",
+      requestId: "req-cap",
+      query: "pubspec",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const result = findResults(messages, "req-cap");
+    expect(result.error).toBeUndefined();
+    expect(result.truncated).toBe(true);
+    const paths = result.entries.map((e) => e.path);
+    expect(paths).toContain("pkg/pubspec.yaml");
+    // The cap still let some of the ignored pass through, so it is a real
+    // second pass and not a dropped one.
+    expect(paths.some((p) => p.startsWith("aaa_out/"))).toBe(true);
+    expect(paths.filter((p) => p.startsWith("aaa_out/")).length).toBeLessThan(10);
+  });
+
+  test("an uncapped listing with ignored paths is not marked truncated", async () => {
+    await finder.find({
+      projectId: "test-project",
+      requestId: "req-whole",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const result = findResults(messages, "req-whole");
+    expect(result.truncated).toBe(false);
+    expect(result.entries.map((e) => e.path)).toEqual(expect.arrayContaining(["tracked.txt", "ignored.txt"]));
+  });
+
+  test("a path repeated by a later pass costs no scan budget", async () => {
+    // ripgrep's ignored pass re-lists every unignored path; git's passes are
+    // disjoint, so on git this holds trivially.
+    mkdirSync(join(TEST_DIR, "many"), { recursive: true });
+    for (let i = 0; i < 20; i++) writeFileSync(join(TEST_DIR, "many", `f${i}.txt`), "x\n");
+
+    await finder.find({
+      projectId: "test-project",
+      requestId: "req-uncapped",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 500,
+    });
+    const unique = findResults(messages, "req-uncapped").entries.length;
+
+    // Room for every unique line, but not for the unignored ones twice over.
+    const capped = new FileFinder(TEST_DIR, "test-project", (msg) => messages.push(msg), [], () => 0, {
+      maxScanned: unique + 3,
+    });
+    await capped.find({
+      projectId: "test-project",
+      requestId: "req-dedup",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 500,
+    });
+    const result = findResults(messages, "req-dedup");
+    expect(result.truncated).toBe(false);
+    expect(result.entries.map((e) => e.path)).toContain("ignored.txt");
+  });
+
+  test("a timeout after the unignored pass answers with that pass, flagged truncated, and serves it only for the partial TTL", async () => {
+    let fire: (() => void) | null = null;
+    let fireBetweenPasses = true;
+    let now = 0;
+    let passesRun = 0;
+    const timed = new FileFinder(TEST_DIR, "test-project", (msg) => messages.push(msg), [], () => 0, {
+      now: () => now,
+      armTimeout: (f) => {
+        fire = f;
+        return () => {};
+      },
+      afterPass: (i) => {
+        passesRun++;
+        if (i === 0 && fireBetweenPasses) fire!();
+      },
+    });
+    await timed.find({
+      projectId: "test-project",
+      requestId: "req-partial",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const partial = findResults(messages, "req-partial");
+    expect(partial.error).toBeUndefined();
+    expect(partial.truncated).toBe(true);
+    const partialPaths = partial.entries.map((e) => e.path);
+    expect(partialPaths).toContain("tracked.txt");
+    expect(partialPaths).not.toContain("ignored.txt");
+
+    // Past FIND_CACHE_MIN_TTL_MS, inside FIND_PARTIAL_CACHE_TTL_MS, seq unchanged:
+    // answered from the cache rather than by waiting out another timeout.
+    fireBetweenPasses = false;
+    const passesBefore = passesRun;
+    now = 5_000;
+    await timed.find({
+      projectId: "test-project",
+      requestId: "req-cached",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const cached = findResults(messages, "req-cached");
+    expect(passesRun).toBe(passesBefore);
+    expect(cached.error).toBeUndefined();
+    expect(cached.truncated).toBe(true);
+    expect(cached.entries.map((e) => e.path)).not.toContain("ignored.txt");
+
+    now = 31_000;
+    await timed.find({
+      projectId: "test-project",
+      requestId: "req-full",
+      query: "",
+      includeIgnored: true,
+      kinds: "files",
+      limit: 100,
+    });
+    const full = findResults(messages, "req-full");
+    expect(full.truncated).toBe(false);
+    expect(full.entries.map((e) => e.path)).toContain("ignored.txt");
   });
 
   test("the git engine returns a non-ASCII path verbatim rather than octal-escaped", async () => {

@@ -4,12 +4,15 @@ import 'package:antgrid/constants/breakpoints.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
@@ -29,6 +32,15 @@ import '../helpers/test_store_overrides.dart';
 /// Compound `<machine>.<project>` registration id, const so it can be
 /// `pumpAt`'s default.
 const _focusedProjectId = 'agent-123.test-project';
+
+/// A policy that answers when the test says so, so one mounted bar can be
+/// watched across the chip's label change.
+class _PendingPolicyNotifier extends RemoteAccessPolicyNotifier {
+  _PendingPolicyNotifier(this._answer);
+  final Future<RemoteAccessPolicy> _answer;
+  @override
+  Future<RemoteAccessPolicy> build() => _answer;
+}
 
 void main() {
   late TestStoreOverrides stores;
@@ -305,6 +317,54 @@ void main() {
       }
     },
   );
+
+  // The chip's label differs between routes ("Remote" while the policy loads,
+  // "Remote off" once it answers), and the nav cluster and search box used to
+  // slide by half that difference on every navigation.
+  testWidgets('the search cluster holds still while the chip beside it resizes', (
+    tester,
+  ) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final answer = Completer<RemoteAccessPolicy>();
+      await pumpAt(
+        tester,
+        1400,
+        extraOverrides: [
+          signedInProvider.overrideWith((ref) => true),
+          remoteAccessPolicyProvider.overrideWith(
+            () => _PendingPolicyNotifier(answer.future),
+          ),
+        ],
+      );
+      await tester.pump();
+
+      Rect chip() =>
+          tester.getRect(find.byKey(const Key('remote-access-chip')));
+      Rect back() => tester.getRect(
+        find.ancestor(
+          of: find.byTooltip('Back'),
+          matching: find.byType(AbIconButton),
+        ),
+      );
+      Rect field() =>
+          tester.getRect(find.byKey(WindowTitleBarContents.searchSlotKey));
+      final chipBefore = chip();
+      final backBefore = back();
+      final fieldBefore = field();
+
+      answer.complete(const RemoteAccessPolicy(enabled: false));
+      await tester.pump();
+      await tester.pump();
+
+      // The premise: without a width change this test proves nothing.
+      expect(chip().width, isNot(chipBefore.width));
+      expect(back(), backBefore);
+      expect(field(), fieldBefore);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   // CarbonTag asserts under an IntrinsicWidth/IntrinsicHeight, and the bar
   // measures its trailing cluster after layout instead, so the chip slot must

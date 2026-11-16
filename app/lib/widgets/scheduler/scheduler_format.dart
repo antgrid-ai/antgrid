@@ -1,25 +1,24 @@
 import '../../models/scheduler.dart';
 import 'package:intl/intl.dart';
-import 'package:timezone/data/latest.dart' as data;
 import 'package:timezone/timezone.dart' as tz;
 
-void _ensureZones() {
-  if (tz.timeZoneDatabase.locations.isEmpty) data.initializeTimeZones();
-}
+import '../../util/time_zones.dart';
 
 String schedulerTime(DateTime? instant, [String zone = 'UTC']) {
   if (instant == null) return '—';
-  _ensureZones();
-  try {
-    final local = tz.TZDateTime.from(
-      instant,
-      zone == 'UTC' ? tz.UTC : tz.getLocation(zone),
-    );
-    return '${DateFormat('d MMM y, HH:mm').format(local)} · $zone (${local.timeZoneName})';
-  } on tz.LocationNotFoundException {
+  final location = findTimeZone(zone);
+  if (location == null) {
     return '${DateFormat('d MMM y, HH:mm').format(instant.toUtc())} · UTC (unknown zone: $zone)';
   }
+  final local = tz.TZDateTime.from(instant, location);
+  return '${DateFormat('d MMM y, HH:mm').format(local)} · $zone (${local.timeZoneName})';
 }
+
+/// The zone a time drawn for [zone] is really in: [zone] itself, or `UTC`
+/// when it cannot be resolved and the conversion fell back. Captions name this
+/// rather than [zone], so a UTC clock is never labelled as another zone's.
+String schedulerShownZone(String zone) =>
+    findTimeZone(zone) == null ? 'UTC' : zone;
 
 String schedulerFrequency(String cron) {
   final fields = cron.trim().split(RegExp(r'\s+'));
@@ -62,18 +61,8 @@ String? schedulerPresetCron(String frequency, String time) {
 }
 
 /// The editor's date-time text: the wall clock of [instant] in [zone].
-String schedulerWallTime(DateTime instant, String zone) {
-  _ensureZones();
-  tz.Location location;
-  try {
-    location = zone == 'UTC' ? tz.UTC : tz.getLocation(zone);
-  } on tz.LocationNotFoundException {
-    location = tz.UTC;
-  }
-  return DateFormat(
-    'yyyy-MM-dd HH:mm',
-  ).format(tz.TZDateTime.from(instant, location));
-}
+String schedulerWallTime(DateTime instant, String zone) =>
+    DateFormat('yyyy-MM-dd HH:mm').format(_inZone(instant, zone));
 
 /// The wire form (`yyyy-MM-ddTHH:mm`) of editor text, or null when it is not a
 /// real calendar time. The bridge resolves it in the schedule's timezone.
@@ -100,19 +89,8 @@ SchedulerOneOffState schedulerOneOffState(AgentSchedule s, DateTime now) {
       : SchedulerOneOffState.pausedPassed;
 }
 
-String _zonedFormat(DateTime instant, String zone, String pattern) {
-  _ensureZones();
-  try {
-    return DateFormat(pattern).format(
-      tz.TZDateTime.from(
-        instant,
-        zone == 'UTC' ? tz.UTC : tz.getLocation(zone),
-      ),
-    );
-  } on tz.LocationNotFoundException {
-    return DateFormat(pattern).format(instant.toUtc());
-  }
-}
+String _zonedFormat(DateTime instant, String zone, String pattern) =>
+    DateFormat(pattern).format(_inZone(instant, zone));
 
 String schedulerOneOffOutcome(AgentSchedule s, List<ScheduleRun> runs) {
   final run = runs.where((r) => r.id == s.firedRunId).firstOrNull;
@@ -171,15 +149,9 @@ String schedulerMissedLabel(int? count) => switch (count) {
   final n => 'Missed $n runs',
 };
 
-tz.Location _location(String zone) {
-  _ensureZones();
-  if (zone == 'UTC') return tz.UTC;
-  try {
-    return tz.getLocation(zone);
-  } on tz.LocationNotFoundException {
-    return tz.UTC;
-  }
-}
+/// Falls back to UTC for a zone that cannot be resolved; captions beside such
+/// times name [schedulerShownZone], which says so.
+tz.Location _location(String zone) => findTimeZone(zone) ?? tz.UTC;
 
 tz.TZDateTime _inZone(DateTime instant, String zone) =>
     tz.TZDateTime.from(instant, _location(zone));
@@ -387,7 +359,14 @@ String schedulerLastRunLine(ScheduleRun run, DateTime now) {
 }
 
 const schedulerNoRunsYet = 'No runs yet';
-const schedulerNoRunsHint = 'No runs yet. Use Run now to try a schedule.';
+
+/// Runs-tab empty state subtitles: Run now needs a schedule to run, so with
+/// none the way in is New schedule.
+const schedulerNoRunsNoSchedules =
+    'Create a schedule with New schedule, and its runs show up here.';
+const schedulerNoRunsTryRunNow =
+    'Runs show up here when a schedule is due. Use Run now on a schedule to try it.';
+const schedulerNoRunsForSchedule = 'No runs of this schedule yet';
 
 /// The schedule's last [limit] finished runs, oldest first, for the outcome
 /// squares. Active runs are not outcomes yet.

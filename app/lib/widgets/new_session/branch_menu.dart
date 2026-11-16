@@ -60,7 +60,7 @@ class _BranchChipState extends ConsumerState<BranchChip> {
     final effective = ref.watch(newSessionEffectiveBranchProvider);
     final isolated = ref.watch(newSessionIsolatedProvider);
 
-    var placeholder = 'Loading branches...';
+    var placeholder = 'Loading branches…';
     var catalogUsable = false;
     var loading = true;
     String? listError;

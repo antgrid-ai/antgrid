@@ -23,6 +23,8 @@ import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/ab_message.dart'
     show NotificationPushMessage, TerminalNotificationMessage;
 import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/navigation/nav_controller.dart';
+import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -110,6 +112,19 @@ void main() {
     expect(
       containerOf(tester).read(workbenchSurfaceProvider),
       WorkbenchSurface.newSession,
+    );
+  });
+
+  // The first navigation after launch needs somewhere for Back to go.
+  testWidgets('the landing is recorded as the first history entry', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(baseOverrides()));
+    await pumpLanding(tester);
+
+    expect(
+      containerOf(tester).read(navControllerProvider).current,
+      const NavLocation(surface: WorkbenchSurface.newSession),
     );
   });
 

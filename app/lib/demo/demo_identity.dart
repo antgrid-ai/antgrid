@@ -17,7 +17,12 @@ const String kDemoProjectId = 'antgrid-demo';
 /// Human name shown wherever the workspace names its project. Carries the
 /// "(sample)" suffix so a screenshot of the demo is self-labelling even without
 /// the surrounding banner.
-const String kDemoDisplayName = 'demo-shop (sample)';
+const String kDemoDisplayName = '$kDemoBaseName (sample)';
+
+/// [kDemoDisplayName] without its suffix, for a surface that marks the sample
+/// with a tag of its own — a narrow row ellipsizes the suffix first, which is
+/// exactly the part that says what the project is.
+const String kDemoBaseName = 'demo-shop';
 
 bool isDemoProjectId(String? projectId) => projectId == kDemoProjectId;
 

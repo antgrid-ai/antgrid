@@ -790,6 +790,20 @@ final newSessionHasValidTargetProvider = Provider<bool>((ref) {
       ref.watch(pickerMachineUuidsProvider).contains(target.machineUuid);
 });
 
+/// How long a local read that failed before the host's first start of this
+/// launch keeps reading as loading.
+const Duration kHostWarmupGrace = Duration(seconds: 20);
+
+/// Completes after [kHostWarmupGrace], or never once [ref] is disposed — a
+/// rebuild has replaced the run waiting on it, and a timer left behind would
+/// outlive the provider.
+Future<void> _hostWarmupGrace(Ref ref) {
+  final done = Completer<void>();
+  final timer = Timer(kHostWarmupGrace, done.complete);
+  ref.onDispose(timer.cancel);
+  return done.future;
+}
+
 final newSessionBranchCatalogProvider =
     FutureProvider.autoDispose<GitBranchCatalog?>((ref) async {
       final target = ref.watch(selectedTargetProjectProvider);
@@ -813,18 +827,30 @@ final newSessionBranchCatalogProvider =
       }
 
       if (target.isLocal) {
-        final host = await ref.watch(hostControllerProvider).ensureHost();
-        final client = HostControlClient(
-          port: host.controlPort,
-          token: host.token,
-        );
+        // A pick at launch can beat the host's first start. Watched so that
+        // start re-runs the read; null until then.
+        final hostUp = ref.watch(hostUpGenerationProvider);
         try {
-          return await client.gitBranches(
-            projectId: target.id,
-            projectPath: target.detail,
+          final host = await ref.watch(hostControllerProvider).ensureHost();
+          final client = HostControlClient(
+            port: host.controlPort,
+            token: host.token,
           );
-        } finally {
-          client.close();
+          try {
+            return await client.gitBranches(
+              projectId: target.id,
+              projectPath: target.detail,
+            );
+          } finally {
+            client.close();
+          }
+        } catch (error, stack) {
+          if (hostUp != null) rethrow;
+          // Still loading, not unavailable: the host is starting, and its
+          // first `up` replaces this run. Bounded, so a host that never
+          // comes up still says so.
+          await _hostWarmupGrace(ref);
+          Error.throwWithStackTrace(error, stack);
         }
       }
 
@@ -1134,7 +1160,24 @@ void enterNewSessionForRemoteProject(
 /// back to the canvas leaves it false so the draft keeps its own target.
 void enterNewSession(ProviderContainer ref, {bool retarget = false}) {
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.newSession);
+  seedNewSessionDraftFromFocus(ref, retarget: retarget);
+  ref
+      .read(navControllerProvider.notifier)
+      .commit(
+        NavLocation(
+          target: ref.read(selectedTargetProvider),
+          surface: WorkbenchSurface.newSession,
+        ),
+      );
+}
 
+/// The draft half of [enterNewSession], without the surface write or the
+/// history entry: a deep link to New session does both of those itself and
+/// still owes the composer the project it names.
+void seedNewSessionDraftFromFocus(
+  ProviderContainer ref, {
+  bool retarget = false,
+}) {
   // A returned draft owns its target. Only seed from the workspace focus for a
   // genuinely blank form, otherwise moving between the canvas and a session
   // would silently replace the folder and branch the user had selected.
@@ -1217,13 +1260,4 @@ void enterNewSession(ProviderContainer ref, {bool retarget = false}) {
       seedNewSessionAgentForTarget(ref, target);
     }
   }
-
-  ref
-      .read(navControllerProvider.notifier)
-      .commit(
-        NavLocation(
-          target: ref.read(selectedTargetProvider),
-          surface: WorkbenchSurface.newSession,
-        ),
-      );
 }

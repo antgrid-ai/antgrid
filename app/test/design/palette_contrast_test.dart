@@ -155,6 +155,30 @@ void main() {
         _expectAA(color, p.bgSurface, 'light $name on bgSurface');
       }
     });
+
+    // Status tones label state chips and pills drawn on a 10% tint of the tone
+    // itself, which costs contrast a plain-surface check does not see.
+    test('light preset status tones >= 4.5:1 on their own tint', () {
+      final p = kPresets[AbThemePreset.light]!;
+      for (final (name, color) in [
+        ('statusIdle', p.statusIdle),
+        ('statusThinking', p.statusThinking),
+        ('statusRunning', p.statusRunning),
+        ('statusAttention', p.statusAttention),
+      ]) {
+        for (final (surfaceName, surface) in [
+          ('bgDeepest', p.bgDeepest),
+          ('bgSurface', p.bgSurface),
+        ]) {
+          _expectAA(color, surface, 'light $name on $surfaceName');
+          _expectAA(
+            color,
+            Color.alphaBlend(color.withAlpha(26), surface),
+            'light $name on its tint over $surfaceName',
+          );
+        }
+      }
+    });
   });
 
   group('derivePalette keeps muted text readable', () {

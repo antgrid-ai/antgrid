@@ -9,6 +9,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/screens/preview_screen.dart';
 import 'package:antgrid/widgets/send_capture_to_agent.dart';
+import 'package:webview_all/webview_all.dart' show WebResourceErrorType;
 
 void main() {
   Widget buildTestWidget({required AsyncValue<PreviewState> previewState}) {
@@ -31,7 +32,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('Open a Preview'), findsOneWidget);
+      expect(find.text('Open a preview'), findsOneWidget);
 
       debugDefaultTargetPlatformOverride = null;
     });
@@ -61,7 +62,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('Open a Preview'), findsOneWidget);
+      expect(find.text('Open a preview'), findsOneWidget);
 
       debugDefaultTargetPlatformOverride = null;
     });
@@ -74,7 +75,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('Open a Preview'), findsOneWidget);
+      expect(find.text('Open a preview'), findsOneWidget);
 
       debugDefaultTargetPlatformOverride = null;
     });
@@ -243,6 +244,34 @@ void main() {
     test('an out-of-range port is rejected', () {
       expect(parsePreviewTarget('70000'), isNull);
       expect(parsePreviewTarget('0'), isNull);
+    });
+  });
+
+  group('isDeadPortError', () {
+    test('a refused loopback connection is a dead port', () {
+      for (final url in [
+        'http://localhost:59999/',
+        'http://127.0.0.1:3000/app',
+        'http://[::1]:8080/',
+        null,
+      ]) {
+        expect(isDeadPortError(WebResourceErrorType.connect, url), isTrue);
+      }
+    });
+
+    test('a foreign host or another failure keeps the platform page', () {
+      expect(
+        isDeadPortError(WebResourceErrorType.connect, 'https://example.com/'),
+        isFalse,
+      );
+      expect(
+        isDeadPortError(
+          WebResourceErrorType.failedSslHandshake,
+          'https://localhost:3000/',
+        ),
+        isFalse,
+      );
+      expect(isDeadPortError(null, 'http://localhost:3000/'), isFalse);
     });
   });
 }

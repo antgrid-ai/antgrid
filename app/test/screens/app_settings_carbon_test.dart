@@ -3,8 +3,10 @@ import 'dart:ui' show Tristate;
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/settings_section.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/screens/app_settings_screen.dart';
 import 'package:antgrid/services/app_settings_service.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/widgets/carbon_choice_tile.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart'
@@ -24,6 +26,8 @@ Future<void> _withSettings(
   Future<void> Function(ProviderContainer container) body, {
   Size size = const Size(1000, 800),
   VoidCallback? onClose,
+  bool signedIn = true,
+  Map<String, Object> seed = const {},
 }) async {
   try {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -31,13 +35,20 @@ Future<void> _withSettings(
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
-    useInMemoryPrefs();
+    useInMemoryPrefs(seed);
     final prefs = await openAppSettingsPrefs();
     final service = AppSettingsService(prefs, AppSettings.fromPrefs(prefs));
     late ProviderContainer container;
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [appSettingsServiceProvider.overrideWith(() => service)],
+        overrides: [
+          appSettingsServiceProvider.overrideWith(() => service),
+          currentUserProvider.overrideWith(
+            (ref) => signedIn
+                ? CurrentUser(userId: 'u-1', email: 'a@b.test')
+                : null,
+          ),
+        ],
         child: Consumer(
           builder: (context, ref, _) {
             container = ProviderScope.containerOf(context);
@@ -193,13 +204,38 @@ void main() {
     });
   });
 
-  testWidgets('Reset to defaults restores the settings', (tester) async {
-    await _withSettings(tester, (container) async {
-      await _tap(tester, find.text('Reduce motion'));
-      expect(container.read(appSettingsServiceProvider).reduceMotion, isTrue);
+  testWidgets('Reset appearance restores the theme and nothing else', (
+    tester,
+  ) async {
+    await _withSettings(
+      tester,
+      seed: {'app.telemetry.enabled': false, 'antgrid.reduce_motion.v1': true},
+      (container) async {
+        await _tap(tester, find.text('Slate'));
+        expect(
+          container.read(appSettingsServiceProvider).preset,
+          AbThemePreset.slate,
+        );
 
-      await _tap(tester, find.text('Reset to defaults'));
-      expect(container.read(appSettingsServiceProvider).reduceMotion, isFalse);
+        await _tap(tester, find.text('Reset appearance'));
+        final settings = container.read(appSettingsServiceProvider);
+        expect(settings.preset, AppSettings.defaults.preset);
+        expect(settings.telemetryEnabled, isFalse);
+        expect(settings.reduceMotion, isTrue);
+      },
+    );
+  });
+
+  testWidgets('signed out, the Account section is not offered', (
+    tester,
+  ) async {
+    await _withSettings(tester, signedIn: false, (_) async {
+      expect(find.text('Delete account'), findsNothing);
+      expect(find.text('Manage password'), findsNothing);
+      expect(
+        find.byKey(settingsSectionKey(SettingsSection.account)),
+        findsNothing,
+      );
     });
   });
 

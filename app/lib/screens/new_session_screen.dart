@@ -8,10 +8,7 @@ import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
-import '../navigation/nav_location.dart';
-import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
-import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
@@ -362,28 +359,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     WorkbenchSurface surface, {
     required bool overlayDrawer,
   }) {
-    void close() {
-      ref
-          .read(workbenchSurfaceProvider.notifier)
-          .set(WorkbenchSurface.workspace);
-      // Mirrors workspace_shell's close(): closing an overlay is a navigation,
-      // and without the commit nav.current still points at the settings entry,
-      // so the next back press is a silent no-op. Records the surface we
-      // actually land on — AppShell's reconciler forces newSession straight
-      // back on when no project is focused.
-      final target = ref.read(selectedTargetProvider);
-      ref
-          .read(navControllerProvider.notifier)
-          .commit(
-            NavLocation(
-              target: target,
-              surface: target == null
-                  ? WorkbenchSurface.newSession
-                  : WorkbenchSurface.workspace,
-              sessionId: ref.read(activeSessionIdProvider),
-            ),
-          );
-    }
+    void close() => closeAppSettings(ref.container);
 
     return switch (surface) {
       WorkbenchSurface.scheduler => SchedulerScreen(

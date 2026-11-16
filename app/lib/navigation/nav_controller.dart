@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/agent_transport.dart';
+import '../providers/new_session_picker.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/visible_surface.dart';
@@ -111,6 +112,58 @@ class NavController extends Notifier<NavState> {
         cur.sessionId == loc.sessionId;
   }
 
+  /// Records the place the app opened on as `current`, so the first navigation
+  /// after launch has somewhere for back() to return to.
+  ///
+  /// Called by the shell once it is up, never from [build]: the controller is
+  /// first read by whichever site navigates first, which has already written
+  /// the providers this snapshots — the landing taken there would be the
+  /// destination. A no-op once anything is recorded: a link that landed first
+  /// already is where the app opened.
+  void recordLanding() {
+    if (state.current != null) return;
+    final target = ref.read(selectedTargetProvider);
+    final surface = ref.read(workbenchSurfaceProvider);
+    state = NavState(
+      current: NavLocation(
+        target: target,
+        // With nothing focused AppShell renders New session over a surface
+        // that still reads its `workspace` default, and only rewrites it a
+        // frame later. Record the screen the user is looking at.
+        surface:
+            target == null &&
+                (surface == WorkbenchSurface.workspace ||
+                    surface == WorkbenchSurface.remoteDevices)
+            ? WorkbenchSurface.newSession
+            : surface,
+        sessionId: ref.read(activeSessionIdProvider),
+      ),
+    );
+  }
+
+  /// Steps back to the newest entry that is not on [surface], in one move, so
+  /// closing an overlay returns to whatever it was opened over rather than to
+  /// a fixed screen. The overlay entries skipped over go to `future` with it,
+  /// so forward() reopens the overlay.
+  ///
+  /// False when `current` is not on [surface] or nothing before it is
+  /// elsewhere (the overlay was the first thing recorded, e.g. a cold-start
+  /// link) — the caller picks the destination then.
+  bool backOutOf(WorkbenchSurface surface) {
+    final cur = state.current;
+    if (cur == null || cur.surface != surface) return false;
+    final i = state.past.lastIndexWhere((e) => e.surface != surface);
+    if (i < 0) return false;
+    final dest = state.past[i];
+    state = NavState(
+      past: state.past.sublist(0, i),
+      current: dest,
+      future: [...state.past.sublist(i + 1), cur, ...state.future],
+    );
+    _apply(dest);
+    return true;
+  }
+
   /// Drop the whole history, at both edges of a scope that is entered and left
   /// rather than navigated through. The demo is the one such scope: its entries
   /// name a project that does not exist outside it, and the real app's entries
@@ -144,6 +197,29 @@ class NavController extends Notifier<NavState> {
   /// [commit]; a deep link has no such site, so it must do both.)
   void applyDeepLink(NavLocation loc) {
     _apply(loc);
+    // A link naming a session and no tab asks for that session's conversation,
+    // as a notification route of the same shape does (`_handOverSurface`).
+    // Not in [_apply]: back()/forward() mean "as I left it", which is the
+    // session's own restored page. Session-less links get no stamp — nothing
+    // queued holds the drain back, so it would be spent before the bootstrap's
+    // default pick restores that session's layout over it.
+    if (loc.surface == WorkbenchSurface.workspace &&
+        loc.target != null &&
+        loc.sessionId != null &&
+        loc.view == null &&
+        loc.file == null) {
+      ref
+          .read(pendingAgentPageProvider.notifier)
+          .set((target: ref.read(selectedTargetProvider), value: true));
+    }
+    // The composer's draft target is not focus, so focusing the project alone
+    // leaves New session on "Select project…". A link naming a project is a
+    // pick, so it retargets a draft left on another one — the same rule as a
+    // drawer row's `+`. Not in [_apply] either: back()/forward() return to a
+    // draft the user may have edited since, which keeps its own target.
+    if (loc.surface == WorkbenchSurface.newSession && loc.target != null) {
+      seedNewSessionDraftFromFocus(ref.container, retarget: true);
+    }
     commit(loc);
   }
 
@@ -237,6 +313,29 @@ void recordProjectFocus(ProviderContainer ref) {
           surface: WorkbenchSurface.workspace,
         ),
       );
+}
+
+/// Closes App settings back to the place it was opened over — Memory, the
+/// Scheduler, a session — via [NavController.backOutOf].
+///
+/// The fallback, for settings that history cannot see past, records the surface
+/// actually landed on: AppShell's reconciler forces newSession straight back on
+/// when no project is focused. Without a commit there `current` would still
+/// name settings, and the next back press would be a silent no-op.
+void closeAppSettings(ProviderContainer ref) {
+  final nav = ref.read(navControllerProvider.notifier);
+  if (nav.backOutOf(WorkbenchSurface.appSettings)) return;
+  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
+  final target = ref.read(selectedTargetProvider);
+  nav.commit(
+    NavLocation(
+      target: target,
+      surface: target == null
+          ? WorkbenchSurface.newSession
+          : WorkbenchSurface.workspace,
+      sessionId: ref.read(activeSessionIdProvider),
+    ),
+  );
 }
 
 final navControllerProvider = NotifierProvider<NavController, NavState>(

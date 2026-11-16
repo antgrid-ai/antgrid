@@ -179,7 +179,7 @@ void main() {
           brightness: brightness,
         );
 
-        expect(find.text('attaching terminals…'), findsOneWidget);
+        expect(find.text('Attaching terminals…'), findsOneWidget);
         _expectCleanScopes(tester);
       });
 
@@ -250,7 +250,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('Retry'), findsOneWidget);
-    expect(find.text('New Terminal'), findsOneWidget);
+    expect(find.text('New terminal'), findsOneWidget);
   });
 
   testWidgets('empty pane at 2.0 text scale scrolls instead of overflowing', (

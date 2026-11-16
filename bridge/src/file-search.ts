@@ -3,7 +3,7 @@ import { createMessage, type AbMessage } from "./protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-search" });
 
-type SearchEngine = "ripgrep" | "git-grep";
+export type SearchEngine = "ripgrep" | "git-grep";
 
 let cachedEngine: SearchEngine | null = null;
 
@@ -39,7 +39,7 @@ interface SearchOptions {
   requestId: string;
 }
 
-interface SearchMatchData {
+export interface SearchMatchData {
   path: string;
   line: number;
   column: number;
@@ -53,8 +53,10 @@ const BATCH_SIZE = 20;
 const BATCH_INTERVAL_MS = 50;
 const TIMEOUT_MS = 30_000;
 const MAX_LINE_LENGTH = 500;
-const GIT_GREP_MATCH_RE = /^(.+?):(\d+):(\d+):(.*)$/;
-const GIT_GREP_CONTEXT_RE = /^(.+?)-(\d+)-(.*)$/;
+// `s`: a lone `\r` inside a line (an old-Mac line ending in one file of a CRLF
+// checkout) must not cost the whole line its match.
+const GIT_GREP_MATCH_RE = /^(.+?):(\d+):(\d+):(.*)$/s;
+const GIT_GREP_CONTEXT_RE = /^(.+?)-(\d+)-(.*)$/s;
 
 /**
  * Root-relative POSIX paths for the excludes that actually sit inside `root`.
@@ -115,6 +117,125 @@ function buildGitGrepArgs(opts: SearchOptions, projectPath: string, excludes: re
   return args;
 }
 
+/** A line as an engine printed it, minus its terminator. Git for Windows
+ *  checks out CRLF by default (`core.autocrlf=true`), so every line git grep
+ *  prints from such a file — and every `lines.text` ripgrep reports — carries
+ *  the file's `\r`. Left on, it made both git-grep regexes fail (`.` does not
+ *  match `\r`) and every match on a CRLF checkout was silently dropped. */
+function stripEol(text: string): string {
+  if (text.endsWith("\n")) text = text.slice(0, -1);
+  if (text.endsWith("\r")) text = text.slice(0, -1);
+  return text;
+}
+
+/** Turns one engine's stdout into matches with their context. Fed decoded
+ *  text in arbitrary chunks; `end()` flushes the final line and match. */
+export class SearchOutputParser {
+  private leftover = "";
+  private before: string[] = [];
+  private matchLine: SearchMatchData | null = null;
+  private afterCount = 0;
+
+  constructor(
+    private readonly engine: SearchEngine,
+    private readonly projectRoot: string,
+    private readonly onMatch: (match: SearchMatchData) => void,
+  ) {}
+
+  push(text: string): void {
+    const lines = (this.leftover + text).split("\n");
+    this.leftover = lines.pop() ?? "";
+    for (const line of lines) this.processLine(line);
+  }
+
+  end(): void {
+    const last = this.leftover;
+    this.leftover = "";
+    this.processLine(last);
+    this.flushMatch();
+  }
+
+  private processLine(raw: string): void {
+    const line = stripEol(raw);
+    if (!line.trim()) return;
+    if (this.engine === "ripgrep") this.processRipgrepLine(line);
+    else this.processGitGrepLine(line);
+  }
+
+  private flushMatch(): void {
+    if (this.matchLine) {
+      this.onMatch(this.matchLine);
+      this.matchLine = null;
+    }
+  }
+
+  private resetContext(): void {
+    this.before = [];
+    this.afterCount = 0;
+  }
+
+  private pushContext(content: string): void {
+    if (this.matchLine && this.afterCount < 2) {
+      this.matchLine.contextAfter.push(content);
+      this.afterCount++;
+    } else {
+      this.before.push(content);
+      if (this.before.length > 2) this.before.shift();
+    }
+  }
+
+  private startMatch(path: string, line: number, column: number, content: string): void {
+    this.flushMatch();
+    this.matchLine = {
+      path,
+      line,
+      column,
+      lineContent: content.length > MAX_LINE_LENGTH ? content.slice(0, MAX_LINE_LENGTH) : content,
+      contextBefore: [...this.before],
+      contextAfter: [],
+    };
+    this.resetContext();
+  }
+
+  private processRipgrepLine(line: string): void {
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (obj.type === "context") {
+      this.pushContext(stripEol(obj.data?.lines?.text ?? ""));
+    } else if (obj.type === "match") {
+      const data = obj.data;
+      // ripgrep echoes the `.` it was handed, so this arrives as `./x`;
+      // the app opens results by bare project-relative path.
+      const rawPath: string = data.path?.text ?? "";
+      const relPath = relative(this.projectRoot, resolve(this.projectRoot, rawPath)).split(sep).join("/");
+      const col = data.submatches?.[0]?.start ?? 0;
+      this.startMatch(relPath, data.line_number ?? 0, col + 1, stripEol(data.lines?.text ?? ""));
+    } else if (obj.type === "begin" || obj.type === "end") {
+      this.flushMatch();
+      this.resetContext();
+    }
+  }
+
+  private processGitGrepLine(line: string): void {
+    if (line === "--") {
+      this.flushMatch();
+      this.resetContext();
+      return;
+    }
+    const m = GIT_GREP_MATCH_RE.exec(line);
+    if (m) {
+      this.startMatch(m[1]!, parseInt(m[2]!, 10), parseInt(m[3]!, 10), m[4]!);
+      return;
+    }
+    const c = GIT_GREP_CONTEXT_RE.exec(line);
+    if (c) this.pushContext(c[3]!);
+  }
+}
+
 export class FileSearcher {
   private projectRoot: string;
   private projectId: string;
@@ -122,32 +243,37 @@ export class FileSearcher {
   private excludes: string[];
   private activeProcess: ReturnType<typeof Bun.spawn> | null = null;
   private activeRequestId: string | null = null;
+  private timeoutMs: number;
 
   /**
    * `excludeDirs` are absolute directories that are not project content even
    * when they sit inside the root — the Antgrid state dir, which holds every
    * managed worktree. Without it a main-scoped search reports hits from the
    * isolated checkouts it is supposed to be isolated from (file-tree.ts keeps
-   * the same directory out of the tree).
+   * the same directory out of the tree). `testHooks.timeoutMs` exists so a
+   * test can make the timeout fire on a fixture git answers in milliseconds.
    */
   constructor(
     projectRoot: string,
     projectId: string,
     sendMessage: (msg: AbMessage) => void,
     excludeDirs: readonly string[] = [],
+    testHooks?: { timeoutMs?: number },
   ) {
     this.projectRoot = projectRoot;
     this.projectId = projectId;
     this.sendMessage = sendMessage;
     this.excludes = containedExcludes(projectRoot, excludeDirs);
+    this.timeoutMs = testHooks?.timeoutMs ?? TIMEOUT_MS;
   }
 
+  /** Also honoured before the process exists: clearing the request id is what
+   *  stops a search still probing for its engine from spawning at all. */
   cancel(requestId: string): void {
-    if (this.activeRequestId === requestId && this.activeProcess) {
-      this.activeProcess.kill();
-      this.activeProcess = null;
-      this.activeRequestId = null;
-    }
+    if (this.activeRequestId !== requestId) return;
+    this.activeProcess?.kill();
+    this.activeProcess = null;
+    this.activeRequestId = null;
   }
 
   /** Kill whatever search is running, whoever asked for it, and resolve only
@@ -188,6 +314,21 @@ export class FileSearcher {
       }));
       return;
     }
+    // A newer search (or a stop) that landed during the engine probe had no
+    // process of ours to kill; spawning now would leave this one running
+    // untracked beside its successor.
+    if (this.activeRequestId !== opts.requestId) {
+      this.sendMessage(createMessage("file:search-done", {
+        projectId: this.projectId,
+        requestId: opts.requestId,
+        totalMatches: 0,
+        totalFiles: 0,
+        duration: Date.now() - startTime,
+        engine,
+        error: "Search cancelled",
+      }));
+      return;
+    }
 
     const args = engine === "ripgrep"
       ? buildRipgrepArgs(opts, this.excludes)
@@ -207,10 +348,15 @@ export class FileSearcher {
     let totalMatches = 0;
     let truncated = false;
     let batchTimer: ReturnType<typeof setTimeout> | null = null;
+    // Our own kills, told apart by reason: `proc.signalCode` says only how the
+    // engine died, and a timed-out one with nothing found yet went out as a
+    // confident "No results".
+    let timedOut = false;
 
     const timeout = setTimeout(() => {
+      timedOut = true;
       proc.kill();
-    }, TIMEOUT_MS);
+    }, this.timeoutMs);
 
     const flushBatch = () => {
       if (batch.length === 0) return;
@@ -223,6 +369,7 @@ export class FileSearcher {
     };
 
     const addMatch = (match: SearchMatchData) => {
+      if (truncated) return;
       totalMatches++;
       filesWithMatches.add(match.path);
       batch.push(match);
@@ -240,123 +387,17 @@ export class FileSearcher {
       }
     };
 
-    const stdout = proc.stdout;
-    const reader = stdout.getReader();
+    const parser = new SearchOutputParser(engine, this.projectRoot, addMatch);
+    const reader = proc.stdout.getReader();
     const decoder = new TextDecoder();
-    let leftover = "";
-
-    let contextAccum: { before: string[]; matchLine: SearchMatchData | null; afterCount: number } = {
-      before: [],
-      matchLine: null,
-      afterCount: 0,
-    };
-
-    const flushContextMatch = () => {
-      if (contextAccum.matchLine) {
-        addMatch(contextAccum.matchLine);
-        contextAccum.matchLine = null;
-      }
-    };
-
-    const processRipgrepLine = (line: string) => {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type === "context") {
-          const data = obj.data;
-          let lineText = data.lines?.text ?? "";
-          if (lineText.endsWith("\n")) lineText = lineText.slice(0, -1);
-          if (contextAccum.matchLine && contextAccum.afterCount < 2) {
-            contextAccum.matchLine.contextAfter.push(lineText);
-            contextAccum.afterCount++;
-          } else {
-            contextAccum.before.push(lineText);
-            if (contextAccum.before.length > 2) contextAccum.before.shift();
-          }
-        } else if (obj.type === "match") {
-          flushContextMatch();
-          const data = obj.data;
-          // ripgrep echoes the `.` it was handed, so this arrives as `./x`;
-          // the app opens results by bare project-relative path.
-          const rawPath: string = data.path?.text ?? "";
-          const relPath = relative(this.projectRoot, resolve(this.projectRoot, rawPath)).split(sep).join("/");
-          const lineNum = data.line_number ?? 0;
-          const col = data.submatches?.[0]?.start ?? 0;
-          let lineText = data.lines?.text ?? "";
-          if (lineText.endsWith("\n")) lineText = lineText.slice(0, -1);
-          if (lineText.length > MAX_LINE_LENGTH) lineText = lineText.slice(0, MAX_LINE_LENGTH);
-          contextAccum.matchLine = {
-            path: relPath,
-            line: lineNum,
-            column: col + 1,
-            lineContent: lineText,
-            contextBefore: [...contextAccum.before],
-            contextAfter: [],
-          };
-          contextAccum.before = [];
-          contextAccum.afterCount = 0;
-        } else if (obj.type === "begin" || obj.type === "end") {
-          // File boundary — flush pending match and reset context
-          flushContextMatch();
-          contextAccum.before = [];
-          contextAccum.afterCount = 0;
-        }
-      } catch {}
-    };
-
-    const processGitGrepLine = (line: string) => {
-      if (line === "--") {
-        flushContextMatch();
-        contextAccum.before = [];
-        contextAccum.afterCount = 0;
-        return;
-      }
-
-      const matchResult = GIT_GREP_MATCH_RE.exec(line);
-      if (matchResult) {
-        flushContextMatch();
-        let lineContent = matchResult[4];
-        if (lineContent.length > MAX_LINE_LENGTH) lineContent = lineContent.slice(0, MAX_LINE_LENGTH);
-        contextAccum.matchLine = {
-          path: matchResult[1],
-          line: parseInt(matchResult[2], 10),
-          column: parseInt(matchResult[3], 10),
-          lineContent,
-          contextBefore: [...contextAccum.before],
-          contextAfter: [],
-        };
-        contextAccum.before = [];
-        contextAccum.afterCount = 0;
-        return;
-      }
-
-      const contextResult = GIT_GREP_CONTEXT_RE.exec(line);
-      if (contextResult) {
-        const content = contextResult[3];
-        if (contextAccum.matchLine && contextAccum.afterCount < 2) {
-          contextAccum.matchLine.contextAfter.push(content);
-          contextAccum.afterCount++;
-        } else {
-          contextAccum.before.push(content);
-          if (contextAccum.before.length > 2) contextAccum.before.shift();
-        }
-      }
-    };
-
-    const processLine = engine === "ripgrep" ? processRipgrepLine : processGitGrepLine;
-
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const text = leftover + decoder.decode(value, { stream: true });
-        const lines = text.split("\n");
-        leftover = lines.pop() ?? "";
-        for (const line of lines) {
-          if (line.trim()) processLine(line);
-        }
+        parser.push(decoder.decode(value, { stream: true }));
       }
-      if (leftover.trim()) processLine(leftover);
-      flushContextMatch();
+      parser.push(decoder.decode());
+      parser.end();
     } catch {}
 
     clearTimeout(timeout);
@@ -368,15 +409,31 @@ export class FileSearcher {
 
     await proc.exited;
 
-    // Exit 1 is "no matches" for both engines; anything above it is a failure
-    // (bad regex, not a repository) that would otherwise read as zero results.
-    // A process we killed ourselves reports a signal, not a failure.
-    let error = truncated ? `Results truncated at ${MAX_RESULTS} matches` : undefined;
-    const code = proc.exitCode;
-    if (!error && totalMatches === 0 && !proc.signalCode && code !== null && code > 1) {
-      const detail = (await stderrText).trim().split("\n")[0]?.slice(0, 300);
-      error = detail || `Search failed (exit ${code})`;
-      log.warn({ code, detail }, "search engine failed");
+    // Read before the identity reset below: a `cancel`, a `stop` or a newer
+    // `search` has already moved `activeProcess` off this process.
+    const superseded = this.activeProcess !== proc;
+    let error: string | undefined;
+    if (truncated) {
+      error = `Results truncated at ${MAX_RESULTS} matches`;
+    } else if (timedOut) {
+      error = totalMatches === 0
+        ? `Search timed out after ${Math.round(this.timeoutMs / 1000)}s`
+        : `Search timed out after ${Math.round(this.timeoutMs / 1000)}s; results are incomplete`;
+      log.warn({ totalMatches }, "search timed out");
+    } else if (superseded) {
+      // Still answered (callers drop a requestId they no longer want — there
+      // is no cancel ack), but never as a zero-result answer.
+      error = "Search cancelled";
+    } else {
+      // Exit 1 is "no matches" for both engines; anything above it is a
+      // failure (bad regex, not a repository) that would otherwise read as
+      // zero results.
+      const code = proc.exitCode;
+      if (totalMatches === 0 && !proc.signalCode && code !== null && code > 1) {
+        const detail = (await stderrText).trim().split("\n")[0]?.slice(0, 300);
+        error = detail || `Search failed (exit ${code})`;
+        log.warn({ code, detail }, "search engine failed");
+      }
     }
 
     this.sendMessage(createMessage("file:search-done", {
@@ -389,7 +446,11 @@ export class FileSearcher {
       error,
     }));
 
-    this.activeProcess = null;
-    this.activeRequestId = null;
+    // Identity-gated: a superseded run finishing after its successor started
+    // must not clear the successor's handle, or `cancel` stops reaching it.
+    if (!superseded) {
+      this.activeProcess = null;
+      this.activeRequestId = null;
+    }
   }
 }

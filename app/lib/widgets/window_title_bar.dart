@@ -211,6 +211,15 @@ class _WindowTitleBarContentsState
   double _analyticalReservedRight() =>
       paintsWindowControls ? AbTokens.captionButtonWidth * 3 : 0.0;
 
+  /// The trailing cluster less its chips: what is the same on every route.
+  /// Keep in lockstep with [_titleBarRow]'s trailing children after the chip
+  /// slot.
+  double _fixedTrailingWidth(BuildContext context) =>
+      AbTokens.space8 +
+      iconSlotExtent(context) + // context-panel slot
+      AbTokens.space8 +
+      _analyticalReservedRight();
+
   /// Re-measures the trailing cluster after every build in which it might
   /// have changed size (a chip's label flipping between "Remote on"/"Remote
   /// off", a host name changing, the context-panel toggle mounting). Cheap to
@@ -245,7 +254,7 @@ class _WindowTitleBarContentsState
         // command/search box — not in the free space left over between the
         // leading and trailing clusters, which drifts off-centre whenever
         // those two clusters aren't the same width. The ENTIRE trailing
-        // cluster is carved out on the right first (measured — see
+        // cluster bounds the region on the right (measured — see
         // [_measuredTrailingWidth], since the project-action chips in it are
         // text-dependent and no formula can size them the way [_searchGutter]
         // sizes the leading cluster's fixed icon slots), so the box never
@@ -274,6 +283,19 @@ class _WindowTitleBarContentsState
           math.max(region - button * 2 - AbTokens.space6, searchFloor),
           AbTokens.sessionSearchWidth,
         );
+        final clusterWidth = button * 2 + AbTokens.space6 + searchWidth;
+        // Anchored on the bar less only the FIXED part of the trailing cluster,
+        // so the chips' text-dependent width — which differs between routes
+        // ("Remote" while the policy loads, "Remote off", a host name) — can't
+        // slide the cluster sideways on every navigation. The measured reserve
+        // still bounds it: only a chip wide enough to reach the cluster pushes
+        // it left.
+        final anchor =
+            (constraints.maxWidth - _fixedTrailingWidth(context)) / 2;
+        final left = (anchor - clusterWidth / 2).clamp(
+          gutter,
+          math.max(gutter, gutter + region - clusterWidth),
+        ).toDouble();
         return Stack(
           children: [
             // Under the row, not over it: an overlap the reserve can't prevent
@@ -284,11 +306,10 @@ class _WindowTitleBarContentsState
             // it's the pre-measurement frame (and any transient staleness)
             // this paint order still guards, not the everyday case.
             Positioned(
-              left: gutter,
+              left: left,
               top: 0,
               bottom: 0,
-              width: region,
-              child: Align(
+              child: Center(
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [

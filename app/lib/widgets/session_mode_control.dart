@@ -98,7 +98,7 @@ class SessionModeControl extends ConsumerWidget {
 /// [SessionModeControl]'s state, redone as a single [CarbonMenuItem] for a
 /// text-menu host (the session overflow menu) instead of a segmented
 /// control. A menu row has no room to show the option NOT being picked, so
-/// the label names the action ("Switch to Terminal"/"Switch to Chat UI")
+/// the label names the action ("Switch to terminal"/"Switch to chat")
 /// instead of the two-state choice. Same visibility/capability rules as
 /// [SessionModeControl] — keep the two in lockstep by hand; neither is a
 /// special case of the other's build method.
@@ -132,7 +132,7 @@ CarbonMenuEntry? sessionModeMenuEntry(BuildContext context, WidgetRef ref) {
   final container = ref.container;
 
   return CarbonMenuItem(
-    label: target == 'chat' ? 'Switch to Chat UI' : 'Switch to Terminal',
+    label: target == 'chat' ? 'Switch to chat' : 'Switch to terminal',
     icon: CarbonIcon(
       target == 'chat' ? CarbonIcons.chat : CarbonIcons.terminal,
     ),

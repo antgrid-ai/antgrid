@@ -149,9 +149,21 @@ void main() {
     await _pump(tester, machines: {'m1': name}, name: name, scale: 2);
 
     expect(tester.takeException(), isNull);
+    // Narrow callers bound the selector to the room left in their header, so
+    // the selector itself only has to stay inside what it is given.
     final size = tester.getSize(find.byType(CarbonMachineSelector));
-    expect(size.width, lessThanOrEqualTo(CarbonSpacing.spacing05 * 9));
+    expect(size.width, lessThanOrEqualTo(320));
     expect(size.height, lessThanOrEqualTo(CarbonSizes.xl));
+  });
+
+  testWidgets('a long name is capped on a wide header', (tester) async {
+    final name = 'N' * 60;
+    await _pump(tester, machines: {'m1': name}, name: name, wide: true);
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byType(CarbonMachineSelector)).width,
+      lessThanOrEqualTo(CarbonSpacing.spacing05 * 15),
+    );
   });
 
   testWidgets('touch density gives a 44 target', (tester) async {

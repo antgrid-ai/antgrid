@@ -235,10 +235,13 @@ const _light = AbColors(
   accentHighlight: Color(0xFFD2542A),
   accentMuted: Color(0xFFA03E1F),
   accentForeground: Color(0xFFFFFFFF),
+  // Status tones are also label text, drawn on a 10% tint of themselves (state
+  // chips, status pills), so they clear AA against that tint, not just white.
+  // The dark presets' pastels read about 1.6:1 here.
   statusIdle: Color(0xFF61656D),
-  statusThinking: Color(0xFFE2C792),
-  statusRunning: Color(0xFF8FCFAE),
-  statusAttention: Color(0xFFE5A055),
+  statusThinking: Color(0xFF7A5C00),
+  statusRunning: Color(0xFF116932),
+  statusAttention: Color(0xFFAE3A0B),
   success: Color(0xFF15803D),
   error: Color(0xFFDC2626),
   warning: Color(0xFFA16207),

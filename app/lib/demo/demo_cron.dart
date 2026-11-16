@@ -1,7 +1,8 @@
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
-import 'package:timezone/data/latest.dart' as data;
 import 'package:timezone/timezone.dart' as tz;
+
+import '../util/time_zones.dart';
 
 // A numeric five-field cron evaluator for the sample Scheduler. The sample has
 // no bridge to ask, so this reproduces the bridge's grammar, error wording and
@@ -21,10 +22,6 @@ final RegExp _runAtText = RegExp(
 // 31st of April), and the bridge reports the same loop-limit failure.
 const int _searchDays = 366 * 8;
 
-void _ensureZones() {
-  if (tz.timeZoneDatabase.locations.isEmpty) data.initializeTimeZones();
-}
-
 /// Resolves an IANA name to a location, with the bridge's two refusals.
 ///
 /// Not `scheduler_format`'s private lookup: that one falls back to UTC for an
@@ -36,13 +33,8 @@ tz.Location demoSchedulerZone(String timezone) {
       'Choose an IANA timezone, such as Europe/London',
     );
   }
-  _ensureZones();
-  if (timezone == 'UTC') return tz.UTC;
-  try {
-    return tz.getLocation(timezone);
-  } on tz.LocationNotFoundException {
-    throw RpcException(_invalidCron, 'Choose a valid IANA timezone');
-  }
+  return findTimeZone(timezone) ??
+      (throw RpcException(_invalidCron, 'Choose a valid IANA timezone'));
 }
 
 /// The name a zone is stored and reported under. `tz.UTC` is named `Etc/UTC`,

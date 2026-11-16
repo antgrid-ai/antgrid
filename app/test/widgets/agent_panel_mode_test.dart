@@ -124,7 +124,7 @@ void main() {
 
       // A terminal session offers the switch TO chat; Handler's row renders
       // whenever there's a focused session to arm, regardless of mode.
-      expect(find.text('Switch to Chat UI'), findsOneWidget);
+      expect(find.text('Switch to chat'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
 
       debugDefaultTargetPlatformOverride = null;

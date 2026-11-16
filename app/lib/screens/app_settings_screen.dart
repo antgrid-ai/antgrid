@@ -215,6 +215,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         builder: (scoped) {
           _scoped = scoped;
           final t = CarbonTheme.of(scoped);
+          final signedIn = ref.watch(currentUserProvider).value != null;
           final sections = <Widget>[
             if (kPricingSurfacesEnabled && defaultNativeUpgradePlatformCheck())
               _Section(
@@ -313,15 +314,17 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       ],
                     ),
                   ),
+                // Inside the section, so where it sits says what it resets.
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: CarbonButton(
+                    label: 'Reset appearance',
+                    kind: CarbonButtonKind.tertiary,
+                    onPressed: () =>
+                        run('reset appearance', service.resetAppearance),
+                  ),
+                ),
               ],
-            ),
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: CarbonButton(
-                label: 'Reset to defaults',
-                kind: CarbonButtonKind.tertiary,
-                onPressed: () => run('reset', service.reset),
-              ),
             ),
             _Section(
               section: SettingsSection.uiSize,
@@ -411,10 +414,12 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                 ),
               ],
             ),
-            _Section(
-              section: SettingsSection.account,
-              children: [
-                if (ref.watch(currentUserProvider).value != null)
+            // Everything here acts on an account, so with none there is nothing
+            // to show — not even a header over an empty block.
+            if (signedIn)
+              _Section(
+                section: SettingsSection.account,
+                children: [
                   _FieldGroup(
                     helper:
                         'Set or change your password on the web, where a '
@@ -432,21 +437,21 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       ),
                     ),
                   ),
-                _FieldGroup(
-                  helper:
-                      'Permanently delete your account and all associated data. '
-                      'This cannot be undone.',
-                  child: Align(
-                    alignment: AlignmentDirectional.centerStart,
-                    child: CarbonButton(
-                      label: 'Delete account',
-                      kind: CarbonButtonKind.dangerTertiary,
-                      onPressed: () => run('delete account', _deleteAccount),
+                  _FieldGroup(
+                    helper:
+                        'Permanently delete your account and all associated '
+                        'data. This cannot be undone.',
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: CarbonButton(
+                        label: 'Delete account',
+                        kind: CarbonButtonKind.dangerTertiary,
+                        onPressed: () => run('delete account', _deleteAccount),
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
           ];
           return ColoredBox(
             color: t.colors.background,

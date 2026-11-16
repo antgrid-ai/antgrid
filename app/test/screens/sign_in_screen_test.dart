@@ -1205,7 +1205,7 @@ void main() {
       await tester.tap(find.text('Password'));
       await tester.pump();
 
-      expect(find.text('Enter a valid email'), findsOneWidget);
+      expect(find.text('Enter your email'), findsOneWidget);
       expect(
         _passwordField,
         findsNothing,
@@ -1213,6 +1213,32 @@ void main() {
             'step 2 renders the address as settled text with no field to '
             'fix it, so arriving without one is a dead end',
       );
+    });
+
+    testWidgets('an empty address asks for one; a malformed one for a valid '
+        'one', (tester) async {
+      await _pumpScreen(tester);
+
+      await _continueWith(tester, '');
+      expect(find.text('Enter your email'), findsOneWidget);
+      expect(find.text('Enter a valid email'), findsNothing);
+
+      await _continueWith(tester, 'not-an-address');
+      expect(find.text('Enter a valid email'), findsOneWidget);
+      expect(find.text('Enter your email'), findsNothing);
+    });
+
+    testWidgets('the field error appears without moving the column', (
+      tester,
+    ) async {
+      await _pumpScreen(tester);
+      final logo = find.byType(SvgPicture).first;
+      final before = tester.getRect(logo);
+
+      await _continueWith(tester, 'not-an-address');
+      expect(find.text('Enter a valid email'), findsOneWidget);
+
+      expect(tester.getRect(logo), before);
     });
 
     testWidgets('a password accepted after the escape is remembered', (

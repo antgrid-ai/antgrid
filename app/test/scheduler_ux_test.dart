@@ -462,6 +462,43 @@ void main() {
     );
   });
 
+  test('a legacy zone alias formats like its canonical zone, not UTC', () {
+    // Windows reports India as Asia/Calcutta; drawn in UTC, 09:00 IST showed
+    // as 03:30 under an Asia/Calcutta caption.
+    final instant = DateTime.utc(2026, 11, 17, 3, 30);
+    final now = DateTime.utc(2026, 11, 16, 12);
+    expect(
+      schedulerWallCompact(instant, 'Asia/Calcutta', now),
+      schedulerWallCompact(instant, 'Asia/Kolkata', now),
+    );
+    expect(schedulerWallCompact(instant, 'Asia/Calcutta', now), 'Tue 09:00');
+    expect(schedulerClock(instant, 'Asia/Calcutta'), '09:00');
+    for (final (alias, canonical) in const [
+      ('Asia/Saigon', 'Asia/Ho_Chi_Minh'),
+      ('Asia/Katmandu', 'Asia/Kathmandu'),
+      ('Europe/Kiev', 'Europe/Kyiv'),
+      ('US/Eastern', 'America/New_York'),
+    ]) {
+      expect(
+        schedulerClock(instant, alias),
+        schedulerClock(instant, canonical),
+        reason: alias,
+      );
+    }
+    expect(
+      schedulerTime(instant, 'Asia/Calcutta'),
+      isNot(contains('unknown zone')),
+    );
+  });
+
+  test('a zone that cannot be resolved is captioned as UTC', () {
+    expect(schedulerShownZone('Asia/Calcutta'), 'Asia/Calcutta');
+    expect(schedulerShownZone('UTC'), 'UTC');
+    expect(schedulerShownZone('Moon/Base'), 'UTC');
+    final instant = DateTime.utc(2026, 11, 17, 3, 30);
+    expect(schedulerClock(instant, 'Moon/Base'), '03:30');
+  });
+
   schedulerTestWidgets(
     'a phone with no machine explains the scheduler without asking any host',
     (tester) async {
@@ -2069,6 +2106,99 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(ScheduleEditor), findsOneWidget);
   });
+
+  schedulerTestWidgets(
+    'the phone names its schedule groups and gives the zone a hint of its own',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(400, 850));
+      final host = Host()
+        ..schedules = [
+          settings,
+          {...settings, 'id': 'notes', 'name': 'Release notes', 'enabled': false},
+        ];
+      await pumpScreen(tester, containerFor(host));
+      expect(find.text('Active (1)'), findsOneWidget);
+      expect(find.text('Paused and finished (1)'), findsOneWidget);
+      final hint = find.text('Times in Asia/Kolkata');
+      expect(hint, findsOneWidget);
+      expect(
+        find.ancestor(of: hint, matching: find.byType(CarbonContainedList)),
+        findsNothing,
+      );
+    },
+  );
+
+  schedulerTestWidgets(
+    'the phone header gives the machine name the room the title does not use',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(400, 850));
+      await pumpScreen(tester, containerFor(Host()));
+      final title = tester.getRect(find.text('Scheduler'));
+      final selector = tester.getRect(find.byType(CarbonMachineSelector));
+      // Wider than the cap that used to cut the name to a few letters.
+      expect(selector.width, greaterThan(CarbonSpacing.spacing05 * 9));
+      expect(selector.width, greaterThan(title.width));
+      expect(selector.left, greaterThan(title.right));
+      expect(
+        selector.right,
+        lessThanOrEqualTo(tester.getRect(newScheduleIcon()).left),
+      );
+    },
+  );
+
+  for (final (schedules, subtitle) in [
+    (<Map<String, dynamic>>[], schedulerNoRunsNoSchedules),
+    ([settings], schedulerNoRunsTryRunNow),
+  ]) {
+    schedulerTestWidgets(
+      'an empty Runs tab with ${schedules.isEmpty ? 'no' : 'a'} schedule says how to get a run',
+      (tester) async {
+        sizeView(tester);
+        await pumpScreen(tester, containerFor(Host()..schedules = schedules));
+        await tester.tap(tab('Runs'));
+        await tester.pumpAndSettle();
+        expect(find.text(schedulerNoRunsYet), findsOneWidget);
+        expect(find.text(subtitle), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('scheduler-runs-filter-all')),
+          findsNothing,
+        );
+      },
+    );
+  }
+
+  schedulerTestWidgets(
+    'a phone run card says how long the run took and aligns its session link',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      sizeView(tester, const Size(400, 850));
+      final at = nowMs() - hour;
+      final host = Host()
+        ..runs = [
+          {
+            ...runRecord('done', 'completed', at: at, session: 'session'),
+            'trigger': 'cron',
+            'finishedAt': at + 88000,
+          },
+        ];
+      await pumpScreen(tester, containerFor(host));
+      await tester.tap(tab('Runs'));
+      await tester.pumpAndSettle();
+      final line = find.text('Scheduled · took 1m 28s');
+      expect(line, findsOneWidget);
+      final link = find.byKey(const ValueKey('scheduler-run-open-done'));
+      expect(link, findsOneWidget);
+      expect(
+        tester.getTopLeft(link).dx,
+        moreOrLessEquals(tester.getTopLeft(line).dx),
+      );
+    },
+  );
 
   schedulerTestWidgets('the machine menu switches the machine the screen shows', (
     tester,

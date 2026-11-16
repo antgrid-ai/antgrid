@@ -5,10 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/launcher/host_controller.dart'
+    show HostPhase, HostStatus;
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
+import 'package:antgrid/providers/host_status.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/new_session_start.dart';
 import 'package:antgrid/providers/project_work_status.dart';
@@ -55,6 +58,38 @@ RecentSessionRow _row(String id, String name) => RecentSessionRow(
 );
 
 void main() {
+  // This computer's sessions arrive only through its own bridge; a first launch
+  // with the bridge still coming up said "No recent sessions" over five.
+  for (final (phase, title, button) in [
+    (HostPhase.starting, 'Loading recent sessions…', null),
+    (HostPhase.restarting, 'Loading recent sessions…', null),
+    (HostPhase.failed, "Couldn't load this computer's sessions", 'Restart bridge'),
+  ]) {
+    testWidgets('an empty list with the bridge ${phase.name} does not claim '
+        'there are no sessions', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              recentSessionsProvider.overrideWithValue(const []),
+              hostStatusProvider.overrideWith(
+                (_) => Stream.value(HostStatus(phase)),
+              ),
+            ],
+            child: _wrap(const RecentSessionsTab()),
+          ),
+        );
+        await tester.pump();
+        expect(find.text(title), findsOneWidget);
+        expect(find.textContaining('No recent sessions'), findsNothing);
+        if (button != null) expect(find.text(button), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  }
+
   testWidgets('shows empty state when there are no recent sessions', (
     tester,
   ) async {

@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_search_field.dart';
+import '../navigation/nav_controller.dart';
+import '../navigation/nav_location.dart';
 import '../providers/session_search.dart';
 import 'session_search_results.dart';
 
@@ -143,6 +145,23 @@ class _SessionSearchFieldState extends ConsumerState<SessionSearchField> {
 
   @override
   Widget build(BuildContext context) {
+    // The barrier only catches clicks. A shortcut, a deep link or a
+    // notification moves the app under an open popup without one, and the
+    // popup would then sit over the new screen's header.
+    ref.listen<NavLocation?>(navControllerProvider.select((s) => s.current), (
+      prev,
+      next,
+    ) {
+      if (!_portal.isShowing) return;
+      // Not a move: the nav controller filling in the session a project switch
+      // resolved after the fact — which can land while the user is typing.
+      final filledSession =
+          prev != null &&
+          next != null &&
+          prev.sessionId == null &&
+          prev == next.copyWith(clearSessionId: true);
+      if (!filledSession) _dismiss();
+    });
     return OverlayPortal(
       controller: _portal,
       overlayChildBuilder: (overlayContext) {

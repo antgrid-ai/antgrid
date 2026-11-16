@@ -161,25 +161,31 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
       color: colors.textPrimary,
       fontWeight: FontWeight.w600,
     );
-    final crumbs = <Widget>[
-      for (final (i, part) in parts.indexed) ...[
-        if (i > 0)
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: CarbonSpacing.spacing01,
-            ),
-            child: CarbonIcon(
-              CarbonIcons.chevronRight,
-              size: CarbonSpacing.spacing04,
-              color: colors.iconSecondary,
-            ),
-          ),
-        Text(
-          i == parts.length - 1 ? part : _shortenFolder(part),
-          style: i == parts.length - 1 ? file : folder,
-        ),
-      ],
+    final labels = [
+      for (final (i, part) in parts.indexed)
+        i == parts.length - 1 ? part : _shortenFolder(part),
     ];
+    final separator = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: CarbonSpacing.spacing01),
+      child: CarbonIcon(
+        CarbonIcons.chevronRight,
+        size: CarbonSpacing.spacing04,
+        color: colors.iconSecondary,
+      ),
+    );
+    Widget crumbsFrom(int first) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Leading folders that do not fit are dropped behind an ellipsis
+        // crumb rather than clipped mid-glyph, so the row says something is
+        // hidden and never starts on a bare separator.
+        if (first > 0) ...[Text(_ellipsis, style: folder), separator],
+        for (var i = first; i < labels.length; i++) ...[
+          if (i > first) separator,
+          Text(labels[i], style: i == labels.length - 1 ? file : folder),
+        ],
+      ],
+    );
     return CarbonTooltip(
       message: 'Copy path',
       child: CarbonInteraction(
@@ -202,14 +208,83 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
             ),
           ),
         ),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          reverse: true,
-          child: Row(mainAxisSize: MainAxisSize.min, children: crumbs),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final first = _firstVisibleCrumb(
+              context,
+              labels,
+              folder: folder,
+              file: file,
+              maxWidth: constraints.maxWidth,
+            );
+            // Still a reversed scroller: a file name wider than the header on
+            // its own (or rounding at the boundary) slides off the left
+            // instead of overflowing, with the name's end kept in view.
+            return SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              child: crumbsFrom(first),
+            );
+          },
         ),
       ),
     );
   }
+}
+
+const _ellipsis = '…';
+
+/// The separator's footprint: its icon plus the padding either side.
+const double _separatorWidth =
+    CarbonSpacing.spacing04 + 2 * CarbonSpacing.spacing01;
+
+/// The index of the first crumb that can be shown in [maxWidth] once the
+/// folders before it are replaced by an ellipsis crumb. The file name is always
+/// kept, so the answer is at most the last index.
+int _firstVisibleCrumb(
+  BuildContext context,
+  List<String> labels, {
+  required TextStyle folder,
+  required TextStyle file,
+  required double maxWidth,
+}) {
+  if (labels.length < 2 || !maxWidth.isFinite) return 0;
+  final base = DefaultTextStyle.of(context).style;
+  final scaler = MediaQuery.textScalerOf(context);
+  final direction = Directionality.maybeOf(context) ?? TextDirection.ltr;
+  double measure(String text, TextStyle style) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: base.merge(style)),
+      textDirection: direction,
+      textScaler: scaler,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
+  final last = labels.length - 1;
+  final widths = [
+    for (var i = 0; i < labels.length; i++)
+      measure(labels[i], i == last ? file : folder),
+  ];
+  final whole =
+      widths.fold<double>(0, (sum, w) => sum + w) + last * _separatorWidth;
+  if (whole <= maxWidth) return 0;
+  final ellipsis = measure(_ellipsis, folder) + _separatorWidth;
+  var tail = widths[last];
+  var first = last;
+  // Walk left from the file name while the next folder still fits beside the
+  // ellipsis crumb. The first folder never gets here: the whole path fitting
+  // was answered above.
+  for (var i = last - 1; i >= 1; i--) {
+    final withFolder = tail + _separatorWidth + widths[i];
+    if (withFolder + ellipsis > maxWidth) break;
+    tail = withFolder;
+    first = i;
+  }
+  return first;
 }
 
 final _separator = RegExp(r'[\\/]');

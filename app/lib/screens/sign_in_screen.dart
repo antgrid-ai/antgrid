@@ -408,7 +408,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _continue() async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = _emailFieldMessage(email));
       return;
     }
     final store = ref.read(lastAuthMethodStoreProvider);
@@ -462,7 +462,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _sendLink() async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = _emailFieldMessage(email));
       return;
     }
     setState(() {
@@ -627,7 +627,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   /// is a dead end.
   void _useMyPassword() {
     if (!_looksLikeEmail(_emailController.text)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = _emailFieldMessage(_emailController.text));
       return;
     }
     _goToStep(_Step.password);
@@ -648,7 +648,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _submitPassword(Future<void> Function(String email) body) async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = _emailFieldMessage(email));
       return;
     }
     setState(() {
@@ -1014,6 +1014,21 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Widget _link(String label, VoidCallback? onTap) =>
       Center(child: CarbonLink(label: label, onPressed: onTap));
 
+  /// The room a field's one-line error takes under it, held while there is
+  /// none. The column is centred, so an error that arrived in fresh space
+  /// would lift everything above it — the logo included — by half its height.
+  /// Spacing and style mirror `CarbonFieldFrame`'s message line.
+  Widget _reservedFieldMessage(CarbonThemeData t) => Visibility(
+    visible: false,
+    maintainSize: true,
+    maintainAnimation: true,
+    maintainState: true,
+    child: Padding(
+      padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
+      child: Text(' ', style: t.typography.helper),
+    ),
+  );
+
   /// Step 1: an address and nothing else. No sign-in/sign-up fork, and no
   /// password field — that fork would make the user answer a question about
   /// their own account that only this device's memory can answer for them.
@@ -1033,7 +1048,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     final busy = _phase == _Phase.submitting;
     // The one error that belongs to the field; the rest (a browser that would
     // not open, a provider that bounced) are about the screen, not the address.
-    final fieldError = _error == _invalidEmailMessage ? _error : null;
+    final fieldError =
+        _error == _emptyEmailMessage || _error == _invalidEmailMessage
+        ? _error
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1059,6 +1077,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
           announceError: true,
           onSubmitted: (_) => busy ? null : _continue(),
         ),
+        if (fieldError == null) _reservedFieldMessage(t),
         ?_message(t, errorInField: fieldError != null),
         _gap(CarbonSpacing.spacing03),
         _primary(
@@ -1208,7 +1227,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
         ?_message(t, errorInField: true),
         _gap(),
         _primary(
-          busy ? 'Creating account...' : 'Create account',
+          busy ? 'Creating account…' : 'Create account',
           busy
               ? null
               : () => detached('SignInScreen', 'Create account', _signUp),
@@ -1263,6 +1282,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
           announceError: true,
           onSubmitted: (_) => busy ? null : _signInWithPassword(),
         ),
+        if (_error == null) _reservedFieldMessage(t),
         ?_message(t, errorInField: true),
         _gap(),
         _primary(
@@ -1434,9 +1454,13 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   }
 }
 
-/// The message [_SignInScreenState._continue] and its siblings raise for an
-/// address step 2 could not show; named so the field can claim it as its own.
+/// The messages [_SignInScreenState._continue] and its siblings raise for an
+/// address step 2 could not show; named so the field can claim them as its own.
+const _emptyEmailMessage = 'Enter your email';
 const _invalidEmailMessage = 'Enter a valid email';
+
+String _emailFieldMessage(String email) =>
+    email.trim().isEmpty ? _emptyEmailMessage : _invalidEmailMessage;
 
 class _OrDivider extends StatelessWidget {
   const _OrDivider();

@@ -577,13 +577,25 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     required VoidCallback? onNew,
   }) {
     final t = _t;
-    final title = Text(
-      'Scheduler',
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      // Never smaller than the section titles the tables below carry.
-      style: (t.isTouch ? t.typography.headingLarge : t.typography.title)
-          .copyWith(color: t.colors.textPrimary),
+    // The same page header as Memory and App settings (heading over a rule),
+    // so moving between top-level surfaces doesn't change the title's size.
+    final title = Semantics(
+      header: true,
+      child: Text(
+        'Scheduler',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: t.typography.heading.copyWith(color: t.colors.textPrimary),
+      ),
+    );
+    Widget rule(Widget child) => DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: CarbonSizes.lg),
+        child: child,
+      ),
     );
     final switcher = CarbonContentSwitcher<bool>(
       expand: !wide,
@@ -617,98 +629,128 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
           : () => detached('Scheduler', 'refresh failed', _refresh),
     );
     if (wide) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(
-          CarbonSpacing.spacing06,
-          CarbonSpacing.spacing05,
-          CarbonSpacing.spacing06,
-          CarbonSpacing.spacing04,
-        ),
-        // Two groups that share a line when they fit; in a narrow pane (an
-        // iPad beside the sidebar, large text) the actions wrap below the
-        // title instead of overflowing.
-        child: Wrap(
-          alignment: WrapAlignment.spaceBetween,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: CarbonSpacing.spacing04,
-          runSpacing: CarbonSpacing.spacing03,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              spacing: CarbonSpacing.spacing04,
-              children: [
-                // While editing, the screen title becomes the editor's way
-                // back, so the name appears once, above the schedule's own
-                // title.
-                if (_editing)
-                  CarbonBreadcrumb(
-                    items: [
-                      CarbonBreadcrumbItem(
-                        label: 'Scheduler',
-                        onPressed: () => setState(() => _editing = false),
-                      ),
+      return rule(
+        Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: CarbonSpacing.spacing05,
+            end: CarbonSpacing.spacing03,
+          ),
+          // Centred in the rule's minimum height like Memory's row; the full
+          // width is what lets spaceBetween push the actions to the end.
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SizedBox(
+              width: double.infinity,
+              // Two groups that share a line when they fit; in a narrow pane
+              // (an iPad beside the sidebar, large text) the actions wrap
+              // below the title instead of overflowing.
+              child: Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: CarbonSpacing.spacing04,
+                runSpacing: CarbonSpacing.spacing03,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: CarbonSpacing.spacing04,
+                    children: [
+                      // While editing, the screen title becomes the editor's
+                      // way back, so the name appears once, above the
+                      // schedule's own title.
+                      if (_editing)
+                        CarbonBreadcrumb(
+                          items: [
+                            CarbonBreadcrumbItem(
+                              label: 'Scheduler',
+                              onPressed: () =>
+                                  setState(() => _editing = false),
+                            ),
+                          ],
+                        )
+                      else
+                        title,
+                      if (!_editing) switcher,
                     ],
-                  )
-                else
-                  title,
-                if (!_editing) switcher,
-              ],
-            ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              spacing: CarbonSpacing.spacing04,
-              children: [
-                // A long machine name gives way before the actions do.
-                if (machineButton != null) Flexible(child: machineButton),
-                refresh,
-                if (!_editing)
-                  CarbonButton(
-                    label: 'New schedule',
-                    icon: const CarbonIcon(CarbonIcons.add),
-                    onPressed: onNew,
                   ),
-              ],
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: CarbonSpacing.spacing04,
+                    children: [
+                      // A long machine name gives way before the actions do.
+                      if (machineButton != null)
+                        Flexible(child: machineButton),
+                      refresh,
+                      if (!_editing)
+                        CarbonButton(
+                          label: 'New schedule',
+                          icon: const CarbonIcon(CarbonIcons.add),
+                          onPressed: onNew,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ],
+          ),
         ),
       );
     }
+    final lead = isMobilePlatform && widget.onOpenDrawer != null
+        ? CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.menu),
+            semanticLabel: 'Open drawer',
+            onPressed: widget.onOpenDrawer,
+          )
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            CarbonSpacing.spacing03,
-            CarbonSpacing.spacing03,
-            CarbonSpacing.spacing03,
-            CarbonSpacing.spacing02,
-          ),
-          child: Row(
-            spacing: CarbonSpacing.spacing02,
-            children: [
-              if (isMobilePlatform && widget.onOpenDrawer != null)
-                CarbonButton.iconOnly(
-                  icon: const CarbonIcon(CarbonIcons.menu),
-                  semanticLabel: 'Open drawer',
-                  onPressed: widget.onOpenDrawer,
-                )
-              else
-                const SizedBox(width: CarbonSpacing.spacing03),
-              Expanded(child: title),
-              if (machineButton != null) Flexible(child: machineButton),
-              CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.add),
-                semanticLabel: 'New schedule',
-                kind: CarbonButtonKind.primary,
-                onPressed: onNew,
+        rule(
+          Padding(
+            padding: EdgeInsetsDirectional.only(
+              start: lead != null
+                  ? CarbonSpacing.spacing03
+                  : CarbonSpacing.spacing05,
+              end: CarbonSpacing.spacing03,
+            ),
+            // The title keeps its natural width so the machine name gets the
+            // rest; an even split with the title cut the name to a few
+            // letters. The half-row cap only bites at very large text.
+            child: LayoutBuilder(
+              builder: (context, constraints) => Row(
+                children: [
+                  if (lead != null) ...[
+                    lead,
+                    const SizedBox(width: CarbonSpacing.spacing02),
+                  ],
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: constraints.maxWidth / 2,
+                    ),
+                    child: title,
+                  ),
+                  const SizedBox(width: CarbonSpacing.spacing03),
+                  Expanded(
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: machineButton,
+                    ),
+                  ),
+                  CarbonButton.iconOnly(
+                    icon: const CarbonIcon(CarbonIcons.add),
+                    semanticLabel: 'New schedule',
+                    kind: CarbonButtonKind.primary,
+                    onPressed: onNew,
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(
             CarbonSpacing.spacing05,
-            CarbonSpacing.spacing02,
+            CarbonSpacing.spacing04,
             CarbonSpacing.spacing05,
             CarbonSpacing.spacing04,
           ),
@@ -741,9 +783,10 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
       );
     }
     final now = DateTime.now();
-    final viewerZone =
-        ref.read(schedulerLocalTimezoneProvider).value ??
-        snapshot.capabilities.timezone;
+    final viewerZone = schedulerShownZone(
+      ref.read(schedulerLocalTimezoneProvider).value ??
+          snapshot.capabilities.timezone,
+    );
     bool resting(AgentSchedule s) =>
         !s.enabled ||
         (s.isOneOff &&
@@ -795,7 +838,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
     final padding = wide
         ? const EdgeInsets.fromLTRB(
             CarbonSpacing.spacing06,
-            CarbonSpacing.spacing02,
+            CarbonSpacing.spacing05,
             CarbonSpacing.spacing06,
             CarbonSpacing.spacing06,
           )
@@ -840,7 +883,9 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
               for (final item in attention)
                 _attentionCard(item.schedule, item.run, now),
             ],
-            if (!stripShown && listed.isEmpty)
+            // A hint, not a group name: the phone list is named for its rows
+            // like the paused group below it.
+            if (!stripShown && (!wide || listed.isEmpty))
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: CarbonSpacing.spacing02,
@@ -850,7 +895,7 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             if (listed.isNotEmpty)
               wide
                   ? table(listed, description: stripShown ? null : zoneLabel)
-                  : list(listed, zoneLabel),
+                  : list(listed, 'Active (${listed.length})'),
             if (rest.isNotEmpty)
               wide ? table(rest, title: restLabel) : list(rest, restLabel),
             for (final entry in deletedDrafts)
@@ -1455,13 +1500,22 @@ class _SchedulerScreenState extends ConsumerState<SchedulerScreen>
             (_runScheduleId == null || run.scheduleId == _runScheduleId)) {
       runs.insert(0, run);
     }
+    if (runs.isEmpty && _runScheduleId == null) {
+      return _emptyState(
+        title: schedulerNoRunsYet,
+        subtitle: snapshot.schedules.isEmpty
+            ? schedulerNoRunsNoSchedules
+            : schedulerNoRunsTryRunNow,
+      );
+    }
     return SchedulerRunsView(
       runs: runs,
       schedules: snapshot.schedules,
       projects: snapshot.projects,
-      viewerZone:
-          ref.read(schedulerLocalTimezoneProvider).value ??
-          snapshot.capabilities.timezone,
+      viewerZone: schedulerShownZone(
+        ref.read(schedulerLocalTimezoneProvider).value ??
+            snapshot.capabilities.timezone,
+      ),
       now: DateTime.now(),
       compact: !wide,
       enabled: _writable,

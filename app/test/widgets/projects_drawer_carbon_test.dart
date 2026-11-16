@@ -369,6 +369,29 @@ void main() {
     });
   });
 
+  // A phone-width row read "demo-shop (sa…": the + and Memory actions took the
+  // width, and the ellipsis cut exactly the part saying what the project is.
+  testWidgets('the sample project row carries its marker as a tag', (
+    tester,
+  ) async {
+    await _onPlatform(TargetPlatform.android, () async {
+      final container = await demoContainer();
+      container.read(demoModeProvider.notifier).set(true);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('demo-shop'), findsOneWidget);
+      expect(find.text('demo-shop (sample)'), findsNothing);
+      expect(find.byKey(const Key('drawer-sample-tag')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
   testWidgets('Scheduler closes the phone drawer it was opened from', (
     tester,
   ) async {

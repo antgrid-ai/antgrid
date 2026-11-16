@@ -297,6 +297,43 @@ void main() {
     expect(c.read(pendingWorkspaceViewProvider)?.value, WorkspaceView.git);
   });
 
+  // A link to a session landed on whatever page that session was last left on
+  // — Git, for a tester who had just been there — where a notification route
+  // of the same shape opens the conversation.
+  test('a session link naming no tab asks for the agent page', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.applyDeepLink(_loc('a', session: 's'));
+    expect(c.read(pendingAgentPageProvider), (
+      target: const LocalProject('a'),
+      value: true,
+    ));
+    expect(c.read(pendingWorkspaceViewProvider), isNull);
+  });
+
+  test('a session link naming a tab does not ask for the agent page', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.applyDeepLink(_loc('a', session: 's', view: WorkspaceView.git));
+    expect(c.read(pendingAgentPageProvider), isNull);
+    expect(c.read(pendingWorkspaceViewProvider)?.value, WorkspaceView.git);
+  });
+
+  // No queued session holds the drain back for a project-only link, so a stamp
+  // would be spent before the bootstrap's default pick restores its layout.
+  test('a project link names no agent page', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.applyDeepLink(_loc('a'));
+    expect(c.read(pendingAgentPageProvider), isNull);
+  });
+
+  // back() means "as I left it", which is the session's own restored page.
+  test('back to a session entry does not ask for the agent page', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.commit(_loc('a', session: 's'));
+    nav.commit(_loc('b'));
+    nav.back();
+    expect(c.read(pendingAgentPageProvider), isNull);
+  });
+
   test('back restores the file recorded with the entry', () {
     final nav = c.read(navControllerProvider.notifier);
     nav.commit(
@@ -344,5 +381,116 @@ void main() {
     nav.back();
     expect(c.read(navControllerProvider).current, _loc('a', session: 's1'));
     expect(c.read(navControllerProvider).canBack, isFalse);
+  });
+
+  // With nothing recorded at launch, the first navigation had nothing to go
+  // back to and the title bar's Back stayed dark until the second one.
+  test('the first navigation after the landing can go back to it', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.recordLanding();
+    // Nothing focused: the shell shows New session over the `workspace`
+    // default, so that is the place recorded.
+    expect(
+      c.read(navControllerProvider).current,
+      const NavLocation(surface: WorkbenchSurface.newSession),
+    );
+
+    c
+        .read(workbenchSurfaceProvider.notifier)
+        .set(WorkbenchSurface.scheduler);
+    nav.commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+    expect(c.read(navControllerProvider).canBack, isTrue);
+
+    nav.back();
+    expect(c.read(workbenchSurfaceProvider), WorkbenchSurface.newSession);
+    expect(c.read(navControllerProvider).canForward, isTrue);
+  });
+
+  test('recordLanding leaves an already-recorded location alone', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.applyDeepLink(_loc('deep'));
+    nav.recordLanding();
+    final s = c.read(navControllerProvider);
+    expect(s.current, _loc('deep'));
+    expect(s.past, isEmpty);
+  });
+
+  test('the landing names the focused project when there is one', () {
+    c.read(selectedTargetProvider.notifier).set(const LocalProject('a'));
+    c.read(navControllerProvider.notifier).recordLanding();
+    expect(c.read(navControllerProvider).current, _loc('a'));
+  });
+
+  // Closing settings returned to a fixed screen, not to Memory or the
+  // Scheduler it had been opened over.
+  test('closing App settings returns to the surface it was opened over', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.commit(_loc('a'));
+    c.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.memory);
+    nav.commit(
+      const NavLocation(
+        target: LocalProject('a'),
+        surface: WorkbenchSurface.memory,
+      ),
+    );
+    c.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.appSettings);
+    nav.commit(
+      const NavLocation(
+        target: LocalProject('a'),
+        surface: WorkbenchSurface.appSettings,
+      ),
+    );
+
+    closeAppSettings(c);
+
+    expect(c.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    final s = c.read(navControllerProvider);
+    expect(s.current?.surface, WorkbenchSurface.memory);
+    expect(s.past, [_loc('a')]);
+    // Forward reopens what was closed, as after any back().
+    expect(s.future.single.surface, WorkbenchSurface.appSettings);
+  });
+
+  // Two settings entries in a row (a second link naming another section) must
+  // not turn close into a step that lands on settings again.
+  test('closing App settings skips every settings entry at once', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.commit(const NavLocation(surface: WorkbenchSurface.scheduler));
+    nav.commit(
+      const NavLocation(
+        surface: WorkbenchSurface.appSettings,
+        settingsSection: SettingsSection.account,
+      ),
+    );
+    nav.commit(
+      const NavLocation(
+        surface: WorkbenchSurface.appSettings,
+        settingsSection: SettingsSection.privacy,
+      ),
+    );
+    c.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.appSettings);
+
+    closeAppSettings(c);
+
+    expect(c.read(workbenchSurfaceProvider), WorkbenchSurface.scheduler);
+    final s = c.read(navControllerProvider);
+    expect(s.past, isEmpty);
+    expect(s.future.length, 2);
+  });
+
+  // Settings as the very first entry (a cold-start link) has nothing behind it.
+  test('closing App settings with no history falls back to the canvas', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.applyDeepLink(
+      const NavLocation(surface: WorkbenchSurface.appSettings),
+    );
+
+    closeAppSettings(c);
+
+    expect(
+      c.read(navControllerProvider).current,
+      const NavLocation(surface: WorkbenchSurface.newSession),
+    );
+    expect(c.read(navControllerProvider).canBack, isTrue);
   });
 }

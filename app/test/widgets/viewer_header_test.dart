@@ -144,7 +144,7 @@ void main() {
     await _pump(
       tester,
       const SizedBox(
-        width: 400,
+        width: 600,
         child: ViewerPathBreadcrumb(path: 'docs/protocol/peer-session.md'),
       ),
     );
@@ -173,7 +173,7 @@ void main() {
       await _pump(
         tester,
         const SizedBox(
-          width: 400,
+          width: 600,
           child: ViewerPathBreadcrumb(path: 'docs/protocol/peer-session.md'),
         ),
       );
@@ -260,6 +260,36 @@ void main() {
     final name = tester.getRect(find.text('session.dart'));
     expect(name.right, lessThanOrEqualTo(box.right + 0.5));
     expect(name.left, greaterThanOrEqualTo(box.left));
+
+    // The folders that did not fit are dropped behind a leading ellipsis
+    // crumb, so the row shows something is hidden instead of starting on a
+    // clipped separator.
+    expect(find.text('…'), findsOneWidget);
+    expect(find.text('packages'), findsNothing);
+    final ellipsis = tester.getRect(find.text('…'));
+    expect(ellipsis.left, greaterThanOrEqualTo(box.left));
+    expect(ellipsis.left, lessThan(name.left));
+  });
+
+  testWidgets('a path that fits shows every folder and no ellipsis', (
+    tester,
+  ) async {
+    // The default 800px test window would squeeze the 2000px box below.
+    tester.view.physicalSize = const Size(2400, 600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await _pump(
+      tester,
+      const SizedBox(
+        width: 2000,
+        child: ViewerPathBreadcrumb(
+          path: 'packages/antgrid_relay_client/lib/src/peer/session.dart',
+        ),
+      ),
+    );
+    expect(find.text('…'), findsNothing);
+    expect(find.text('packages'), findsOneWidget);
+    expect(find.text('session.dart'), findsOneWidget);
   });
 
   testWidgets('an embedding host drops the path, download and close', (tester) async {

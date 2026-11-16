@@ -14,7 +14,7 @@ void main() {
       await tester.pumpWidget(_host());
 
       expect(find.byType(CarbonEmptyState), findsOneWidget);
-      expect(find.text('Open a Preview'), findsOneWidget);
+      expect(find.text('Open a preview'), findsOneWidget);
     });
 
     testWidgets('renders subtitle text', (tester) async {

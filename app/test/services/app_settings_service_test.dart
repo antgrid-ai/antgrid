@@ -362,4 +362,59 @@ void main() {
       expect(service.state.hideGitIgnoredFiles, isFalse);
     });
   });
+
+  group('resetAppearance', () {
+    const seed = <String, Object>{
+      'app.theme.preset': 'custom',
+      'app.theme.custom.bg': 0xFF202020,
+      'app.theme.custom.primary': 0xFF303030,
+      'app.theme.custom.accent': 0xFF404040,
+      'antgrid.follow_system_brightness.v1': false,
+      'app.telemetry.enabled': false,
+      'app.defaultRelayUrl': 'wss://relay.example.com',
+      'antgrid.ui_scale.v1': 1.3,
+      'antgrid.terminal_zoom.v1': 2.0,
+      'antgrid.reduce_motion.v1': true,
+      'app.terminal.programCopies': false,
+      'antgrid.sidebar_hidden.v1': true,
+      'antgrid.hide_git_ignored_files.v1': true,
+    };
+
+    test('restores the preset, custom colours and follow-system', () async {
+      final service = await makeService(seed: seed);
+
+      await service.resetAppearance();
+
+      for (final s in [
+        service.state,
+        AppSettings.fromPrefs(await openAppSettingsPrefs()),
+      ]) {
+        expect(s.preset, AppSettings.defaults.preset);
+        expect(s.customBg, isNull);
+        expect(s.customPrimary, isNull);
+        expect(s.customAccent, isNull);
+        expect(s.followSystemBrightness, isTrue);
+      }
+    });
+
+    test('leaves the analytics opt-out and every other setting alone', () async {
+      final service = await makeService(seed: seed);
+
+      await service.resetAppearance();
+
+      for (final s in [
+        service.state,
+        AppSettings.fromPrefs(await openAppSettingsPrefs()),
+      ]) {
+        expect(s.telemetryEnabled, isFalse);
+        expect(s.defaultRelayUrl, 'wss://relay.example.com');
+        expect(s.uiScale, 1.3);
+        expect(s.terminalZoom, 2.0);
+        expect(s.reduceMotion, isTrue);
+        expect(s.terminalProgramCopies, isFalse);
+        expect(s.sidebarHidden, isTrue);
+        expect(s.hideGitIgnoredFiles, isTrue);
+      }
+    });
+  });
 }

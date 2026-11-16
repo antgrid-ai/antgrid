@@ -70,7 +70,7 @@ void main() {
         CheckoutAttachStatus.attaching,
       );
 
-      expect(find.text('attaching terminals…'), findsOneWidget);
+      expect(find.text('Attaching terminals…'), findsOneWidget);
       expect(find.text('No terminals running'), findsNothing);
     });
 
@@ -87,7 +87,7 @@ void main() {
       expect(find.text('Retry'), findsOneWidget);
       // Opening a shell works whether or not the re-ask lands, so the failure
       // state keeps it beside Retry.
-      expect(find.text('New Terminal'), findsOneWidget);
+      expect(find.text('New terminal'), findsOneWidget);
       expect(find.text('No terminals running'), findsNothing);
 
       // The pane renders off the stubbed provider above, so the tap is
@@ -106,8 +106,8 @@ void main() {
       await _pumpEmptyList(tester, CheckoutAttachStatus.ready);
 
       expect(find.text('No terminals running'), findsOneWidget);
-      expect(find.text('New Terminal'), findsOneWidget);
-      expect(find.text('attaching terminals…'), findsNothing);
+      expect(find.text('New terminal'), findsOneWidget);
+      expect(find.text('Attaching terminals…'), findsNothing);
       expect(find.text("Couldn't load terminals"), findsNothing);
     });
 
@@ -123,7 +123,7 @@ void main() {
       );
 
       expect(find.text('No terminals running'), findsOneWidget);
-      expect(find.text('attaching terminals…'), findsNothing);
+      expect(find.text('Attaching terminals…'), findsNothing);
       expect(find.text("Couldn't load terminals"), findsNothing);
     });
   });

@@ -2174,7 +2174,7 @@ class FileService {
   }
 
   /// History tab: fold every expanded commit's file list shut without
-  /// dropping the cached files — the same "Collapse All" the Changes tab's
+  /// dropping the cached files — the same "Collapse all" the Changes tab's
   /// folder toggle offers, applied to expanded commits instead of folders.
   void collapseAllHistory() {
     final history = _state.git.history;

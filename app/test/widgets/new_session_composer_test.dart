@@ -1804,7 +1804,7 @@ void main() {
       await settle(tester);
 
       expect(container.read(newSessionStartCancelRequestedProvider), isTrue);
-      expect(statusText(tester), 'Cancelling...');
+      expect(statusText(tester), 'Cancelling…');
 
       // Past `creating` the bridge already holds a session, so abandoning the
       // start would orphan it: the affordance goes away rather than lying.
@@ -1852,14 +1852,14 @@ void main() {
       await settle(tester);
 
       expect(find.byKey(const Key('new-session-status-line')), findsOneWidget);
-      expect(statusText(tester), 'Switching to dev...');
+      expect(statusText(tester), 'Switching to dev…');
 
       const expected = {
-        NewSessionStartPhase.activating: 'Waking mac-studio...',
-        NewSessionStartPhase.connecting: 'Starting project...',
-        NewSessionStartPhase.preparing: 'Preparing workspace...',
-        NewSessionStartPhase.creating: 'Creating session...',
-        NewSessionStartPhase.launching: 'Launching Claude Code...',
+        NewSessionStartPhase.activating: 'Waking mac-studio…',
+        NewSessionStartPhase.connecting: 'Starting project…',
+        NewSessionStartPhase.preparing: 'Preparing workspace…',
+        NewSessionStartPhase.creating: 'Creating session…',
+        NewSessionStartPhase.launching: 'Launching Claude Code…',
       };
       for (final entry in expected.entries) {
         advance(container, entry.key);
@@ -1886,7 +1886,7 @@ void main() {
       await settle(tester);
 
       expect(find.byKey(const Key('new-session-status-line')), findsOneWidget);
-      expect(statusText(tester), 'Starting project...');
+      expect(statusText(tester), 'Starting project…');
       expect(stopButton(), findsOneWidget);
     });
 
@@ -2045,7 +2045,7 @@ void main() {
       expect(identical(before, after), isFalse);
 
       expect(stopButton(), findsOneWidget);
-      expect(statusText(tester), 'Waking mac-studio...');
+      expect(statusText(tester), 'Waking mac-studio…');
       expect(
         tester
             .widget<CarbonTextInput>(

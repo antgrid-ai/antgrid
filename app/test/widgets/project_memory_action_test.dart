@@ -10,7 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/connection/supervisor_state.dart';
 import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
+import 'package:antgrid/demo/demo_identity.dart'
+    show kDemoBaseName, kDemoProjectId;
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/memory.dart';
@@ -22,7 +23,6 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/account_machines.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/demo_mode.dart';
-import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/host_status.dart';
 import 'package:antgrid/providers/memory.dart';
 import 'package:antgrid/providers/supervisor_status.dart';
@@ -256,7 +256,8 @@ void main() {
     expect(find.text('Memory'), findsOneWidget);
     container.read(demoModeProvider.notifier).set(true);
     await tester.pumpAndSettle();
-    final sample = demoDrawerEntries().single.displayName;
+    // The row paints the name without its "(sample)" suffix, which is a tag.
+    const sample = kDemoBaseName;
     expect(find.text(sample), findsOneWidget);
     await hoverRow(tester, find.text(sample));
     expect(button('New session'), findsOneWidget);

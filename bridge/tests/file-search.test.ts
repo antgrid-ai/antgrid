@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { FileSearcher, buildRipgrepArgs } from "../src/file-search";
+import { FileSearcher, SearchOutputParser, buildRipgrepArgs, type SearchMatchData } from "../src/file-search";
 import type { AbMessage } from "../src/protocol";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -239,5 +239,123 @@ describe("FileSearcher outside a git repository", () => {
     await run("(", true);
     const done = messages.find((m) => m.type === "file:search-done");
     expect(done?.type === "file:search-done" && done.error).toBeTruthy();
+  });
+});
+
+describe("SearchOutputParser", () => {
+  const collect = (engine: "ripgrep" | "git-grep", chunks: string[]) => {
+    const out: SearchMatchData[] = [];
+    const parser = new SearchOutputParser(engine, "/root", (m) => out.push(m));
+    for (const c of chunks) parser.push(c);
+    parser.end();
+    return out;
+  };
+
+  // Git for Windows checks out CRLF by default, and git grep prints the file's
+  // `\r` on every line. The regexes cannot match across it, so every match on
+  // such a checkout used to be dropped without a word.
+  test("git-grep: CRLF-terminated lines still parse, without the \r in the content", () => {
+    const out = collect("git-grep", [
+      "a.dart-1-before\r\na.dart:2:3:CarbonButton x\r\na.dart-3-after\r\n--\r\nb.dart:9:1:CarbonButton\r\n",
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual({
+      path: "a.dart",
+      line: 2,
+      column: 3,
+      lineContent: "CarbonButton x",
+      contextBefore: ["before"],
+      contextAfter: ["after"],
+    });
+    expect(out[1]!.path).toBe("b.dart");
+    expect(out[1]!.lineContent).toBe("CarbonButton");
+  });
+
+  test("git-grep: a chunk boundary between \r and \n loses nothing", () => {
+    const out = collect("git-grep", ["a.dart:2:3:hit\r", "\nb.dart:4:1:hit\r", "\n"]);
+    expect(out.map((m) => [m.path, m.lineContent])).toEqual([
+      ["a.dart", "hit"],
+      ["b.dart", "hit"],
+    ]);
+  });
+
+  test("git-grep: a final line with no terminator is still parsed", () => {
+    expect(collect("git-grep", ["a.dart:1:1:last\r"]).map((m) => m.lineContent)).toEqual(["last"]);
+  });
+
+  test("ripgrep: CRLF line text arrives without its \r", () => {
+    const line = (o: unknown) => JSON.stringify(o) + "\n";
+    const out = collect("ripgrep", [
+      line({ type: "begin", data: { path: { text: "./a.dart" } } }),
+      line({ type: "context", data: { lines: { text: "before\r\n" } } }),
+      line({
+        type: "match",
+        data: { path: { text: "./a.dart" }, line_number: 2, lines: { text: "hit\r\n" }, submatches: [{ start: 0 }] },
+      }),
+      line({ type: "context", data: { lines: { text: "after\r\n" } } }),
+      line({ type: "end", data: {} }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      path: "a.dart",
+      line: 2,
+      column: 1,
+      lineContent: "hit",
+      contextBefore: ["before"],
+      contextAfter: ["after"],
+    });
+  });
+});
+
+describe("FileSearcher end to end", () => {
+  const dir = join(tmpdir(), "antgrid-search-e2e-" + Date.now());
+  let messages: AbMessage[];
+
+  beforeEach(() => {
+    messages = [];
+    mkdirSync(dir, { recursive: true });
+    execSync("git init", { cwd: dir, stdio: "ignore" });
+    writeFileSync(join(dir, "crlf.dart"), "one\r\nCarbonButton here\r\nthree\r\n");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const opts = (requestId: string) => ({
+    projectId: "p",
+    query: "CarbonButton",
+    caseSensitive: false,
+    regex: false,
+    wholeWord: false,
+    requestId,
+  });
+
+  test("finds a match in a CRLF file", async () => {
+    await new FileSearcher(dir, "p", (m) => messages.push(m)).search(opts("r-crlf"));
+    const matches = messages.flatMap((m) => (m.type === "file:search-result" ? m.matches : []));
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.path).toBe("crlf.dart");
+    expect(matches[0]!.lineContent).toBe("CarbonButton here");
+    expect(matches[0]!.contextBefore).toEqual(["one"]);
+    expect(matches[0]!.contextAfter).toEqual(["three"]);
+  });
+
+  test("a timed-out search reports a failure, not zero results", async () => {
+    // A zero timeout fires long before any engine can spawn and answer.
+    await new FileSearcher(dir, "p", (m) => messages.push(m), [], { timeoutMs: 0 }).search(opts("r-timeout"));
+    const done = messages.find((m) => m.type === "file:search-done");
+    expect(done?.type === "file:search-done" && done.error).toMatch(/timed out/);
+  });
+
+  test("a superseded search is answered as cancelled, and the newer one completes", async () => {
+    const searcher = new FileSearcher(dir, "p", (m) => messages.push(m));
+    const first = searcher.search(opts("r-old"));
+    const second = searcher.search(opts("r-new"));
+    await Promise.all([first, second]);
+    const doneFor = (id: string) =>
+      messages.find((m) => m.type === "file:search-done" && m.requestId === id);
+    const old = doneFor("r-old");
+    expect(old?.type === "file:search-done" && old.error).toBe("Search cancelled");
+    const fresh = doneFor("r-new");
+    expect(fresh?.type === "file:search-done" && fresh.totalMatches).toBe(1);
+    expect(fresh?.type === "file:search-done" && fresh.error).toBeUndefined();
   });
 });

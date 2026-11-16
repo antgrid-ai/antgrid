@@ -32,7 +32,7 @@ class _ServicesListViewState extends ConsumerState<ServicesListView> {
   Widget build(BuildContext context) {
     final terminalService = serviceWhenReady(ref, terminalServiceProvider);
     if (terminalService == null) {
-      return const AbLoading(message: 'loading services...');
+      return const AbLoading(message: 'Loading services…');
     }
     final focusedId = ref.watch(selectedRegistrationIdProvider);
     final services = focusedId == null

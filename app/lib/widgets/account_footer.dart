@@ -24,9 +24,9 @@ import 'sign_out_action.dart';
 
 /// Drawer-footer account affordance.
 ///
-/// Three render states:
-///   - Loading or not signed in → "Sign in" CTA.
-///   - `currentUserProvider` returns a user, email, tier tag, and account menu.
+/// Two render states, both opening the account menu:
+///   - Loading or not signed in → "Not signed in"; the menu carries Sign in.
+///   - `currentUserProvider` returns a user → email and tier tag.
 class AccountFooter extends ConsumerStatefulWidget {
   const AccountFooter({super.key});
 
@@ -84,62 +84,71 @@ class _AccountFooterState extends ConsumerState<AccountFooter> {
     // trailing gap must go with it.
     final showTier = user != null && !user.promotional;
 
-    return CarbonMenu(
-      controller: _menu,
-      preferAbove: true,
-      minWidth: _menuWidth,
-      maxWidth: _menuWidth,
-      restoreFocus: _menuFocus,
-      entries: [
-        CarbonMenuItem(label: 'App settings…', onPressed: _openSettings),
-        helpMenu(
-          context: context,
-          ref: ref,
-          shareOrigin: _shareOrigin,
-          returnFocus: _menuFocus,
-        ),
-        if (showUpgrade)
-          CarbonMenuItem(label: 'Upgrade to Pro…', onPressed: _openUpgrade),
-        if (user != null)
-          CarbonMenuItem(label: 'Sign out', onPressed: _logOut),
-        if (user == null)
-          CarbonMenuItem(label: 'Sign in', onPressed: _openSignIn),
-      ],
-      child: DrawerChromeRow(
-        focusNode: _menuFocus,
-        icon: user != null ? CarbonIcons.user : CarbonIcons.login,
-        label: user != null ? user.email : 'Sign in',
-        semanticLabel: user != null && showTier
-            ? '${user.email}, ${tierLabel(user)}'
-            : null,
-        expanded: _menu.isOpen,
-        onPressed: _toggleMenu,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (showTier) ...[
-              const SizedBox(width: CarbonSpacing.spacing03),
-              AuthStatusPill(user),
-            ],
-            SizedBox.square(
-              dimension: drawerRailCell(t),
-              child: Center(
-                child: CarbonIcon(
-                  CarbonIcons.chevronUp,
-                  color: t.colors.iconSecondary,
-                ),
-              ),
+    // The row's own width, so the menu's edges line up with the panel it rises
+    // from; an unbounded row falls back to the panel's width.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final menuWidth = constraints.hasBoundedWidth
+            ? constraints.maxWidth
+            : kDrawerPanelWidth;
+        return CarbonMenu(
+          controller: _menu,
+          preferAbove: true,
+          minWidth: menuWidth,
+          maxWidth: menuWidth,
+          restoreFocus: _menuFocus,
+          entries: [
+            CarbonMenuItem(label: 'App settings…', onPressed: _openSettings),
+            helpMenu(
+              context: context,
+              ref: ref,
+              shareOrigin: _shareOrigin,
+              returnFocus: _menuFocus,
             ),
+            if (showUpgrade)
+              CarbonMenuItem(
+                label: 'Upgrade to Pro…',
+                onPressed: _openUpgrade,
+              ),
+            if (user != null)
+              CarbonMenuItem(label: 'Sign out', onPressed: _logOut),
+            if (user == null)
+              CarbonMenuItem(label: 'Sign in', onPressed: _openSignIn),
           ],
-        ),
-      ),
+          child: DrawerChromeRow(
+            focusNode: _menuFocus,
+            icon: CarbonIcons.user,
+            // Names the state, as the email does once signed in. Not "Sign
+            // in": the row opens a menu, and its own Sign in would repeat it.
+            label: user != null ? user.email : 'Not signed in',
+            semanticLabel: user != null && showTier
+                ? '${user.email}, ${tierLabel(user)}'
+                : null,
+            expanded: _menu.isOpen,
+            onPressed: _toggleMenu,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (showTier) ...[
+                  const SizedBox(width: CarbonSpacing.spacing03),
+                  AuthStatusPill(user),
+                ],
+                SizedBox.square(
+                  dimension: drawerRailCell(t),
+                  child: Center(
+                    child: CarbonIcon(
+                      CarbonIcons.chevronUp,
+                      color: t.colors.iconSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
-
-  // The drawer's width less a gutter on each side, so the menu reads as part
-  // of the panel it rises from.
-  static const double _menuWidth =
-      kDrawerPanelWidth - 2 * CarbonSpacing.spacing03;
 
   void _openSignIn() {
     if (!mounted) return;

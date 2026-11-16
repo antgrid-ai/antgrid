@@ -87,7 +87,7 @@ void main() {
       );
 
       expect(find.byType(CarbonLoading), findsOneWidget);
-      expect(find.text('loading files...'), findsOneWidget);
+      expect(find.text('Loading files…'), findsOneWidget);
     });
 
     testWidgets('shows tree view when tree data is available', (tester) async {
@@ -149,7 +149,7 @@ void main() {
 
         expect(tester.takeException(), isNull);
         expect(find.byType(CarbonLoading), findsOneWidget);
-        expect(find.text('loading files...'), findsOneWidget);
+        expect(find.text('Loading files…'), findsOneWidget);
       },
     );
 
@@ -273,6 +273,15 @@ void main() {
       await tester.pump();
 
       expect(_button('Back to file tree'), findsOneWidget);
+      // The title beside the arrow is part of the same target, not a label
+      // next to it that ignores clicks.
+      expect(
+        find.descendant(
+          of: _button('Back to file tree'),
+          matching: find.text('File Explorer'),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('wide (800dp): no back button is present', (tester) async {
@@ -476,6 +485,85 @@ void main() {
         find.textContaining('file listing timed out'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('a failed listing offers Retry, which asks again', (
+      tester,
+    ) async {
+      final (t, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      final first = await typeFilter(tester, t, 'pubspec');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': first['requestId'],
+        'entries': const [],
+        'truncated': true,
+        'engine': 'none',
+        'error': 'file listing timed out',
+      });
+      await tester.pumpAndSettle();
+      final finds = t.sent.where((m) => m['type'] == 'file:find').length;
+
+      await tester.tap(find.widgetWithText(CarbonButton, 'Retry'));
+      await tester.pump(FileService.findDebounce + const Duration(milliseconds: 20));
+      final retried = t.sent.lastWhere((m) => m['type'] == 'file:find');
+      expect(t.sent.where((m) => m['type'] == 'file:find').length, finds + 1);
+      expect(retried['query'], 'pubspec');
+      expect(find.text('Searching…'), findsOneWidget);
+
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': retried['requestId'],
+        'entries': [
+          {'path': 'app/pubspec.yaml', 'isDir': false},
+        ],
+        'truncated': false,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('app/pubspec.yaml'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
+    });
+
+    testWidgets('a truncated answer says so above its rows; a whole one does not', (
+      tester,
+    ) async {
+      final (t, widget) = await buildFilterWidget();
+      await tester.pumpWidget(widget);
+      await tester.pump();
+
+      var sent = await typeFilter(tester, t, 'pubspec');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'app/pubspec.yaml', 'isDir': false},
+        ],
+        'truncated': true,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('app/pubspec.yaml'), findsOneWidget);
+      expect(find.textContaining('Results truncated'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.textContaining('Results truncated')).dy,
+        lessThan(tester.getTopLeft(find.text('app/pubspec.yaml')).dy),
+      );
+
+      sent = await typeFilter(tester, t, 'pubspec.y');
+      t.emit('file:find-result', {
+        'projectId': 'test',
+        'requestId': sent['requestId'],
+        'entries': [
+          {'path': 'app/pubspec.yaml', 'isDir': false},
+        ],
+        'truncated': false,
+        'engine': 'git-ls-files',
+      });
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Results truncated'), findsNothing);
     });
 
     testWidgets('a directory row reveals it in the tree and clears the filter', (

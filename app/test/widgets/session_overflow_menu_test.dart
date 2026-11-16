@@ -179,7 +179,7 @@ void main() {
       await _openKebab(tester);
 
       final labels = [
-        'Switch to Terminal',
+        'Switch to terminal',
         'Arm Handler',
         'Answer another session',
         'Attach file',
@@ -305,11 +305,11 @@ void main() {
       );
       await _openKebab(tester);
 
-      expect(find.text('Switch to Chat UI'), findsOneWidget);
+      expect(find.text('Switch to chat'), findsOneWidget);
       // Either reason (capability unknown, or known unsupported) names chat
       // sessions; which one applies depends on what the machine has reported.
       expect(find.textContaining('chat sessions'), findsNothing);
-      await tester.tap(find.text('Switch to Chat UI'));
+      await tester.tap(find.text('Switch to chat'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.textContaining('chat sessions'), findsOneWidget);
@@ -335,7 +335,7 @@ void main() {
 
       // The pending target is already the rendered mode, so the row offers
       // the way back.
-      await tester.tap(find.text('Switch to Chat UI'));
+      await tester.tap(find.text('Switch to chat'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('Switching mode…'), findsOneWidget);
@@ -454,7 +454,7 @@ void main() {
       expect(find.byType(AgentBar), findsOneWidget);
       await _openKebab(tester);
 
-      expect(find.text('Switch to Terminal'), findsOneWidget);
+      expect(find.text('Switch to terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
       expect(find.text('Messages'), findsNothing);
     });
@@ -479,7 +479,7 @@ void main() {
       expect(find.byType(CarbonOverflowMenu), findsOneWidget);
       await _openKebab(tester);
 
-      expect(find.text('Switch to Terminal'), findsOneWidget);
+      expect(find.text('Switch to terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
       expect(find.text('Messages'), findsNothing);
     });
@@ -498,7 +498,7 @@ void main() {
       );
       await _openKebab(tester);
 
-      expect(find.text('Switch to Terminal'), findsOneWidget);
+      expect(find.text('Switch to terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
       expect(find.text('Messages'), findsNothing);
     });

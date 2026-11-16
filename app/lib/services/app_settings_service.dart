@@ -102,6 +102,7 @@ class AppSettings {
     Color? customBg,
     Color? customPrimary,
     Color? customAccent,
+    bool clearCustomColors = false,
     double? uiScale,
     double? terminalZoom,
     bool? reduceMotion,
@@ -116,9 +117,13 @@ class AppSettings {
           ? null
           : (defaultRelayUrl ?? this.defaultRelayUrl),
       preset: preset ?? this.preset,
-      customBg: customBg ?? this.customBg,
-      customPrimary: customPrimary ?? this.customPrimary,
-      customAccent: customAccent ?? this.customAccent,
+      customBg: clearCustomColors ? null : (customBg ?? this.customBg),
+      customPrimary: clearCustomColors
+          ? null
+          : (customPrimary ?? this.customPrimary),
+      customAccent: clearCustomColors
+          ? null
+          : (customAccent ?? this.customAccent),
       uiScale: uiScale ?? this.uiScale,
       terminalZoom: terminalZoom ?? this.terminalZoom,
       reduceMotion: reduceMotion ?? this.reduceMotion,
@@ -307,6 +312,30 @@ class AppSettingsService extends Notifier<AppSettings> {
     await _prefs.setBool(_kHideGitIgnoredFiles, hidden);
   }
 
+  /// Restores what the Appearance section shows — preset, custom colours and
+  /// follow-system — and nothing else. A button inside that section that also
+  /// reached privacy or connection settings would silently undo an analytics
+  /// opt-out for someone who only wanted their colours back.
+  Future<void> resetAppearance() async {
+    const d = AppSettings.defaults;
+    state = state.copyWith(
+      preset: d.preset,
+      clearCustomColors: true,
+      followSystemBrightness: d.followSystemBrightness,
+    );
+    await Future.wait([
+      _prefs.remove(_kThemePreset),
+      _prefs.remove(_kCustomBg),
+      _prefs.remove(_kCustomPrimary),
+      _prefs.remove(_kCustomAccent),
+      // Written, not removed — see [reset].
+      _prefs.setBool(_kFollowSystemBrightness, d.followSystemBrightness),
+    ]);
+  }
+
+  /// Every setting back to its default, privacy and connection included. No
+  /// surface offers this today; one that does must say what it resets and ask
+  /// first.
   Future<void> reset() async {
     state = AppSettings.defaults;
     TerminalClipboardCoordinator.instance.allowed = true;

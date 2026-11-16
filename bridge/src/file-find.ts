@@ -62,10 +62,18 @@ const MAX_SCANNED = 100_000;
  *  seq-only cache is cold on nearly every keystroke during an agent run,
  *  which is exactly when mentions are used. */
 const FIND_CACHE_MIN_TTL_MS = 2_000;
-/** Short on purpose: file-search.ts's TIMEOUT_MS (30s) would hold an
- *  @-mention popup open for half a minute on a hang. A full unignored listing
- *  of this repo measures ~80ms — 5s is generous, not tight. */
-const FIND_TIMEOUT_MS = 5_000;
+/** How long a listing cut short by the timeout after its unignored pass is
+ *  served while `seq` stays put. Re-listing would spawn both passes again and
+ *  wait out the whole timeout for the same truncated answer, on every
+ *  keystroke and every Retry. */
+const FIND_PARTIAL_CACHE_TTL_MS = 30_000;
+/** Shorter than file-search.ts's TIMEOUT_MS (30s), which would hold an
+ *  @-mention popup open for half a minute on a hang. The unignored listing is
+ *  the fast one; with ignored paths included, a checkout carrying build output
+ *  and `node_modules` lists 100k+ paths, which on a cold disk cache ran past
+ *  5s. A timeout that lands after the unignored pass answers with that pass
+ *  rather than with an error (see `ActiveFind.primaryListed`). */
+const FIND_TIMEOUT_MS = 10_000;
 /** Entries examined in the `walk` fallback between yields, so an unignored
  *  walk cannot block the event loop. */
 const WALK_YIELD_EVERY = 200;
@@ -131,11 +139,16 @@ export function buildFindRipgrepArgs(includeIgnored: boolean, excludes: readonly
   return args;
 }
 
-/** `false` -> `--exclude-standard` (git's normal ignore rules), `true` ->
- *  omitted ("show everything" — `-o` without `--exclude-standard`
- *  recurses into ignored directories too, verified). Needs no `.git` floor:
+/** One `git ls-files` invocation per pass, run in order against one shared
+ *  `MAX_SCANNED` budget. The first pass is always tracked plus
+ *  untracked-unignored files; `includeIgnored` adds a second pass of the
+ *  ignored untracked files alone. Two passes rather than one unfiltered
+ *  `--cached --others`, because git sorts that by path: in a checkout with
+ *  `app/build/**` the build output came first, the cap fell inside it, and the
+ *  tracked files after it were never scanned at all. The passes are disjoint
+ *  (`--others` never lists a tracked file). Needs no `.git` floor:
  *  `git ls-files` never emits `.git` in any form, in any mode — verified. */
-export function buildFindGitArgs(includeIgnored: boolean, excludes: readonly string[]): string[] {
+export function buildFindGitPasses(includeIgnored: boolean, excludes: readonly string[]): string[][] {
   // `-z` is load-bearing, not a micro-optimisation: `core.quotePath` defaults
   // to true, so without it git renders any path holding a byte above 0x7F, a
   // quote or a backslash as a C-quoted octal-escaped string — `café.txt`
@@ -143,11 +156,21 @@ export function buildFindGitArgs(includeIgnored: boolean, excludes: readonly str
   // turns it into `"caf/303/251.txt"` plus two directories that do not exist.
   // NUL-delimited output is verbatim, and it is also the only form that
   // survives a newline inside a filename.
-  const args = ["git", "ls-files", "-z", "--cached", "--others"];
-  if (!includeIgnored) args.push("--exclude-standard");
-  args.push("--", ".");
-  for (const rel of excludes) args.push(`:(exclude,literal)${rel}`);
-  return args;
+  const pathspec = ["--", ".", ...excludes.map((rel) => `:(exclude,literal)${rel}`)];
+  const passes = [["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", ...pathspec]];
+  if (includeIgnored) {
+    passes.push(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", ...pathspec]);
+  }
+  return passes;
+}
+
+/** Same ordering as `buildFindGitPasses`. ripgrep has no "ignored only" mode,
+ *  so the second pass lists everything and the caller drops what the first
+ *  already produced. */
+export function buildFindRipgrepPasses(includeIgnored: boolean, excludes: readonly string[]): string[][] {
+  const passes = [buildFindRipgrepArgs(false, excludes)];
+  if (includeIgnored) passes.push(buildFindRipgrepArgs(true, excludes));
+  return passes;
 }
 
 /** Only the walk and ripgrep engines can emit a Windows separator. Git always
@@ -402,6 +425,8 @@ interface CacheEntry {
   listedAt: number;
   engine: FindEngineKind;
   truncated: boolean;
+  /** Timed out after the unignored pass; see FIND_PARTIAL_CACHE_TTL_MS. */
+  partial: boolean;
   paths: string[];
   /** Derived once per listing. Deriving directories from 42k path prefixes
    *  measured ~100ms and used to run on every find, including a cache hit
@@ -415,10 +440,10 @@ interface FreshListing {
   truncated: boolean;
   engine: FindEngineKind;
   /** The listing ran to its own end. A superseded, timed-out or killed run
-   *  returns `false` and is neither cached nor reported as an answer — the
-   *  cache write used to be guarded only against a SUPERSEDE, so a timeout
-   *  wrote its empty result and the cache's `seq`-equality clause then served it
-   *  for as long as no file changed on disk. */
+   *  returns `false` and is neither cached nor reported as an answer, except a
+   *  timeout after the unignored pass (`CacheEntry.partial`). Caching any other
+   *  cut-short run lets the cache's `seq`-equality clause serve its empty
+   *  result for as long as no file changes on disk. */
   complete: boolean;
 }
 
@@ -430,6 +455,11 @@ export interface FinderTestHooks {
    *  empty answer has to fire the timeout at a chosen point in the listing,
    *  which a wall-clock timer cannot be made to do deterministically. */
   armTimeout?: (fire: () => void) => () => void;
+  /** Overrides MAX_SCANNED, so the cap can be reached with a handful of files. */
+  maxScanned?: number;
+  /** Called as each engine pass exits on its own, so a test can land the
+   *  timeout BETWEEN passes. */
+  afterPass?: (index: number) => void;
 }
 
 function defaultArmTimeout(fire: () => void): () => void {
@@ -450,6 +480,10 @@ interface ActiveFind {
    *  warning against a repo that plainly is one. */
   killed: boolean;
   timedOut: boolean;
+  /** The first (unignored) pass of a spawned listing ran to its end. A timeout
+   *  after that point answers with what was listed, flagged `truncated`,
+   *  rather than discarding every tracked path for want of the ignored ones. */
+  primaryListed: boolean;
 }
 
 /** Bridge-side path search backing @-mentions and the tree's filter box. One
@@ -465,6 +499,8 @@ export class FileFinder {
   private now: () => number;
   private yieldFn: () => Promise<void>;
   private armTimeout: NonNullable<FinderTestHooks["armTimeout"]>;
+  private maxScanned: number;
+  private afterPass: (index: number) => void;
   private cache = new Map<string, CacheEntry>();
   private active: ActiveFind | null = null;
 
@@ -489,6 +525,8 @@ export class FileFinder {
     this.now = testHooks?.now ?? Date.now;
     this.yieldFn = testHooks?.yieldFn ?? yieldToEventLoop;
     this.armTimeout = testHooks?.armTimeout ?? defaultArmTimeout;
+    this.maxScanned = testHooks?.maxScanned ?? MAX_SCANNED;
+    this.afterPass = testHooks?.afterPass ?? (() => {});
   }
 
   /** Release the engine process still holding the checkout as its cwd, and
@@ -521,7 +559,7 @@ export class FileFinder {
   async find(opts: FindOptions): Promise<void> {
     this.abort();
     const requestId = clampId(opts.requestId);
-    const active: ActiveFind = { requestId, proc: null, killed: false, timedOut: false };
+    const active: ActiveFind = { requestId, proc: null, killed: false, timedOut: false, primaryListed: false };
     this.active = active;
 
     const projectId = clampId(opts.projectId) || this.projectId;
@@ -558,7 +596,7 @@ export class FileFinder {
     }
     disarm();
 
-    if (active.killed) {
+    if (active.killed && !(active.timedOut && active.primaryListed)) {
       // Answered, never silently dropped (there is no file:find-cancel), but
       // answered honestly: `truncated` plus an `error` is what stops the app
       // rendering an aborted listing as a confident "No matching files".
@@ -639,26 +677,31 @@ export class FileFinder {
     const seq = this.getSeq();
     const now = this.now();
     const cached = this.cache.get(cacheKey);
-    if (cached && (cached.seq === seq || now - cached.listedAt < FIND_CACHE_MIN_TTL_MS)) {
-      return cached;
+    if (cached) {
+      const age = now - cached.listedAt;
+      const sameSeq = cached.seq === seq && (!cached.partial || age < FIND_PARTIAL_CACHE_TTL_MS);
+      if (sameSeq || age < FIND_CACHE_MIN_TTL_MS) return cached;
     }
     const result = await this.listFresh(includeIgnored, active);
     const files = indexFindEntries(result.paths.map((p) => ({ path: p, isDir: false })));
     const dirs = indexFindEntries([...deriveDirectories(result.paths)].map((p) => ({ path: p, isDir: true })));
+    const partial = !result.complete && active.timedOut && active.primaryListed;
     const entry: CacheEntry = {
       seq,
       listedAt: now,
       engine: result.engine,
       truncated: result.truncated,
+      partial,
       paths: result.paths,
       files,
       dirs,
     };
-    // Only a listing that ran to its own end may be cached. `complete` — not
-    // "this request is still the current one" — is the guard: the timeout left
-    // `active` intact, so the old guard passed and an empty, error-free
-    // listing was cached with an unchanged `seq` and then served forever.
-    if (result.complete && this.active === active) this.cache.set(cacheKey, entry);
+    // Only a listing that ran to its own end, or timed out holding its whole
+    // unignored pass, may be cached. `complete` — not "this request is still
+    // the current one" — is the guard: the timeout leaves `active` intact, so
+    // that check alone would cache an empty, error-free listing under an
+    // unchanged `seq` and serve it forever.
+    if ((result.complete || partial) && this.active === active) this.cache.set(cacheKey, entry);
     return entry;
   }
 
@@ -669,11 +712,11 @@ export class FileFinder {
       return { paths: [], truncated: false, engine: "none", complete: false };
     }
     if (engine === "ripgrep") {
-      return await this.listViaSpawn(buildFindRipgrepArgs(includeIgnored, this.excludes), "ripgrep", active, rules);
+      return await this.listViaSpawn(buildFindRipgrepPasses(includeIgnored, this.excludes), "ripgrep", active, rules);
     }
     if (engine === "git-ls-files") {
-      const result = await this.listViaSpawn(buildFindGitArgs(includeIgnored, this.excludes), "git-ls-files", active, rules);
-      if (result.complete || active.killed) return result;
+      const result = await this.listViaSpawn(buildFindGitPasses(includeIgnored, this.excludes), "git-ls-files", active, rules);
+      if (result.complete || active.killed || active.primaryListed) return result;
       // Non-zero exit that was NOT our own kill: `detectFindEngine` proved the
       // git BINARY exists, never that this checkout's root is a repository
       // (project-resolver.ts keeps answering for a non-repository on purpose,
@@ -690,19 +733,77 @@ export class FileFinder {
   }
 
   private async listViaSpawn(
-    args: string[],
+    passes: string[][],
     engine: "ripgrep" | "git-ls-files",
     active: ActiveFind,
     rules: IgnoreRules,
   ): Promise<FreshListing & { exitCode: number | null }> {
-    const aborted = (): FreshListing & { exitCode: number | null } =>
-      ({ paths: [], truncated: false, engine: "none", complete: false, exitCode: null });
-    if (this.active !== active || active.killed) return aborted();
+    const prune = new IgnorePrune(rules);
+    const paths: string[] = [];
+    // ripgrep's later pass repeats the first one's paths; git's passes are
+    // disjoint and need no set.
+    const seen = engine === "ripgrep" && passes.length > 1 ? new Set<string>() : null;
+    const budget = { scanned: 0, capped: false };
+    let exitCode: number | null = null;
+    let passesRun = 0;
+    let failed = false;
+    let ignoredPassFailed = false;
 
+    for (let i = 0; i < passes.length; i++) {
+      if (this.active !== active || active.killed) break;
+      exitCode = await this.runPass(passes[i]!, engine, active, budget, (rel) => {
+        if (seen?.has(rel)) return false;
+        seen?.add(rel);
+        if (prune.keeps(rel)) paths.push(rel);
+        return true;
+      });
+      if (active.killed || budget.capped) break;
+      if (exitCode !== 0) {
+        failed = true;
+        // git: a failed first pass means the root is no repository (the
+        // caller falls back to the walk); a failed ignored pass leaves the
+        // unignored answer standing, short of its tail. ripgrep exits 2 after
+        // listing everything it could read — one unreadable directory is
+        // enough — so what it listed stands either way.
+        if (engine === "git-ls-files") {
+          if (i > 0) {
+            ignoredPassFailed = true;
+            log.warn({ exitCode }, "file:find ignored-files pass failed; answering with the unignored listing");
+          }
+          break;
+        }
+      }
+      passesRun++;
+      if (i === 0) active.primaryListed = true;
+      this.afterPass(i);
+    }
+
+    // A cap kill is our own, but it is a deliberate ANSWER (flagged
+    // `truncated`), not an abandoned run — unlike a supersede or a timeout.
+    const complete = !active.killed && (budget.capped || (!failed && passesRun === passes.length));
+    // A run cut short after its unignored pass is still an answer, only not
+    // the whole one — and the app is told so.
+    const truncated = budget.capped || ignoredPassFailed || (active.killed && active.primaryListed);
+    return { paths, truncated, engine, complete, exitCode };
+  }
+
+  /** One engine invocation, counted against the listing's shared budget.
+   *  `take` returns false for a path an earlier pass already listed, and that
+   *  line costs no budget: ripgrep's ignored pass repeats every unignored
+   *  path, so counting repeats spends the cap before an ignored file is
+   *  reached. Returns the exit code; null when it never ran. */
+  private async runPass(
+    args: string[],
+    engine: "ripgrep" | "git-ls-files",
+    active: ActiveFind,
+    budget: { scanned: number; capped: boolean },
+    take: (rel: string) => boolean,
+  ): Promise<number | null> {
+    if (this.active !== active || active.killed) return null;
     const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", cwd: this.projectRoot });
     if (this.active !== active || active.killed) {
       proc.kill();
-      return aborted();
+      return null;
     }
     active.proc = proc;
 
@@ -710,18 +811,11 @@ export class FileFinder {
     // newline-delimited and, on Windows, uses `\` separators.
     const nulDelimited = engine === "git-ls-files";
     const separator = nulDelimited ? "\0" : "\n";
-    const prune = new IgnorePrune(rules);
-    const paths: string[] = [];
-    let truncated = false;
-    let scanned = 0;
-    let cappedKill = false;
-
-    const take = (raw: string): void => {
-      if (!raw) return;
+    const takeRaw = (raw: string): boolean => {
+      if (!raw) return true;
       const rel = nulDelimited ? raw : normalizeSeparators(raw.replace(/\r$/, "").trim());
-      if (!rel || isFloorEntry(rel)) return;
-      if (!prune.keeps(rel)) return;
-      paths.push(rel);
+      if (!rel || isFloorEntry(rel)) return true;
+      return take(rel);
     };
 
     try {
@@ -735,17 +829,15 @@ export class FileFinder {
         const lines = text.split(separator);
         leftover = lines.pop() ?? "";
         for (const line of lines) {
-          if (scanned >= MAX_SCANNED) {
-            truncated = true;
-            cappedKill = true;
+          if (budget.scanned >= this.maxScanned) {
+            budget.capped = true;
             proc.kill();
             break outer;
           }
-          scanned++;
-          take(line);
+          if (takeRaw(line)) budget.scanned++;
         }
       }
-      if (!truncated) take(leftover);
+      if (!budget.capped) takeRaw(leftover);
     } catch {
       // Best-effort partial results on a stream error, same discipline as
       // FileSearcher's read loop.
@@ -753,11 +845,7 @@ export class FileFinder {
 
     await proc.exited;
     if (active.proc === proc) active.proc = null;
-    const exitCode = proc.exitCode;
-    // A cap kill is our own, but it is a deliberate ANSWER (flagged
-    // `truncated`), not an abandoned run — unlike a supersede or a timeout.
-    const complete = active.killed ? false : cappedKill || exitCode === 0;
-    return { paths, truncated, engine, complete, exitCode };
+    return proc.exitCode;
   }
 
   private async listViaWalk(
@@ -766,7 +854,7 @@ export class FileFinder {
     rules: IgnoreRules,
   ): Promise<FreshListing> {
     const result = await walkFiles(this.projectRoot, rules, {
-      maxScanned: MAX_SCANNED,
+      maxScanned: this.maxScanned,
       yieldEvery: WALK_YIELD_EVERY,
       yieldFn: this.yieldFn,
       cancelled: () => active.killed || this.active !== active,

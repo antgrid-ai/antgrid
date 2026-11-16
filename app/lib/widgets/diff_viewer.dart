@@ -158,6 +158,12 @@ class DiffViewer extends StatefulWidget {
   final VoidCallback onViewFile;
   final VoidCallback onClose;
 
+  /// Puts [onClose] at the header's start as a back arrow instead of a close
+  /// button at its end, for a host where the diff replaces the list it was
+  /// opened from: that host then needs no bar of its own, so the path is shown
+  /// once and there is one way out.
+  final bool closeAsBack;
+
   /// Delivers a composed "Send to Agent" message (comment + source label +
   /// selected code, already put together by [showSendToAgentComment]) to the
   /// focused session. Kept as a plain callback rather than reading Riverpod
@@ -176,6 +182,7 @@ class DiffViewer extends StatefulWidget {
     required this.deletions,
     required this.onViewFile,
     required this.onClose,
+    this.closeAsBack = false,
     required this.onSendToAgent,
   });
 
@@ -187,8 +194,10 @@ class _DiffViewerState extends State<DiffViewer> {
   /// How many of the widest-ranked lines [_measureWidestLine] lays out exactly.
   static const int _measuredCandidates = 24;
 
-  /// The widest line number the gutter is sized for.
-  static const String _gutterSample = '99999';
+  /// The widest line number in this diff, as nines: each gutter is sized for
+  /// it rather than for a fixed five digits, since two gutters sit side by
+  /// side on panes as narrow as a phone.
+  String _gutterSample = '99';
 
   /// Row height. The extra over the line height is the breathing room the
   /// editor's own rows get from their padding; without it the tint bands touch.
@@ -290,6 +299,16 @@ class _DiffViewerState extends State<DiffViewer> {
     }
     final hunks = _parseDiff(widget.diff);
     _hunks = hunks;
+    var widestNumber = 0;
+    for (final hunk in hunks) {
+      for (final line in hunk.lines) {
+        widestNumber = math.max(
+          widestNumber,
+          math.max(line.oldLineNum ?? 0, line.newLineNum ?? 0),
+        );
+      }
+    }
+    _gutterSample = '9' * math.max(2, '$widestNumber'.length);
     _rows = [
       for (final (i, hunk) in hunks.indexed) ...[
         if (i > 0) const _HunkGapRow(),
@@ -403,6 +422,8 @@ class _DiffViewerState extends State<DiffViewer> {
     final contentWidth =
         _gutterWidth +
         CarbonSpacing.spacing03 +
+        _gutterWidth +
+        CarbonSpacing.spacing03 +
         _markerWidth +
         CarbonSpacing.spacing03 +
         _codeWidth +
@@ -494,6 +515,12 @@ class _DiffViewerState extends State<DiffViewer> {
           return Row(
             spacing: CarbonSpacing.spacing03,
             children: [
+              if (widget.closeAsBack)
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.arrowLeft),
+                  semanticLabel: 'Back to changed files',
+                  onPressed: widget.onClose,
+                ),
               if (widget.gitStatus != null)
                 Text(
                   widget.gitStatus!,
@@ -529,11 +556,12 @@ class _DiffViewerState extends State<DiffViewer> {
                   size: CarbonLinkSize.small,
                   onPressed: widget.onViewFile,
                 ),
-              CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.close),
-                semanticLabel: 'Close diff',
-                onPressed: widget.onClose,
-              ),
+              if (!widget.closeAsBack)
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.close),
+                  semanticLabel: 'Close diff',
+                  onPressed: widget.onClose,
+                ),
             ],
           );
         },
@@ -604,11 +632,12 @@ class _DiffViewerState extends State<DiffViewer> {
       child: Row(
         spacing: CarbonSpacing.spacing03,
         children: [
-          // ONE number per row: the line as it stands in the file now, falling
-          // back to where a removed line used to be — the only row with no
-          // "now" to point at. Two columns spent a second gutter restating a
-          // number that is the same on all but the changed rows.
-          _buildGutter(line.newLineNum ?? line.oldLineNum, colors.textSecondary),
+          // Old and new numbers in their own columns: in one shared gutter a
+          // removed line's old number sits among the new numbers around it,
+          // and the column runs backwards (5, 6, 5, 6, 7) wherever a change
+          // removes and adds lines.
+          _buildGutter(line.oldLineNum, colors.textSecondary),
+          _buildGutter(line.newLineNum, colors.textSecondary),
           _buildMarker(line.type, markerColor),
           Expanded(
             child: Text.rich(

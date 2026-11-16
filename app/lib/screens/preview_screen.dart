@@ -94,6 +94,22 @@ class _TabWebViewState {
   // about what's actually known on every platform.
   bool loading = false;
 
+  // True while the page's last main-frame load could not connect to its
+  // loopback port. The tab then shows the app's own dead-port state over the
+  // platform's error page, which stays mounted underneath: WebView2 keeps
+  // retrying it, and the first retry that loads clears this.
+  bool unreachable = false;
+
+  // Whether a load error arrived since the last onPageStarted. A failed
+  // navigation still reports onPageFinished, so that alone cannot tell a
+  // successful load from the error page finishing.
+  bool failedSincePageStart = false;
+
+  // The last load error logged for this tab. The platform retries a dead
+  // port on its own every few seconds, so each failure is logged once rather
+  // than once per retry.
+  String? loggedError;
+
   // The owner [controller] (or the pending load) was admitted under.
   String? lastAppliedOwner;
 
@@ -338,7 +354,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         NavigationDelegate(
           onPageStarted: (url) {
             final tabState = _stateOf(port, controller);
-            if (tabState != null && !tabState.loading && mounted) {
+            if (tabState == null) return;
+            tabState.failedSincePageStart = false;
+            if (!tabState.loading && mounted) {
               setState(() => tabState.loading = true);
             }
           },
@@ -358,10 +376,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             }
             final shouldClearRefresh = _refreshingPort == port;
             final shouldClearLoading = tabState.loading;
-            if (mounted && (shouldClearRefresh || shouldClearLoading)) {
+            final loaded = !tabState.failedSincePageStart;
+            if (loaded) tabState.loggedError = null;
+            final shouldClearUnreachable = loaded && tabState.unreachable;
+            if (mounted &&
+                (shouldClearRefresh ||
+                    shouldClearLoading ||
+                    shouldClearUnreachable)) {
               setState(() {
                 if (shouldClearRefresh) _refreshingPort = null;
                 if (shouldClearLoading) tabState.loading = false;
+                if (shouldClearUnreachable) tabState.unreachable = false;
               });
             }
           },
@@ -396,11 +421,28 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             }
           },
           onWebResourceError: (error) {
-            AbLog.error(
-              'PreviewScreen',
-              'WebView error',
-              fields: {'description': error.description},
-            );
+            final tabState = _stateOf(port, controller);
+            final key =
+                '${error.errorCode}|${error.isForMainFrame}|${error.url}';
+            if (tabState == null || tabState.loggedError != key) {
+              tabState?.loggedError = key;
+              AbLog.error(
+                'PreviewScreen',
+                'WebView error',
+                fields: {
+                  'port': port,
+                  'description': error.description,
+                  if (error.url != null) 'url': error.url,
+                },
+              );
+            }
+            if (tabState == null || error.isForMainFrame == false) return;
+            tabState.failedSincePageStart = true;
+            if (isDeadPortError(error.errorType, error.url) &&
+                !tabState.unreachable &&
+                mounted) {
+              setState(() => tabState.unreachable = true);
+            }
           },
         ),
       )
@@ -704,7 +746,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               enabled: onScreen,
               child: previewStateAsync.when(
                 loading: () =>
-                    const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading preview...')),
+                    const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading preview…')),
                 error: (error, _) => CarbonEmptyState(
                   error: true,
                   heading: "Couldn't load the preview",
@@ -2009,10 +2051,44 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return Stack(
       children: [
         content,
+        if (tabState?.unreachable ?? false)
+          Positioned.fill(
+            child: ColoredBox(
+              color: background,
+              child: CarbonEmptyState(
+                error: true,
+                heading: 'Nothing is running on port ${tab.port}',
+                body: 'Start your dev server, then retry.',
+                action: CarbonButton(
+                  label: 'Retry',
+                  icon: const CarbonIcon(CarbonIcons.renew),
+                  kind: CarbonButtonKind.tertiary,
+                  onPressed: () =>
+                      _webViewDetached('retry dead port', controller.reload),
+                ),
+              ),
+            ),
+          ),
         if (tabState?.loading ?? false) _loadingRule(),
       ],
     );
   }
+}
+
+/// Whether a main-frame load error means nothing is listening on the preview's
+/// own port: a refused or dropped connection to loopback. A foreign URL the
+/// user navigated to fails in the platform's own words, since "start your dev
+/// server" would be the wrong advice for it.
+@visibleForTesting
+bool isDeadPortError(WebResourceErrorType? type, String? url) {
+  if (type != WebResourceErrorType.connect) return false;
+  if (url == null) return true;
+  final host = Uri.tryParse(url)?.host;
+  return host == null ||
+      host.isEmpty ||
+      host == 'localhost' ||
+      host == '127.0.0.1' ||
+      host == '::1';
 }
 
 /// Parses top-bar input for opening a NEW tab: a bare port ("3000"), a

@@ -19,6 +19,7 @@ import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'carbon_session_badges.dart';
 import 'carbon_session_rename_dialog.dart';
+import 'yielding_pair.dart';
 
 /// The agent name / session breadcrumb, with git branch pill.
 ///
@@ -51,46 +52,54 @@ class TitleBarBreadcrumb extends ConsumerWidget {
                   projectNameFromId(activeId));
     final gitBranch = terminalState?.gitBranch;
     final active = ref.watch(activeSessionProvider);
-    return AbCarbonScope(
-      child: Row(
-        children: [
-          Flexible(
-            flex: 2,
-            fit: FlexFit.loose,
-            child: active == null
-                ? _Segment(text: agentName, secondary: false)
-                : _Path(project: agentName, session: active),
+    final title = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: active == null
+              ? _Segment(text: agentName, secondary: false)
+              : _Path(project: agentName, session: active),
+        ),
+        if (active != null) ...[
+          CarbonSessionIsolationBadge(
+            session: active,
+            // The live list's answer, never `active.setup`: the entry can come
+            // from the persisted cache, which carries no setup state at all.
+            setup: ref.watch(activeSessionSetupProvider),
           ),
-          if (active != null) ...[
-            CarbonSessionIsolationBadge(
-              session: active,
-              // The live list's answer, never `active.setup`: the entry can come
-              // from the persisted cache, which carries no setup state at all.
-              setup: ref.watch(activeSessionSetupProvider),
-            ),
-            CarbonSessionSharedWorkspaceBadge(session: active),
-          ],
-          if (showBranchPill && gitBranch != null) ...[
-            const SizedBox(width: CarbonSpacing.spacing03),
-            // FlexFit.loose, not Expanded: the path keeps first claim on
-            // slack (it has the higher flex), and this only gives up its own
-            // width once the row is actually tight — a bare ConstrainedBox
-            // here does not shrink with the row at all, since a non-flex Row
-            // child is sized from its own content, capped but never squeezed,
-            // which is what let the fixed badges above push this row into
-            // overflow on a narrow agent panel. The tag's own ellipsis is what
-            // turns this shrink into truncation instead of a second overflow
-            // one widget down.
-            Flexible(
-              fit: FlexFit.loose,
-              child: SessionBranchPill(maxWidth: 160),
-            ),
-          ],
+          CarbonSessionSharedWorkspaceBadge(session: active),
         ],
-      ),
+      ],
+    );
+    return AbCarbonScope(
+      child: showBranchPill && gitBranch != null
+          ? YieldingPair(
+              leading: title,
+              trailing: const Padding(
+                padding: EdgeInsetsDirectional.only(
+                  start: CarbonSpacing.spacing03,
+                ),
+                // Uncapped: the pair hands it whatever the title leaves, and
+                // the tag's own tooltip carries the full name once it
+                // truncates.
+                child: SessionBranchPill(),
+              ),
+              yielding: YieldingSide.trailing,
+              keep: _kBranchKeepWidth + CarbonSpacing.spacing03,
+              // Capped on a narrow agent panel, so the tag's floor cannot
+              // squeeze the session name down to a stub. Over a third because
+              // the share includes the gap: at a third, a tight iPad agent bar
+              // left the tag narrower than its own padding and icon.
+              keepFraction: 0.4,
+            )
+          : title,
     );
   }
 }
+
+/// How much of the branch tag survives before the title starts giving up its
+/// own width for it. Past this the tag truncates first; below it the title does.
+const double _kBranchKeepWidth = CarbonSpacing.spacing13;
 
 /// Below this width per segment the path drops the project and keeps only the
 /// session, which is the part the user acts on.
@@ -112,23 +121,32 @@ class _Path extends StatelessWidget {
         final leaf = EditableSessionLeaf(session: session);
         if (constraints.maxWidth < _kMinSegmentWidth * 2) return leaf;
         final t = CarbonTheme.of(context);
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Capped, not flexible: a flex share would stay reserved for a
-            // short project name while the session name truncated beside the
-            // empty space. longestLine shrinks the box to the text it paints.
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: _kMinSegmentWidth),
-              child: _Segment(text: project, secondary: true),
-            ),
-            Text(
-              ' / ',
-              key: const Key('breadcrumb-separator'),
-              style: t.typography.body.copyWith(color: t.colors.textSecondary),
-            ),
-            Flexible(child: leaf),
-          ],
+        // The session is what the user acts on, so the project truncates
+        // first. A fixed project cap, or a flex share, would cut both names
+        // on a phone-width header where either could be read whole.
+        return YieldingPair(
+          leading: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // longestLine shrinks the box to the text it paints, so a short
+              // project leaves its slack to the session.
+              Flexible(child: _Segment(text: project, secondary: true)),
+              Text(
+                ' / ',
+                key: const Key('breadcrumb-separator'),
+                style: t.typography.body.copyWith(
+                  color: t.colors.textSecondary,
+                ),
+              ),
+            ],
+          ),
+          trailing: leaf,
+          yielding: YieldingSide.leading,
+          keep: _kMinSegmentWidth,
+          // On a phone header a 140 floor alone still truncated the session
+          // beside it; a quarter keeps the project legible as a prefix there
+          // and leaves the desktop's 140 untouched.
+          keepFraction: 1 / 4,
         );
       },
     );
@@ -165,10 +183,10 @@ class _Segment extends StatelessWidget {
 class SessionBranchPill extends ConsumerWidget {
   const SessionBranchPill({super.key, this.maxWidth});
 
-  /// Caps the pill's width when it sits beside the breadcrumb — an
-  /// unshrinkable sibling would otherwise floor the title's own space on a
-  /// narrow window. Null renders it at its natural width, for a slot nothing
-  /// else competes with for room.
+  /// A hard cap on the pill's width. Null renders it at up to its natural
+  /// width, shrinking only as far as its parent's constraints demand — the
+  /// breadcrumb relies on that and sizes the slot itself, since a fixed cap
+  /// truncates the branch beside empty header.
   final double? maxWidth;
 
   @override

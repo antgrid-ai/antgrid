@@ -28,9 +28,12 @@ class CarbonMachineSelector extends StatelessWidget {
     final colors = CarbonTheme.of(context).colors;
     final dot = connected ? colors.supportSuccess : colors.iconSecondary;
     return ConstrainedBox(
-      constraints: BoxConstraints(
-        maxWidth: CarbonSpacing.spacing05 * (wide ? 15 : 9),
-      ),
+      // Capped only where the row has room to spare. A narrow header already
+      // bounds the selector to what is left beside the title, and a cap on
+      // top of that cuts a machine name to a few letters on a phone.
+      constraints: wide
+          ? const BoxConstraints(maxWidth: CarbonSpacing.spacing05 * 15)
+          : const BoxConstraints(),
       // The connection dot sits inside the trigger, beside the name it
       // qualifies, so the two read and click as one control.
       child: CarbonMenuButton(

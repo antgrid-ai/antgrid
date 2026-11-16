@@ -126,7 +126,7 @@ void main() {
       install: const UpdateInstallWorking(42),
     );
 
-    expect(find.text('Updating... 42%'), findsOneWidget);
+    expect(find.text('Updating… 42%'), findsOneWidget);
     expect(
       tester.widget<CarbonProgressBar>(find.byType(CarbonProgressBar)).value,
       0.42,
@@ -151,7 +151,7 @@ void main() {
       install: const UpdateInstallWorking(0),
     );
 
-    expect(find.text('Updating...'), findsOneWidget);
+    expect(find.text('Updating…'), findsOneWidget);
     expect(
       tester.widget<CarbonProgressBar>(find.byType(CarbonProgressBar)).value,
       isNull,
@@ -177,7 +177,7 @@ void main() {
       install: const UpdateInstallDone(),
     );
 
-    expect(find.text('Updating...'), findsOneWidget);
+    expect(find.text('Updating…'), findsOneWidget);
     expect(find.text('Update'), findsNothing);
 
     await tester.tap(find.byType(DrawerChromeRow), warnIfMissed: false);

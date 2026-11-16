@@ -1283,6 +1283,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
                           selected: _selectedView,
                           badges: _workspaceBadges(),
                           onSelected: _selectView,
+                          onAgent: switchToAgentPage,
                         ),
                       ],
                     ),
@@ -1971,25 +1972,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell> {
   }
 
   Widget? _workbenchSurfaceChild(WorkbenchSurface surface) {
-    void close() {
-      ref
-          .read(workbenchSurfaceProvider.notifier)
-          .set(WorkbenchSurface.workspace);
-      // Closing an overlay surface (settings/devices) is a navigation: record
-      // the return to workspace so back() reopens the overlay and nav.current
-      // stays in sync with the visible surface. Without this commit the first
-      // back press after closing is a no-op (the cursor still points at the
-      // overlay entry while the screen already shows workspace).
-      ref
-          .read(navControllerProvider.notifier)
-          .commit(
-            NavLocation(
-              target: ref.read(selectedTargetProvider),
-              surface: WorkbenchSurface.workspace,
-              sessionId: ref.read(activeSessionIdProvider),
-            ),
-          );
-    }
+    void close() => closeAppSettings(ref.container);
 
     return switch (surface) {
       WorkbenchSurface.scheduler || WorkbenchSurface.memory => null,

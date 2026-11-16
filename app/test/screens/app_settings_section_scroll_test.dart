@@ -5,11 +5,13 @@
 // is all it does — a section is a destination, not a mode.
 import 'package:antgrid/models/pending_nav.dart';
 import 'package:antgrid/models/settings_section.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/screens/app_settings_screen.dart';
 import 'package:antgrid/services/app_settings_service.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
@@ -54,6 +56,11 @@ Future<void> _withSettings(
       ProviderScope(
         overrides: [
           appSettingsServiceProvider.overrideWith(() => service),
+          // Signed in: ACCOUNT, the below-the-fold section this suite scrolls
+          // to, renders only for an account.
+          currentUserProvider.overrideWith(
+            (ref) => CurrentUser(userId: 'u-1', email: 'a@b.test'),
+          ),
           ...extraOverrides,
         ],
         child: Consumer(

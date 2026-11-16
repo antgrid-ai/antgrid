@@ -4,8 +4,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/navigation/nav_controller.dart';
+import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
@@ -441,5 +444,68 @@ void main() {
     await tester.pump();
 
     expect(ref.read(selectedTargetProjectProvider)?.id, 'local-a');
+  });
+
+  // A link to New session naming a project focused it but left the composer on
+  // "Select project…". It names the project as plainly as a drawer row's `+`,
+  // so it also wins over a draft left on another one.
+  testWidgets('a deep link to New session preselects the project it names', (
+    tester,
+  ) async {
+    late WidgetRef ref;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pickerSourcesProvider.overrideWith(
+            (ref) => const [
+              PickerSource(
+                id: 'local',
+                label: 'Local',
+                isLocal: true,
+                projects: [
+                  PickerProject(
+                    id: 'local-b',
+                    name: 'B',
+                    detail: '/b',
+                    isLocal: true,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+        child: Consumer(
+          builder: (context, r, _) {
+            ref = r;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    ref
+        .read(selectedTargetProjectProvider.notifier)
+        .set(
+          const PickerProject(
+            id: 'local-a',
+            name: 'A',
+            detail: '/a',
+            isLocal: true,
+          ),
+        );
+
+    ref
+        .read(navControllerProvider.notifier)
+        .applyDeepLink(
+          const NavLocation(
+            target: LocalProject('local-b'),
+            surface: WorkbenchSurface.newSession,
+          ),
+        );
+    await tester.pump();
+
+    expect(ref.read(workbenchSurfaceProvider), WorkbenchSurface.newSession);
+    expect(ref.read(selectedTargetProjectProvider)?.id, 'local-b');
   });
 }

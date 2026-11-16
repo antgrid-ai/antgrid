@@ -147,6 +147,8 @@ class _RecentSessionRowWidgetState
                   relTime: relTime,
                   rowBg: rowBg,
                   deleting: deleting,
+                  hoverReveal: !isMobile,
+                  showDelete: (_hovered || _focused) && !deleting,
                   onDelete: onDelete,
                 )
               : _DesktopLayout(
@@ -337,6 +339,8 @@ class _MobileLayout extends StatelessWidget {
     required this.relTime,
     required this.rowBg,
     required this.deleting,
+    required this.hoverReveal,
+    required this.showDelete,
     required this.onDelete,
   });
 
@@ -349,8 +353,18 @@ class _MobileLayout extends StatelessWidget {
   final Color rowBg;
   final bool deleting;
 
-  /// Always-visible trash button — mobile has no hover to reveal the desktop
-  /// layout's in-place delete, and a hidden swipe gesture proved
+  /// This layout on a pointer desktop — a narrow pane, or the title bar's
+  /// search popup, which is never wide enough for the rail. There the trash
+  /// swaps in over the time on hover, as on the desktop rail, rather than
+  /// repeating down every row.
+  final bool hoverReveal;
+
+  /// Whether the hover/focus that reveals the trash is present; read only
+  /// under [hoverReveal].
+  final bool showDelete;
+
+  /// Always-visible trash button on a phone — mobile has no hover to reveal
+  /// the desktop layout's in-place delete, and a hidden swipe gesture proved
   /// undiscoverable (and used to delete without confirmation).
   final VoidCallback onDelete;
 
@@ -386,10 +400,35 @@ class _MobileLayout extends StatelessWidget {
                 _CommandLabel(label: command),
                 const SizedBox(width: AbTokens.space8),
               ],
-              _TimeLabel(label: relTime),
+              if (hoverReveal)
+                Stack(
+                  alignment: Alignment.centerRight,
+                  children: [
+                    AbCrossFade(
+                      duration: AbTokens.motionSnap,
+                      visible: !showDelete,
+                      child: _TimeLabel(label: relTime),
+                    ),
+                    if (!deleting)
+                      AbCrossFade(
+                        duration: AbTokens.motionSnap,
+                        visible: showDelete,
+                        child: IgnorePointer(
+                          ignoring: !showDelete,
+                          child: AbIconButton(
+                            icon: AbIcons.trash,
+                            tooltip: 'Delete session',
+                            onTap: onDelete,
+                          ),
+                        ),
+                      ),
+                  ],
+                )
+              else
+                _TimeLabel(label: relTime),
               // Dropped while deleting: mobile has no hover state to fade it
               // out of, so the only honest option is not to offer it.
-              if (!deleting) ...[
+              if (!hoverReveal && !deleting) ...[
                 const SizedBox(width: AbTokens.space4),
                 AbIconButton(
                   icon: AbIcons.trash,

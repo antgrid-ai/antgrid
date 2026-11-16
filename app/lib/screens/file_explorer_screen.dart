@@ -67,6 +67,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   List<FileFindEntry> _filterResults = const [];
   bool _filterLoading = false;
   String? _filterError;
+  bool _filterTruncated = false;
   int _filterGen = 0;
 
   /// Stops this surface's spinner when the reply it was waiting for will
@@ -86,6 +87,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
       _filterQuery = query;
       _filterResults = const [];
       _filterError = null;
+      _filterTruncated = false;
       _filterLoading = active;
     });
     if (!active) return;
@@ -130,9 +132,16 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
         // A killed or timed-out listing also answers with zero entries —
         // without this it reads as "this file does not exist".
         _filterError = result.error;
+        // An aborted listing is also flagged truncated; the error already
+        // says more than the hint would.
+        _filterTruncated = result.truncated && result.error == null;
       });
     });
   }
+
+  /// A failed listing is never cached by the bridge, so re-asking with the
+  /// same query is a real retry, not a replay of the failure.
+  void _retryFilter() => _onFilterQueryChanged(_filterQuery);
 
   @override
   void initState() {
@@ -178,7 +187,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     }
     final Widget content;
     if (fileService == null) {
-      content = const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...'));
+      content = const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading files…'));
     } else {
       content = BackHandler(
         priority: BackPriority.fileViewer,
@@ -190,7 +199,7 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
           active: onScreen && _searchOpen,
           onBack: _backFromSearch,
           child: treeStateAsync.when(
-            loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...')),
+            loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'Loading files…')),
             error: (error, _) => CarbonEmptyState(
               error: true,
               heading: "Couldn't load files",
@@ -206,7 +215,9 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
               filterResults: _filterResults,
               filterLoading: _filterLoading,
               filterError: _filterError,
+              filterTruncated: _filterTruncated,
               onFilterQueryChanged: _onFilterQueryChanged,
+              onRetryFilter: _retryFilter,
             ),
           ),
         ),
@@ -309,7 +320,9 @@ class _FileExplorerBody extends ConsumerWidget {
   final List<FileFindEntry> filterResults;
   final bool filterLoading;
   final String? filterError;
+  final bool filterTruncated;
   final void Function(String?) onFilterQueryChanged;
+  final VoidCallback onRetryFilter;
 
   const _FileExplorerBody({
     required this.state,
@@ -321,7 +334,9 @@ class _FileExplorerBody extends ConsumerWidget {
     required this.filterResults,
     required this.filterLoading,
     required this.filterError,
+    required this.filterTruncated,
     required this.onFilterQueryChanged,
+    required this.onRetryFilter,
   });
 
   @override
@@ -331,7 +346,7 @@ class _FileExplorerBody extends ConsumerWidget {
         final showSideBySide = constraints.maxWidth >= kCompactBreakpoint;
 
         if (showSideBySide) {
-          return _buildSideBySideLayout(context, ref);
+          return _buildSideBySideLayout(context, ref, constraints.maxWidth);
         }
 
         // Compact: show viewer full-width when file selected
@@ -424,6 +439,8 @@ class _FileExplorerBody extends ConsumerWidget {
             entries: filterResults,
             loading: filterLoading,
             error: filterError,
+            truncated: filterTruncated,
+            onRetry: onRetryFilter,
             onTapFile: (path) {
               fileService.selectFile(path);
               onFilterQueryChanged(null);
@@ -509,11 +526,19 @@ class _FileExplorerBody extends ConsumerWidget {
     );
   }
 
-  Widget _buildSideBySideLayout(BuildContext context, WidgetRef ref) {
+  Widget _buildSideBySideLayout(
+    BuildContext context,
+    WidgetRef ref,
+    double width,
+  ) {
     final theme = CarbonTheme.of(context);
+    // A share of a wide pane rather than a fixed strip: every tree level
+    // indents, so a deep folder's name otherwise truncates to the same few
+    // characters as its siblings while the viewer beside it sits half empty.
+    final treeWidth = (width * _treeShare).clamp(_treeMinWidth, _treeMaxWidth);
     return Row(
       children: [
-        SizedBox(width: 280, child: _buildTreePanel(context, ref)),
+        SizedBox(width: treeWidth, child: _buildTreePanel(context, ref)),
         SizedBox(
           width: CarbonBorders.hairline,
           child: ColoredBox(
@@ -526,24 +551,22 @@ class _FileExplorerBody extends ConsumerWidget {
   }
 
   Widget _buildViewerPage(BuildContext context) {
-    final theme = CarbonTheme.of(context);
     return Column(
       children: [
         _Toolbar(
           children: [
-            _ToolbarButton(
-              icon: CarbonIcons.arrowLeft,
-              label: 'Back to file tree',
-              onPressed: () => fileService.clearViewingFile(),
-            ),
-            Expanded(
-              child: Text(
-                'File Explorer',
+            // Arrow and title are one button: the title reads as the place
+            // the arrow goes, so it has to answer a click too.
+            Flexible(
+              child: CarbonButton(
+                label: 'File Explorer',
+                leading: const CarbonIcon(CarbonIcons.arrowLeft),
+                semanticLabel: 'Back to file tree',
+                kind: CarbonButtonKind.ghost,
+                neutral: true,
+                size: CarbonButtonSize.small,
                 maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.typography.control.copyWith(
-                  color: theme.colors.textSecondary,
-                ),
+                onPressed: () => fileService.clearViewingFile(),
               ),
             ),
           ],
@@ -634,6 +657,11 @@ class _FileFilterResults extends StatelessWidget {
   final List<FileFindEntry> entries;
   final bool loading;
   final String? error;
+
+  /// The bridge stopped listing before it reached every path, so a file the
+  /// user is looking for may exist and still be missing here.
+  final bool truncated;
+  final VoidCallback onRetry;
   final void Function(String path) onTapFile;
   final void Function(String path) onTapDirectory;
 
@@ -641,9 +669,14 @@ class _FileFilterResults extends StatelessWidget {
     required this.entries,
     required this.loading,
     required this.error,
+    required this.truncated,
+    required this.onRetry,
     required this.onTapFile,
     required this.onTapDirectory,
   });
+
+  static const _truncatedCopy =
+      'Results truncated: the file listing stopped early, so some files were not searched.';
 
   @override
   Widget build(BuildContext context) {
@@ -652,7 +685,11 @@ class _FileFilterResults extends StatelessWidget {
       // list; rendering them alike had the user retrying a search that broke.
       final failure = error;
       if (failure != null && !loading) {
-        return CarbonEmptyState(error: true, heading: 'Search failed: $failure');
+        return CarbonEmptyState(
+          error: true,
+          heading: 'Search failed: $failure',
+          action: CarbonButton(label: 'Retry', onPressed: onRetry),
+        );
       }
       return CarbonEmptyState(
         icon: loading ? null : CarbonIcons.search,
@@ -660,9 +697,10 @@ class _FileFilterResults extends StatelessWidget {
             ? const CarbonSpinner(size: CarbonSpacing.spacing07)
             : null,
         heading: loading ? 'Searching…' : 'No matching files',
+        body: !loading && truncated ? _truncatedCopy : null,
       );
     }
-    return CarbonTreeView(
+    final list = CarbonTreeView(
       semanticLabel: 'Matching files',
       itemCount: entries.length,
       itemBuilder: (context, index) {
@@ -679,6 +717,16 @@ class _FileFilterResults extends StatelessWidget {
           isDir ? onTapDirectory(path) : onTapFile(path);
         }
       },
+    );
+    if (!truncated) return list;
+    // Above the rows, not below: the list scrolls, and a hint at its foot is
+    // never seen by the user whose file is missing from the first screen.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const CarbonNotification(subtitle: _truncatedCopy),
+        Expanded(child: list),
+      ],
     );
   }
 }
@@ -707,6 +755,14 @@ class _PathLabel extends StatelessWidget {
     );
   }
 }
+
+String _counted(int n, String one, String many) => '$n ${n == 1 ? one : many}';
+
+/// The side-by-side tree's width: [_treeShare] of the explorer, never below
+/// the strip it used to be nor so wide the file beside it loses its room.
+const double _treeShare = 0.32;
+const double _treeMinWidth = 280;
+const double _treeMaxWidth = 440;
 
 /// The search panel content, extracted to manage its own text controller.
 class _SearchPanel extends StatefulWidget {
@@ -785,7 +841,7 @@ class _SearchPanelState extends State<_SearchPanel> {
               CarbonSearch(
                 controller: _controller,
                 focusNode: _focusNode,
-                placeholder: 'Search in files...',
+                placeholder: 'Search in files…',
                 semanticLabel: 'Search in files',
                 size: CarbonFieldSize.small,
                 autofocus: true,
@@ -797,7 +853,7 @@ class _SearchPanelState extends State<_SearchPanel> {
                 children: [
                   _ToolbarButton(
                     icon: CarbonIcons.letterAa,
-                    label: 'Case Sensitive',
+                    label: 'Case sensitive',
                     selected: state.caseSensitive,
                     onPressed: searchService.toggleCaseSensitive,
                   ),
@@ -809,7 +865,7 @@ class _SearchPanelState extends State<_SearchPanel> {
                   ),
                   _ToolbarButton(
                     icon: CarbonIcons.stringText,
-                    label: 'Whole Word',
+                    label: 'Whole word',
                     selected: state.wholeWord,
                     onPressed: searchService.toggleWholeWord,
                   ),
@@ -819,7 +875,8 @@ class _SearchPanelState extends State<_SearchPanel> {
                       child: CarbonTag(
                         label:
                             error ??
-                            '${state.totalMatches} in ${state.totalFiles} files',
+                            '${_counted(state.totalMatches, 'match', 'matches')} '
+                                'in ${_counted(state.totalFiles, 'file', 'files')}',
                         color: error != null
                             ? CarbonTagColor.red
                             : CarbonTagColor.gray,

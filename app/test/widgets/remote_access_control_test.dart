@@ -3,7 +3,9 @@ import 'dart:convert';
 
 import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/widgets/remote_access_control.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
@@ -37,11 +39,18 @@ HostControlClient _fakeClient(Map<String, int> calls) {
 
 Future<void> _pump(
   WidgetTester tester,
-  Future<HostControlClient> Function() client,
-) async {
+  Future<HostControlClient> Function() client, {
+  bool signedIn = true,
+}) async {
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [hostControlClientProvider.overrideWith((ref) => client())],
+      overrides: [
+        hostControlClientProvider.overrideWith((ref) => client()),
+        currentUserProvider.overrideWith(
+          (ref) =>
+              signedIn ? CurrentUser(userId: 'u-1', email: 'a@b.test') : null,
+        ),
+      ],
       child: const MaterialApp(
         home: Scaffold(body: Center(child: RemoteAccessControl())),
       ),
@@ -146,5 +155,26 @@ void main() {
     await tester.tap(find.byKey(const Key('remote-access-chip')));
     await tester.pump();
     expect(find.byType(RemoteAccessPanel), findsOneWidget);
+  });
+
+  testWidgets('signed out, an enabled machine does not claim to be reachable', (
+    tester,
+  ) async {
+    final client = _fakeClient(<String, int>{});
+    await client.remoteAccessSet(true);
+    await _pump(tester, () async => client, signedIn: false);
+
+    expect(find.text('Remote on'), findsNothing);
+    expect(tag(tester).label, 'Remote: sign in');
+    expect(tag(tester).color, CarbonTagColor.gray);
+    expect(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonTooltip &&
+            w.message ==
+                'Sign in to reach this machine from your other devices',
+      ),
+      findsOneWidget,
+    );
   });
 }

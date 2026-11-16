@@ -989,7 +989,7 @@ class TerminalHistoryViewState extends State<TerminalHistoryView> {
                       // middle is the one thing it cannot: the ids run
                       // straight through it.
                       model.loading
-                          ? 'Loading...'
+                          ? 'Loading…'
                           : model.gapped
                           ? 'Output was dropped; this scrollback has a gap'
                           : !model.recording

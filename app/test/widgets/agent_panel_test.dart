@@ -10,6 +10,7 @@ import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/remote_access.dart';
@@ -17,6 +18,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/services/account_agents_api.dart';
+import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/command_output_overlay.dart';
@@ -107,6 +109,11 @@ Future<void> _pump(
         // Never the real one: it reads the session cookie out of the keychain
         // and fetches /account/agents.
         accountAgentsProvider.overrideWith((_) async => inventory),
+        // Signed in: signed out, the remote chip reports the account rather
+        // than the machine switch these tests read.
+        currentUserProvider.overrideWith(
+          (_) => CurrentUser(userId: 'u-1', email: 'a@b.test'),
+        ),
         remoteAccessPolicyProvider.overrideWith(
           () => _FakePolicyNotifier(
             RemoteAccessPolicy(enabled: mobileAccessEnabled),

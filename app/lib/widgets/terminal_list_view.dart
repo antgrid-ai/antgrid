@@ -141,7 +141,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           child: Center(
             child: CarbonInlineLoading(
               status: CarbonInlineLoadingStatus.active,
-              description: 'loading terminals...',
+              description: 'Loading terminals…',
             ),
           ),
         ),
@@ -185,6 +185,11 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         tabs.firstOrNull;
 
     final atLimit = tabs.length >= _maxAdHocTerminals;
+    // The empty state carries its own New terminal button, so the strip's
+    // would be a second control for one action. Attaching shows none, so the
+    // strip keeps its button then.
+    final emptyStateOffersNew =
+        active == null && attach != CheckoutAttachStatus.attaching;
 
     // The terminal pane is Ab, so this host paints its backdrop and each
     // Carbon piece paints its own. The slots keep fixed positions so the pane
@@ -206,6 +211,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                 _kill(service, tabs, id, shown: id == active?.terminalId);
                 _focusTerminal();
               },
+              showNew: !emptyStateOffersNew,
               onNew: atLimit ? null : () => _createTerminal(service, tabs),
             ),
           ),
@@ -265,7 +271,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         return const Center(
           child: CarbonInlineLoading(
             status: CarbonInlineLoadingStatus.active,
-            description: 'attaching terminals…',
+            description: 'Attaching terminals…',
           ),
         );
       case CheckoutAttachStatus.failed:
@@ -280,7 +286,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           action: CarbonButtonSet(
             children: [
               CarbonButton(
-                label: 'New Terminal',
+                label: 'New terminal',
                 kind: CarbonButtonKind.tertiary,
                 icon: const CarbonIcon(CarbonIcons.add),
                 onPressed: () => _createTerminal(service, tabs),
@@ -302,7 +308,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           icon: CarbonIcons.terminal,
           heading: 'No terminals running',
           action: CarbonButton(
-            label: 'New Terminal',
+            label: 'New terminal',
             icon: const CarbonIcon(CarbonIcons.add),
             onPressed: () => _createTerminal(service, tabs),
           ),
@@ -350,6 +356,7 @@ class _TabStrip extends StatelessWidget {
     required this.activeId,
     required this.onSelect,
     required this.onKill,
+    required this.showNew,
     required this.onNew,
   });
 
@@ -357,6 +364,7 @@ class _TabStrip extends StatelessWidget {
   final String? activeId;
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onKill;
+  final bool showNew;
 
   /// Null at the terminal cap.
   final VoidCallback? onNew;
@@ -405,12 +413,13 @@ class _TabStrip extends StatelessWidget {
                       ],
                     ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: CarbonSpacing.spacing03,
+            if (showNew)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: CarbonSpacing.spacing03,
+                ),
+                child: _NewButton(onTap: onNew),
               ),
-              child: _NewButton(onTap: onNew),
-            ),
           ],
         ),
       ),

@@ -134,7 +134,7 @@ void main() {
       {'path': 'c.dart', 'status': 'U', 'staged': false},
     ]);
 
-    await tester.tap(action('Stage All Changes'));
+    await tester.tap(action('Stage all changes'));
     await tester.pump();
 
     expect(sentOfType('git:stage')?['files'], ['a.dart', 'c.dart']);
@@ -154,11 +154,11 @@ void main() {
       {'path': 'c.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(action('Discard All Changes'));
+    await tester.tap(action('Discard all changes'));
     await tester.pumpAndSettle();
-    // The dialog's confirm button, which is the only 'Discard All' TEXT on
+    // The dialog's confirm button, which is the only 'Discard all' TEXT on
     // screen — the header affordance itself is an icon.
-    await tester.tap(find.text('Discard All'));
+    await tester.tap(find.text('Discard all'));
     await tester.pumpAndSettle();
 
     final msg = sentOfType('git:discard');
@@ -175,7 +175,7 @@ void main() {
       {'path': 'a.dart', 'status': 'M', 'staged': false},
     ]);
 
-    await tester.tap(action('Discard All Changes'));
+    await tester.tap(action('Discard all changes'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -193,7 +193,7 @@ void main() {
       {'path': 'c.dart', 'status': 'M', 'staged': false},
     ]);
 
-    await tester.tap(action('Unstage All Changes'));
+    await tester.tap(action('Unstage all changes'));
     await tester.pump();
 
     expect(sentOfType('git:unstage')?['files'], ['a.dart', 'b.dart']);
@@ -205,9 +205,9 @@ void main() {
     ]);
 
     // Nothing unstaged: no Changes group, so no Stage All or Discard All.
-    expect(action('Unstage All Changes'), findsOneWidget);
-    expect(action('Stage All Changes'), findsNothing);
-    expect(action('Discard All Changes'), findsNothing);
+    expect(action('Unstage all changes'), findsOneWidget);
+    expect(action('Stage all changes'), findsNothing);
+    expect(action('Discard all changes'), findsNothing);
   });
 
   testWidgets('both group headers fit a narrow column', (tester) async {
@@ -219,8 +219,8 @@ void main() {
       {'path': 'b.dart', 'status': 'M', 'staged': true},
     ], width: 300);
 
-    expect(action('Stage All Changes'), findsOneWidget);
-    expect(action('Unstage All Changes'), findsOneWidget);
+    expect(action('Stage all changes'), findsOneWidget);
+    expect(action('Unstage all changes'), findsOneWidget);
     expect(find.text('Commit (1)'), findsOneWidget);
   });
 
@@ -229,12 +229,12 @@ void main() {
   ) async {
     await pumpWithStatus(tester, const []);
 
-    expect(action('Stage All Changes'), findsNothing);
-    expect(action('Discard All Changes'), findsNothing);
+    expect(action('Stage all changes'), findsNothing);
+    expect(action('Discard all changes'), findsNothing);
     expect(find.text('Commit'), findsNothing);
     expect(find.byType(TextField), findsNothing);
     expect(find.text('Changes'), findsNothing);
-    expect(find.text('Staged Changes'), findsNothing);
+    expect(find.text('Staged changes'), findsNothing);
     expect(find.text('History'), findsOneWidget);
   });
 
@@ -361,14 +361,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('a.dart'), findsNothing);
-    expect(action('Stage All Changes'), findsOneWidget);
+    expect(action('Stage all changes'), findsOneWidget);
     // The other group is untouched by the fold.
     expect(find.text('b.dart'), findsOneWidget);
 
-    await tester.tap(find.text('Staged Changes'));
+    await tester.tap(find.text('Staged changes'));
     await tester.pumpAndSettle();
     expect(find.text('b.dart'), findsNothing);
-    expect(action('Unstage All Changes'), findsOneWidget);
+    expect(action('Unstage all changes'), findsOneWidget);
   });
 
   testWidgets('phone width switches between Changes and History', (
@@ -383,14 +383,14 @@ void main() {
     expect(find.text('Changes · 1'), findsOneWidget);
     expect(find.text('Changes'), findsOneWidget);
     expect(find.text('a.dart'), findsOneWidget);
-    expect(action('Stage All Changes'), findsOneWidget);
+    expect(action('Stage all changes'), findsOneWidget);
     expect(find.text('History'), findsOneWidget);
 
     await tester.tap(find.text('History'));
     await tester.pump();
 
     expect(find.text('a.dart'), findsNothing);
-    expect(action('Stage All Changes'), findsNothing);
+    expect(action('Stage all changes'), findsNothing);
     expect(find.text('History'), findsNWidgets(2));
     // The commit box stays above the switch on either tab.
     expect(find.byType(TextField), findsOneWidget);
@@ -410,7 +410,7 @@ void main() {
 
     // VS Code's order: Staged Changes above Changes.
     expect(
-      tester.getRect(find.text('Staged Changes')).top,
+      tester.getRect(find.text('Staged changes')).top,
       lessThan(tester.getRect(find.text('Changes')).top),
     );
     expect(find.text('a.dart'), findsOneWidget);
@@ -424,7 +424,7 @@ void main() {
       {'path': 'a.dart', 'status': 'M', 'staged': true},
     ]);
 
-    expect(find.text('Staged Changes'), findsOneWidget);
+    expect(find.text('Staged changes'), findsOneWidget);
     expect(find.text('Changes'), findsNothing);
   });
 
@@ -435,7 +435,7 @@ void main() {
         {'path': 'b.dart', 'status': 'M', 'staged': false},
       ]);
 
-      expect(find.text('Staged Changes'), findsOneWidget);
+      expect(find.text('Staged changes'), findsOneWidget);
       expect(find.text('Changes'), findsOneWidget);
       expect(find.text('b.dart'), findsNWidgets(2));
     });
@@ -519,13 +519,13 @@ void main() {
       {'path': 'a.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(action('Discard All Changes'), warnIfMissed: false);
+    await tester.tap(action('Discard all changes'), warnIfMissed: false);
     await tester.pumpAndSettle();
     expect(sentOfType('git:discard'), isNull);
 
-    await tester.tap(action('Stage All Changes'));
+    await tester.tap(action('Stage all changes'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Stage All'));
+    await tester.tap(find.text('Stage all'));
     await tester.pumpAndSettle();
     expect(sentOfType('git:stage')?['files'], ['a.dart']);
   });
@@ -541,13 +541,13 @@ void main() {
       {'path': 'b.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(action('Stage All Changes'));
+    await tester.tap(action('Stage all changes'));
     await tester.pumpAndSettle();
     // Nothing goes out until the question is answered.
     expect(sentOfType('git:stage'), isNull);
     expect(find.textContaining('b.dart'), findsWidgets);
 
-    await tester.tap(find.text('Stage All'));
+    await tester.tap(find.text('Stage all'));
     await tester.pumpAndSettle();
     expect(sentOfType('git:stage')?['files'], ['a.dart', 'b.dart']);
   });
@@ -562,7 +562,7 @@ void main() {
       {'path': 'b.dart', 'status': '!', 'staged': false},
     ]);
 
-    await tester.tap(action('Stage All Changes'));
+    await tester.tap(action('Stage all changes'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -585,7 +585,7 @@ void main() {
       },
     ]);
 
-    await tester.tap(action('Stage All Changes'));
+    await tester.tap(action('Stage all changes'));
     await tester.pumpAndSettle();
 
     expect(find.text('Stage merge conflicts'), findsNothing);
@@ -607,7 +607,7 @@ void main() {
       ], width: 500);
 
       await hoverRow(tester, find.text('a.dart'));
-      await tester.tap(action('Mark Resolved'));
+      await tester.tap(action('Mark resolved'));
       await tester.pumpAndSettle();
 
       expect(find.text('Mark resolved'), findsNothing);
@@ -631,7 +631,7 @@ void main() {
       ], width: 500);
 
       await hoverRow(tester, find.text('a.dart'));
-      await tester.tap(action('Mark Resolved'));
+      await tester.tap(action('Mark resolved'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('deleted'), findsWidgets);
@@ -648,10 +648,10 @@ void main() {
       ], width: 500);
 
       await hoverRow(tester, find.text('a.dart'));
-      await tester.tap(action('Mark Resolved'));
+      await tester.tap(action('Mark resolved'));
       await tester.pumpAndSettle();
       // The dialog's confirm button — the row affordance itself is an icon.
-      await tester.tap(find.text('Mark Resolved'));
+      await tester.tap(find.text('Mark resolved'));
       await tester.pumpAndSettle();
 
       // `git add` IS the resolution; there is no separate resolve verb on the
@@ -774,7 +774,7 @@ void main() {
       ], width: 500);
 
       await hoverRow(tester, find.text('a.dart'));
-      await tester.tap(action('Mark Resolved'));
+      await tester.tap(action('Mark resolved'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
@@ -794,7 +794,7 @@ void main() {
 
       // Staged Changes is listed first, so the Changes row is the last.
       await hoverRow(tester, find.text('a.dart').last);
-      await tester.tap(action('Discard Changes').last);
+      await tester.tap(action('Discard changes').last);
       await tester.pumpAndSettle();
       expect(find.textContaining('staged changes are kept'), findsOneWidget);
       await tester.tap(find.text('Discard'));
@@ -814,7 +814,7 @@ void main() {
       ], width: 500);
 
       await hoverRow(tester, find.text('a.dart').first);
-      await tester.tap(action('Discard Changes').first);
+      await tester.tap(action('Discard changes').first);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Revert'));
       await tester.pumpAndSettle();

@@ -21,6 +21,7 @@ import 'package:antgrid/widgets/session_breadcrumb.dart';
 import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -58,6 +59,8 @@ Widget _host(
   int ahead = 1,
   int behind = 2,
   SessionEntry? session,
+  String project = 'antgrid',
+  String branch = 'main',
 }) => ProviderScope(
   overrides: [
     ..._stores.overrides,
@@ -69,8 +72,8 @@ Widget _host(
     terminalStateProvider.overrideWith(
       (ref) => Stream.value(
         TerminalState(
-          agentInfo: const AgentInfo(name: 'antgrid'),
-          gitBranch: 'main',
+          agentInfo: AgentInfo(name: project),
+          gitBranch: branch,
           gitAhead: ahead,
           gitBehind: behind,
         ),
@@ -240,6 +243,30 @@ void main() {
       );
     });
 
+    // A phone header read "demo-shop (sa… / Add checkout valid…": the project's
+    // fixed cap took width the session needed. The session is what the user
+    // acts on, so the project gives way first.
+    testWidgets('on a narrow header the project truncates before the session', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          const TitleBarBreadcrumb(showBranchPill: false),
+          width: 300,
+          project: 'demo-shop (sample)',
+          session: _session(name: 'Fix checkout'),
+        ),
+      );
+      await _settle(tester);
+
+      RenderParagraph paragraph(String key) =>
+          tester.renderObject<RenderParagraph>(find.byKey(Key(key)));
+      expect(find.byKey(const Key('breadcrumb-project')), findsOneWidget);
+      expect(paragraph('breadcrumb-session').didExceedMaxLines, isFalse);
+      expect(paragraph('breadcrumb-project').didExceedMaxLines, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('the session name is tappable a little above and below its '
         'text under touch density', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
@@ -319,6 +346,62 @@ void main() {
       expect(copied, ['main']);
       expect(find.text('Copied "main"'), findsOneWidget);
       await tester.pump(const Duration(seconds: 3));
+    });
+
+    // A fixed 160 cap cut "feat/carbon-flutter" short with the rest of the
+    // header empty beside it. The name stays under Carbon's own 208 tag cap,
+    // which the test font (one em per glyph) reaches far sooner than Plex.
+    testWidgets('beside a short title the tag shows its whole name', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          const TitleBarBreadcrumb(),
+          width: 780,
+          ahead: 0,
+          behind: 0,
+          branch: 'feat/carbon',
+        ),
+      );
+      await _settle(tester);
+
+      final text = find.descendant(
+        of: find.byKey(const Key('session-branch-tag')),
+        matching: find.text('feat/carbon'),
+      );
+      expect(
+        tester.renderObject<RenderParagraph>(text).didExceedMaxLines,
+        isFalse,
+      );
+      expect(
+        tester.getSize(find.byKey(const Key('session-branch-tag'))).width,
+        greaterThan(160),
+      );
+    });
+
+    // Where the row is tight the session keeps the room and the tag gives way,
+    // but never below its floor.
+    testWidgets('a long session name leaves the tag its floor', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const TitleBarBreadcrumb(),
+          width: 780,
+          ahead: 0,
+          behind: 0,
+          branch: 'feat/a-very-long-branch-name-for-the-tag',
+          session: _session(name: 'A very long session name ' * 12),
+        ),
+      );
+      await _settle(tester);
+
+      final tag = tester.getRect(find.byKey(const Key('session-branch-tag')));
+      expect(tag.width, greaterThanOrEqualTo(150));
+      expect(tag.right, lessThanOrEqualTo(780.5));
+      expect(
+        tester.getRect(find.byKey(const Key('breadcrumb-session'))).right,
+        lessThanOrEqualTo(tag.left),
+      );
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('a long name truncates inside maxWidth', (tester) async {

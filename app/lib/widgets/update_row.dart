@@ -48,9 +48,9 @@ class UpdateRow extends ConsumerWidget {
       // shows both consent dialogs before the first byte, so a hard "0%" would
       // read as stalled for the whole of it.
       UpdateInstallWorking(:final percent) when percent > 0 =>
-        'Updating... $percent%',
-      UpdateInstallWorking() || UpdateInstallDone() => 'Updating...',
-      _ => downloading ? 'Updating...' : strategy.rowTitle,
+        'Updating… $percent%',
+      UpdateInstallWorking() || UpdateInstallDone() => 'Updating…',
+      _ => downloading ? 'Updating…' : strategy.rowTitle,
     };
 
     final t = CarbonTheme.of(context);
