@@ -1,10 +1,6 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
-import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 import '../../util/relative_time.dart';
 import 'handler_ask_footer.dart';
@@ -32,15 +28,20 @@ class HandlerRowMeta extends StatelessWidget {
     required this.at,
     this.urgent = false,
     this.asked = false,
+    this.inline = false,
   });
 
   /// The markers an escalation earns, derived once. Snapshots, wrap-ups and
   /// activity rows use the plain constructor — they are history, and nothing
   /// about them is waiting on the user.
-  factory HandlerRowMeta.forEscalation(HandlerEscalation e) => HandlerRowMeta(
+  factory HandlerRowMeta.forEscalation(
+    HandlerEscalation e, {
+    bool inline = false,
+  }) => HandlerRowMeta(
     at: e.at,
     urgent: e.urgency == 'high',
     asked: e.nonBlocking,
+    inline: inline,
   );
 
   final int at;
@@ -54,29 +55,55 @@ class HandlerRowMeta extends StatelessWidget {
   /// minted `normal` — so the precedence below is a floor rather than a case.
   final bool asked;
 
+  /// One line instead of a stack, for the collapsed strip whose height is a
+  /// fixed reserve.
+  final bool inline;
+
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final style = AbTokens.monoStyle(
-      fontSize: AbTokens.fontXxs,
-      color: p.textMuted,
+    final theme = CarbonTheme.of(context);
+    final time = Text(
+      _fmtTime(at),
+      maxLines: 1,
+      softWrap: false,
+      overflow: TextOverflow.ellipsis,
+      style: theme.typography.code.copyWith(color: theme.colors.textSecondary),
     );
+    final Widget? tag = urgent
+        ? const CarbonTag(
+            label: 'Urgent',
+            size: CarbonTagSize.small,
+            color: CarbonTagColor.red,
+          )
+        : asked
+        ? const CarbonTag(
+            label: 'Asked',
+            size: CarbonTagSize.small,
+            color: CarbonTagColor.coolGray,
+          )
+        : null;
+    if (inline) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (tag != null) ...[tag, const SizedBox(width: CarbonSpacing.spacing03)],
+          Flexible(child: time),
+        ],
+      );
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         // Above the timestamp, so the eye reaches it on the way down rather
-        // than after it. System-assigned data, so the mono uppercase chip,
-        // matching ESCALATE ONLY on the session card.
+        // than after it. The word carries the meaning, not the fill, so the
+        // two stay distinguishable without colour.
         //
-        // One slot, so a row can never wear both words: URGENT wins, because a
+        // One slot, so a row can never wear both words: Urgent wins, because a
         // row that somehow carried both would be a stopped session, and that is
         // the reading that must not be softened.
-        if (urgent)
-          AbChip.system(label: 'URGENT', color: p.warning)
-        else if (asked)
-          AbChip.system(label: 'ASKED', color: p.textSecondary),
-        Text(_fmtTime(at), style: style),
+        ?tag,
+        time,
       ],
     );
   }
@@ -134,7 +161,8 @@ class HandlerEscalationRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
     final e = escalation;
     // First in the chain, and a cheap floor rather than a live case: the bridge
     // never mints choices for a report, so this and the decision card can never
@@ -167,61 +195,72 @@ class HandlerEscalationRow extends StatelessWidget {
         onCustomReply: onReply,
       );
     }
-    return AbListRow(
-      leading: HandlerRail(
-        icon: e.floorRule != null ? AbIcons.shield : null,
-        color: p.warning,
-      ),
-      // The question is the thing being decided, so it is allowed the room to
-      // be read. Clipped at one line it was a decision taken without its
-      // subject.
-      titleMaxLines: 3,
-      subtitleMaxLines: 2,
-      // Top-aligned because the title wraps: centred, the shield drifts down
-      // past the question it qualifies and lands beside the reasoning, while
-      // the decision card directly above keeps its own shield on the first line.
-      crossAxisAlignment: CrossAxisAlignment.start,
-      title: Text(
+    final helper = theme.typography.helper.copyWith(
+      color: colors.textSecondary,
+    );
+    // A pressable row announces only its title, so the title carries what the
+    // content shows: the urgency word is what tells "Asked you" from "Needs
+    // you" to a reader who cannot see the tag.
+    return CarbonContainedListRow(
+      title: [
+        if (e.urgency == 'high')
+          'Urgent'
+        else if (e.nonBlocking)
+          'Asked',
         e.question,
-        style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
+        if (e.floorRule != null) 'Safety floor: ${e.floorRule}',
+        e.reasoning,
+        if (e.nonBlocking) handlerAskLatencyNote,
+      ].join('. '),
+      leading: HandlerRail(
+        icon: e.floorRule != null ? CarbonIcons.security : null,
+        color: colors.supportWarning,
       ),
-      subtitle: Column(
+      onPressed: onReply,
+      content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                // The question is the thing being decided, so it is allowed
+                // the room to be read. Clipped at one line it was a decision
+                // taken without its subject.
+                child: Text(
+                  e.question,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.typography.body.copyWith(
+                    color: colors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: CarbonSpacing.spacing03),
+              HandlerRowMeta.forEscalation(e),
+            ],
+          ),
           if (e.floorRule != null)
             Text(
               'Safety floor: ${e.floorRule}',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                fontWeight: FontWeight.w600,
-                color: p.warning,
-              ),
+              style: helper.copyWith(fontWeight: FontWeight.w600),
             ),
           Text(
             e.reasoning,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: p.textMuted,
-            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: helper,
           ),
           // An ask reaching this row is one with no options to tap —
           // answerable in words alone, and owed the same two things the card
           // gives it: what happens to the answer, and what is still running
           // behind it.
-          if (e.nonBlocking)
-            Text(
-              handlerAskLatencyNote,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: p.textMuted,
-              ),
-            ),
+          if (e.nonBlocking) Text(handlerAskLatencyNote, style: helper),
           ?_askFooter,
         ],
       ),
-      trailing: HandlerRowMeta.forEscalation(e),
-      onTap: onReply,
     );
   }
 }

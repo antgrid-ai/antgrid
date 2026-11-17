@@ -31,6 +31,7 @@ import '../../services/upload_service.dart';
 import '../../util/detached.dart';
 import '../../util/image_thumbnail.dart';
 import '../../utils/platform_utils.dart';
+import '../attach_progress.dart';
 import '../attachment_preview_dialog.dart';
 import 'composer/composer_attachments.dart';
 import 'composer/composer_controller.dart';
@@ -355,8 +356,9 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
   }) async {
     target ??= _uploadTarget();
     setState(() {
-      attachment.status = AttachmentStatus.uploading;
-      attachment.progress = 0;
+      attachment
+        ..status = AttachmentStatus.uploading
+        ..progress = AttachProgress.staging(attachment.fileName);
     });
     try {
       if (target == null) throw const UploadException('OFFLINE', '');
@@ -367,7 +369,14 @@ class _TranscriptComposerState extends ConsumerState<TranscriptComposer> {
         bytes: attachment.bytes!,
         mimeType: attachment.mimeType,
         onProgress: (sent, total) {
-          if (mounted) setState(() => attachment.progress = sent / total);
+          if (!mounted) return;
+          setState(
+            () => attachment.progress = AttachProgress.tick(
+              fileName: attachment.fileName,
+              sent: sent,
+              total: total,
+            ),
+          );
         },
       );
       if (!mounted) return;

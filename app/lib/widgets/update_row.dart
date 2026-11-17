@@ -1,17 +1,14 @@
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_progress_rule.dart';
 import '../providers/update_available.dart';
 import '../update/update_install_controller.dart';
 import '../update/update_strategy.dart';
 import '../update/update_check_controller.dart';
 import '../update/update_check_result.dart';
 import '../util/detached.dart';
+import 'drawer/drawer_chrome_row.dart';
 
 /// Persistent "Update available" drawer row, shown directly above the account
 /// footer while a newer version is waiting ([updateAvailableProvider]).
@@ -56,84 +53,61 @@ class UpdateRow extends ConsumerWidget {
       _ => downloading ? 'Updating...' : strategy.rowTitle,
     };
 
-    final p = context.antgrid;
-    return Container(
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: p.borderSubtle)),
-      ),
-      child: InkWell(
-        hoverColor: p.bgElevated,
-        onTap: live
-            ? () => detached(
-                'UpdateRow',
-                'install sequence',
-                () => ref
-                    .read(updateInstallControllerProvider.notifier)
-                    .start(context),
-              )
-            : null,
-        child: SizedBox(
-          height: AbTokens.commandTrayHeight,
-          child: Stack(
-            // Tight constraints for the Row, so the label stays centred in the
-            // tray height rather than hugging the top.
-            fit: StackFit.expand,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AbTokens.space16,
-                ),
-                child: Row(
-                  children: [
-                    AbIcon(
-                      AbIcons.arrowDown,
-                      size: 12,
-                      color: live ? p.accent : p.textMuted,
-                    ),
-                    const SizedBox(width: AbTokens.space10),
-                    Expanded(
-                      child: Text(
-                        title,
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXs,
-                          color: p.textSecondary,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    // An action label on a row that refuses taps reads as a
-                    // dead button, so it goes away while one is running.
-                    if (live)
-                      Text(
-                        strategy.rowActionLabel,
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXs,
-                          color: p.accent,
-                        ),
-                      ),
-                  ],
-                ),
+    final t = CarbonTheme.of(context);
+    final c = t.colors;
+    final row = DrawerChromeRow(
+      icon: CarbonIcons.download,
+      label: title,
+      semanticLabel: live ? '$title, ${strategy.rowActionLabel}' : title,
+      iconColor: live ? c.linkPrimary : c.iconDisabled,
+      onPressed: live
+          ? () => detached(
+              'UpdateRow',
+              'install sequence',
+              () => ref
+                  .read(updateInstallControllerProvider.notifier)
+                  .start(context),
+            )
+          : null,
+      // An action label on a row that refuses taps reads as a dead button, so
+      // it goes away while one is running.
+      trailing: live
+          ? Padding(
+              padding: const EdgeInsetsDirectional.only(
+                start: CarbonSpacing.spacing03,
+                end: CarbonSpacing.spacing02,
               ),
-              // Overlaid rather than stacked in a Column: the row must not
-              // change height when the rule appears.
-              if (install is UpdateInstallWorking)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  // Indeterminate until the platform actually ticks: a rule
-                  // pinned at zero for minutes is indistinguishable from a
-                  // stuck one.
-                  child: AbProgressRule(
-                    fraction: install.percent == 0
-                        ? null
-                        : install.percent / 100,
-                  ),
-                ),
-            ],
+              child: Text(
+                strategy.rowActionLabel,
+                style: t.typography.control.copyWith(color: c.linkPrimary),
+              ),
+            )
+          : null,
+    );
+    if (install is! UpdateInstallWorking) return row;
+
+    // Overlaid rather than stacked in a Column: the row must not change height
+    // when the bar appears.
+    return Stack(
+      children: [
+        row,
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          // Indeterminate until the platform actually ticks: a bar pinned at
+          // zero for minutes is indistinguishable from a stuck one. The band
+          // rests instead of sweeping, so a row that sits in the drawer for
+          // the length of an install adds no perpetual animation.
+          child: CarbonProgressBar(
+            size: CarbonProgressBarSize.small,
+            hideLabel: true,
+            label: 'Update progress',
+            animateIndeterminate: false,
+            value: install.percent == 0 ? null : install.percent / 100,
           ),
         ),
-      ),
+      ],
     );
   }
 }

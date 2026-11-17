@@ -1,5 +1,14 @@
 import { z } from "zod/v4";
 import { PushDeliverMessage, PushResultMessage } from "./push-protocol";
+import {
+  BusAckedMessage,
+  BusAckMessage,
+  BusDeliverMessage,
+  BusDrainMessage,
+  BusReceiptMessage,
+  BusRefusedMessage,
+  BusSendMessage,
+} from "./bus-protocol";
 
 // An AGENT's device id is its bare machine `deviceUuid` (no compound
 // `deviceUuid.projectId` registrations, though '.' remains a legal character).
@@ -28,6 +37,9 @@ export const HelloMessage = z.object({
   ts: z.string().datetime(),
   nonce: z.string().min(20).max(64), // base64, ≥16 random bytes
   sig: z.string().min(1).max(256), // base64 Ed25519 over buildHelloSigBody
+  // Agent opt-in to bus frames; the relay sends none to a client that omits it.
+  // Deliberately outside buildHelloSigBody: it selects delivery, not identity.
+  bus: z.literal(1).optional(),
 });
 
 // App-layer liveness probe: protocol-level WS pongs are unobservable from
@@ -40,6 +52,9 @@ export const ClientMessage = z.discriminatedUnion("type", [
   HelloMessage,
   PushDeliverMessage,
   PingMessage,
+  BusSendMessage,
+  BusAckMessage,
+  BusDrainMessage,
 ]);
 
 // --- Relay → Client ---
@@ -49,6 +64,9 @@ export const WelcomeMessage = z.object({
   deviceId: z.string(),
   epoch: z.number().int().nonnegative(),
   serverTime: z.string().datetime(),
+  // Set for every agent, whatever its hello said: it advertises that the relay
+  // can carry bus frames and is not an echo of `hello.bus`.
+  bus: z.literal(1).optional(),
 });
 
 export const ErrorCode = z.enum([
@@ -107,6 +125,10 @@ export const ServerMessage = z.discriminatedUnion("type", [
   PushResultMessage,
   PongMessage,
   PeerPolicyChangedMessage,
+  BusReceiptMessage,
+  BusDeliverMessage,
+  BusAckedMessage,
+  BusRefusedMessage,
 ]);
 
 // --- Type exports ---

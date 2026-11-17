@@ -1,14 +1,14 @@
 // The per-session Handler choices and the sheet they share. The rules that
 // matter here are the ones a screenshot cannot show: what a change SENDS, and
 // what the sheet claims while nothing is actually judging.
-import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
+import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/widgets/handler/handler_session_settings.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -99,16 +99,16 @@ class _ControlledSettingsState extends State<_ControlledSettings> {
   );
 }
 
-Future<void> _pump(
-  WidgetTester tester, {
-  required HandlerSessionSettingsValue value,
-  Map<String, bool> catalog = const {'claude': true},
-  ValueChanged<HandlerSessionSettingsValue>? onChanged,
-  bool appliesNextPass = false,
-  List<String>? lenses = _allLenses,
-}) async {
-  useInMemoryPrefs();
-  await tester.pumpWidget(
+/// Five tiles with a sentence each stand taller than the default surface, and
+/// a tile scrolled out of view cannot be tapped.
+void _tallSurface(WidgetTester tester) {
+  tester.view
+    ..physicalSize = const Size(800, 2400)
+    ..devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+Widget _app(Widget child, List<String>? lenses, Map<String, bool> catalog) =>
     ProviderScope(
       overrides: [
         agentCatalogProvider.overrideWith(
@@ -122,17 +122,32 @@ Future<void> _pump(
         ),
       ],
       child: MaterialApp(
-        theme: ThemeData.dark().copyWith(
-          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
-        ),
+        theme: buildAbTheme(),
         home: Scaffold(
-          body: _ControlledSettings(
-            initial: value,
-            onChanged: onChanged ?? (_) {},
-            appliesNextPass: appliesNextPass,
-          ),
+          body: AbCarbonScope(child: SingleChildScrollView(child: child)),
         ),
       ),
+    );
+
+Future<void> _pump(
+  WidgetTester tester, {
+  required HandlerSessionSettingsValue value,
+  Map<String, bool> catalog = const {'claude': true},
+  ValueChanged<HandlerSessionSettingsValue>? onChanged,
+  bool appliesNextPass = false,
+  List<String>? lenses = _allLenses,
+}) async {
+  useInMemoryPrefs();
+  _tallSurface(tester);
+  await tester.pumpWidget(
+    _app(
+      _ControlledSettings(
+        initial: value,
+        onChanged: onChanged ?? (_) {},
+        appliesNextPass: appliesNextPass,
+      ),
+      lenses,
+      catalog,
     ),
   );
   await tester.pump();
@@ -147,39 +162,15 @@ Future<void> _pumpHalf(
   List<String>? lenses = _allLenses,
 }) async {
   useInMemoryPrefs();
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        agentCatalogProvider.overrideWith(
-          () => _SeededCatalog({
-            for (final e in catalog.entries)
-              e.key: _descriptor(e.key, judgeCapable: e.value),
-          }),
-        ),
-        handlerStateProvider.overrideWith(
-          (ref) => Stream.value(_state(lenses)),
-        ),
-      ],
-      child: MaterialApp(
-        theme: ThemeData.dark().copyWith(
-          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
-        ),
-        home: Scaffold(body: half),
-      ),
-    ),
-  );
+  _tallSurface(tester);
+  await tester.pumpWidget(_app(half, lenses, catalog));
   await tester.pump();
 }
 
-/// Chip labels render as written (`AbChip.choice`), so finders name the
-/// phrase the user reads.
-AbChip _chip(WidgetTester tester, String label) =>
-    tester.widget<AbChip>(find.widgetWithText(AbChip, label));
-
 const _ownChip = 'Your own';
 
-/// Every chip the row offers when the machine has advertised all four presets.
-/// There is no chip for the unnamed default — the floor line carries that.
+/// Every tile the row offers when the machine has advertised all four presets.
+/// There is no tile for the unnamed default — the floor line carries that.
 const _allChips = [
   'Stays in scope',
   'Proof it works',
@@ -188,16 +179,31 @@ const _allChips = [
   _ownChip,
 ];
 
+/// The tile a label names, so assertions read the state the user sees.
+CarbonInteraction _tile(WidgetTester tester, String label) =>
+    tester.widget<CarbonInteraction>(
+      find.ancestor(
+        of: find.text(label),
+        matching: find.byType(CarbonInteraction),
+      ),
+    );
+
+/// The labels among [_allChips] currently on screen.
+List<String> _shownTiles() => [
+  for (final label in _allChips)
+    if (find.text(label).evaluate().isNotEmpty) label,
+];
+
 /// The "Your own" panel's field, keyed rather than positional: it only mounts
-/// once that chip is selected, unlike the always-on field this replaced.
+/// once that tile is selected.
 Finder get _ownField => find.byKey(const ValueKey('handlerOwnLensField'));
 
 /// Whether the cursor is in the "Your own" field. Read off the node the panel
 /// hands the field, so it answers for the field the user would type into.
 bool _ownFocus(WidgetTester tester) =>
-    tester.widget<AbTextField>(_ownField).focusNode?.hasFocus ?? false;
+    tester.widget<CarbonTextInput>(_ownField).focusNode?.hasFocus ?? false;
 
-/// Selects the sixth chip so the panel (and its field) mount.
+/// Selects the last tile so the panel (and its field) mount.
 Future<void> _selectOwn(WidgetTester tester) async {
   await tester.tap(find.text(_ownChip));
   await tester.pump();
@@ -341,18 +347,28 @@ void main() {
     });
   });
 
+
   group('the sheet', () {
     testWidgets('leads with what it looks for and follows with the judge', (
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      final lens = tester
-          .getTopLeft(find.text('WHAT HANDLER WEIGHS'))
-          .dy;
-      final judge = tester.getTopLeft(find.text('JUDGED BY')).dy;
-      final model = tester.getTopLeft(find.text('MODEL')).dy;
+      final lens = tester.getTopLeft(find.text('What Handler weighs')).dy;
+      final judge = tester.getTopLeft(find.text('Judged by')).dy;
+      final model = tester.getTopLeft(find.text('Model')).dy;
       expect(lens, lessThan(judge));
       expect(judge, lessThan(model));
+    });
+
+    testWidgets('a stance announces its definition with its name', (
+      tester,
+    ) async {
+      await _pump(tester, value: _value(judgeTool: 'claude'));
+      final blurb = handlerLensBlurb(handlerLensFromWire('pm'));
+      expect(
+        find.semantics.byLabel('Stays in scope. $blurb'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a healthy judge marks the running lens and nothing else', (
@@ -362,36 +378,27 @@ void main() {
         tester,
         value: _value(judgeTool: 'claude', lens: (roleId: 'pm', brief: null)),
       );
-      final p = kDefaultPalette;
-      expect(_chip(tester, 'Stays in scope').selected, isTrue);
-      expect(_chip(tester, 'Stays in scope').color, p.accent);
-      // Exactly one: the accent is what says "this is what is running", and two
-      // of them would be two answers to one question.
-      final accented = tester
-          .widgetList<AbChip>(find.byType(AbChip))
-          .where((c) => c.color == p.accent);
-      expect(accented, hasLength(1));
+      expect(_tile(tester, 'Stays in scope').selected, isTrue);
+      // Exactly one: the selection is what says "this is what is running", and
+      // two of them would be two answers to one question.
+      final selected = [
+        for (final label in _allChips)
+          if (_tile(tester, label).selected == true) label,
+      ];
+      expect(selected, ['Stays in scope']);
       expect(find.text(handlerLensParkedBlurb), findsNothing);
     });
 
-    testWidgets('the live lens reads no quieter than a warning does', (
+    testWidgets('every preset says what it asks, on its own tile', (
       tester,
     ) async {
-      // The chips name roles — PM, QA, CRITIC — and nothing else, so what each
-      // one asks the agent exists ONLY in this line. It used to render muted on
-      // the reasoning that a working control needs no commentary, which set the
-      // definition of the chosen option at the contrast floor and made the row
-      // undecidable without leaving the sheet.
+      // The tiles name roles — PM, QA, CRITIC — and nothing else, so what each
+      // one asks the agent exists ONLY in its blurb, and the row is undecidable
+      // without it. Picked or unpicked, the definitions stay beside the names.
       await _pump(tester, value: _value(lens: (roleId: 'qa', brief: null)));
-      final live = tester.widget<Text>(
-        find.text(handlerLensBlurb(HandlerLens.qa)),
-      );
-
-      await _pump(tester, value: _value(lens: null));
-      final warning = tester.widget<Text>(find.text(handlerLensUnsetBlurb));
-
-      expect(live.style?.color, warning.style?.color);
-      expect(live.style?.color, kDefaultPalette.textSecondary);
+      for (final l in HandlerLens.values) {
+        expect(find.text(handlerLensBlurb(l)), findsOneWidget, reason: '$l');
+      }
     });
 
     testWidgets('a judge that cannot run headless parks the lens', (
@@ -403,9 +410,8 @@ void main() {
         catalog: const {'claude': true, 'codex': false},
       );
       // Still the user's choice to make — it starts working the moment the
-      // judge is fixed — but it must not be painted as running.
-      expect(_chip(tester, 'Proof it works').selected, isTrue);
-      expect(_chip(tester, 'Proof it works').color, isNull);
+      // judge is fixed — but the sheet must say it is not running.
+      expect(_tile(tester, 'Proof it works').selected, isTrue);
       expect(find.text(handlerLensParkedBlurb), findsOneWidget);
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
     });
@@ -429,7 +435,7 @@ void main() {
     testWidgets('post-arm, a live lens says when it lands', (tester) async {
       await _pump(
         tester,
-        value: _value(judgeTool: 'claude'),
+        value: _value(judgeTool: 'claude', lens: (roleId: 'pm', brief: null)),
         appliesNextPass: true,
       );
       expect(
@@ -442,9 +448,10 @@ void main() {
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'), lenses: null);
-      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
-        expect(chip.enabled, isFalse);
-        expect(chip.selected, isFalse);
+      for (final label in _shownTiles()) {
+        final tile = _tile(tester, label);
+        expect(tile.onPressed, isNull, reason: label);
+        expect(tile.selected, isFalse, reason: label);
       }
       // "Your own" is disabled with the rest — nothing here can be picked,
       // including the panel a tap on it would otherwise reveal.
@@ -484,12 +491,12 @@ void main() {
         ),
         onChanged: (v) => sent = v,
       );
-      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
-        expect(chip.selected, isFalse);
+      for (final label in _allChips) {
+        expect(_tile(tester, label).selected, isFalse, reason: label);
       }
       expect(find.text(handlerLensUnknownBlurb), findsOneWidget);
 
-      // One tap on any chip is what replaces it — the pick has to be a change
+      // One tap on any tile is what replaces it — the pick has to be a change
       // even though this app cannot say what it is replacing.
       await tester.tap(find.text('Stays in scope'));
       await tester.pump();
@@ -506,9 +513,10 @@ void main() {
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude', lens: null));
-      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
-        expect(chip.selected, isFalse);
-        expect(chip.enabled, isTrue);
+      for (final label in _allChips) {
+        final tile = _tile(tester, label);
+        expect(tile.selected, isFalse, reason: label);
+        expect(tile.onPressed, isNotNull, reason: label);
       }
       expect(find.text(handlerLensUnsetBlurb), findsOneWidget);
     });
@@ -536,7 +544,7 @@ void main() {
       final from = _value(judgeTool: 'claude');
       await _pump(tester, value: from, onChanged: (v) => sent = v);
       await _selectOwn(tester);
-      // Picking the chip alone is a commit too — an empty draft — before any
+      // Picking the tile alone is a commit too — an empty draft — before any
       // text is typed.
       sent = null;
 
@@ -591,16 +599,15 @@ void main() {
         catalog: const {'codex': false},
       );
 
-      expect(find.text('WHAT HANDLER WEIGHS'), findsOneWidget);
-      // The parked blurb REPLACES the lens one — a lens that is stored and
-      // inert must not also describe what it would be asking.
+      expect(find.text('What Handler weighs'), findsOneWidget);
+      // A lens that is stored and inert must say so under the tiles.
       expect(find.text(handlerLensParkedBlurb), findsOneWidget);
       // The parked notice stays with the lens it parks: its copy never says
       // "below", so on the arm sheet it points up at the chip and still reads
       // true.
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
-      expect(find.text('JUDGED BY'), findsNothing);
-      expect(find.text('MODEL'), findsNothing);
+      expect(find.text('Judged by'), findsNothing);
+      expect(find.text('Model'), findsNothing);
     });
 
     testWidgets('the judge half carries both picker rows and no lens', (
@@ -615,10 +622,10 @@ void main() {
         ),
       );
 
-      expect(find.text('JUDGED BY'), findsOneWidget);
-      expect(find.text('MODEL'), findsOneWidget);
-      expect(find.text('WHAT HANDLER WEIGHS'), findsNothing);
-      expect(find.byType(AbChip), findsNothing);
+      expect(find.text('Judged by'), findsOneWidget);
+      expect(find.text('Model'), findsOneWidget);
+      expect(find.text('What Handler weighs'), findsNothing);
+      expect(_shownTiles(), isEmpty);
     });
 
     testWidgets('picking a judge clears the model with it', (tester) async {
@@ -629,7 +636,7 @@ void main() {
         catalog: const {'claude': true, 'codex': true},
         onChanged: (v) => sent = v,
       );
-      await tester.tap(find.text('Claude'));
+      await tester.tap(find.byType(CarbonSelect<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Codex').last);
       await tester.pumpAndSettle();
@@ -640,7 +647,7 @@ void main() {
       expect(sent?.judgeModel, isNull);
     });
 
-    testWidgets('the chips are one radio group', (tester) async {
+    testWidgets('the tiles are one radio group', (tester) async {
       // One selection lives at a time, whichever of them it lands on — never
       // a preset row plus a separate disclosure.
       await _pump(tester, value: _value(judgeTool: 'claude'));
@@ -649,7 +656,7 @@ void main() {
       await tester.pump();
       for (final label in _allChips) {
         expect(
-          _chip(tester, label).selected,
+          _tile(tester, label).selected,
           label == 'What could break',
           reason: label,
         );
@@ -658,25 +665,29 @@ void main() {
       await tester.tap(find.text(_ownChip));
       await tester.pump();
       for (final label in _allChips) {
-        expect(_chip(tester, label).selected, label == _ownChip, reason: label);
+        expect(
+          _tile(tester, label).selected,
+          label == _ownChip,
+          reason: label,
+        );
       }
     });
 
-    testWidgets('the row offers no chip for adding nothing', (tester) async {
-      // The floor line above the chips is what says a session with no lens is
-      // still judged, so a chip restating it was a choice already made.
+    testWidgets('the row offers no tile for adding nothing', (tester) async {
+      // The floor line above the tiles is what says a session with no lens is
+      // still judged, so a tile restating it was a choice already made.
       await _pump(tester, value: _value(judgeTool: 'claude'));
       expect(find.text('Nothing extra'), findsNothing);
-      expect(find.byType(AbChip), findsNWidgets(_allChips.length));
-      // The stored default: every chip unpicked rather than one standing in
+      expect(_shownTiles(), _allChips);
+      // The stored default: every tile unpicked rather than one standing in
       // for "none", and no blurb claiming a lens is running.
-      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
-        expect(chip.selected, isFalse);
+      for (final label in _allChips) {
+        expect(_tile(tester, label).selected, isFalse, reason: label);
       }
       expect(find.text(handlerLensBlurb(null)), findsNothing);
     });
 
-    testWidgets('the own-lens panel shows only while its chip is picked', (
+    testWidgets('the own-lens panel shows only while its tile is picked', (
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
@@ -697,7 +708,7 @@ void main() {
     testWidgets('picking "Your own" puts the cursor in the field', (
       tester,
     ) async {
-      // Typing is the only reason that chip reveals a field, so the tap that
+      // Typing is the only reason that tile reveals a field, so the tap that
       // reveals it is the tap that should land in it.
       await _pump(tester, value: _value(judgeTool: 'claude'));
       await _selectOwn(tester);
@@ -706,14 +717,14 @@ void main() {
       expect(_ownFocus(tester), isTrue);
     });
 
-    testWidgets('tapping the chip already picked focuses the field again', (
+    testWidgets('tapping the tile already picked focuses the field again', (
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
       await _selectOwn(tester);
       await tester.pump();
 
-      tester.widget<AbTextField>(_ownField).focusNode!.unfocus();
+      tester.widget<CarbonTextInput>(_ownField).focusNode!.unfocus();
       await tester.pump();
       expect(_ownFocus(tester), isFalse);
 
@@ -743,7 +754,7 @@ void main() {
     });
 
     testWidgets(
-      'picking any other chip keeps the draft locally and sends an empty brief',
+      'picking any other tile keeps the draft locally and sends an empty brief',
       (tester) async {
         // Two stances cannot both run, so a preset always clears the WIRE
         // brief — but the draft itself rides in the panel's own controller
@@ -765,7 +776,7 @@ void main() {
         await _selectOwn(tester);
         expect(_ownField, findsOneWidget);
         expect(
-          tester.widget<AbTextField>(_ownField).controller?.text,
+          tester.widget<CarbonTextInput>(_ownField).controller?.text,
           'watch the migrations',
         );
       },

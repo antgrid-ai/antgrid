@@ -16,6 +16,7 @@ import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:re_editor/re_editor.dart';
 
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -26,9 +27,9 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/command_output_overlay.dart';
+import 'package:antgrid/widgets/carbon_send_to_agent_button.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:antgrid/widgets/send_capture_to_agent.dart';
-import 'package:antgrid/widgets/send_to_agent_button.dart';
 
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/toast_host.dart';
@@ -198,11 +199,13 @@ void main() {
       await _pump(
         tester,
         s,
-        FileContentViewer(
-          fileContent: FileContent(
-            path: 'notes.txt', // unrecognized extension: editor is ready
-            content: content, // immediately, no highlight-isolate wait
-            size: content.length,
+        AbCarbonScope(
+          child: FileContentViewer(
+            fileContent: FileContent(
+              path: 'notes.txt', // unrecognized extension: editor is ready
+              content: content, // immediately, no highlight-isolate wait
+              size: content.length,
+            ),
           ),
         ),
       );
@@ -225,8 +228,8 @@ void main() {
       // button shares a Stack with the editor, so a synthetic tap also reaches
       // the editor's tap handler and collapses the very selection the handler
       // is about to read.
-      final button = tester.widget<SendToAgentButton>(
-        find.byType(SendToAgentButton),
+      final button = tester.widget<CarbonSendToAgentButton>(
+        find.byType(CarbonSendToAgentButton),
       );
       button.onPressed();
       await tester.pump();

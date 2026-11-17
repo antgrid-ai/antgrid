@@ -1,16 +1,11 @@
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../config/storage_scope.dart';
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/ab_config.dart';
 import '../../models/file_tree_models.dart';
@@ -158,66 +153,37 @@ class WorktreeSetupNudge extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final t = context.antgrid;
     final entryId = target.id;
     return Padding(
+      // Same inset as the remote-access nudge, which can stack above this one.
       padding: const EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space12,
-        AbTokens.space16,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing04,
+        CarbonSpacing.spacing05,
         0,
       ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space12,
-          vertical: AbTokens.space8,
+      child: CarbonNotification(
+        subtitle:
+            'Isolated sessions start from a clean checkout — ignored files '
+            "like .env and node_modules aren't there.",
+        action: CarbonNotificationAction(
+          label: 'Add setup steps',
+          // The container, not `ref`: the write outlives this widget by
+          // design — it retires the nudge on success, and a layout change
+          // or a target switch can tear the canvas down mid-flight.
+          onPressed: () => detached(
+            'NEW_SESSION',
+            'write worktree.setup starter block',
+            () => _applyStarterSetup(context, ref.container, entryId),
+          ),
         ),
-        decoration: BoxDecoration(
-          color: t.bgSurface,
-          border: Border.all(color: t.borderSubtle),
-          borderRadius: BorderRadius.circular(AbTokens.radius8),
-        ),
-        child: Row(
-          children: [
-            AbIcon(AbIcons.info, size: 13, color: t.textMuted),
-            const SizedBox(width: AbTokens.space8),
-            Expanded(
-              child: Text(
-                'Isolated sessions start from a clean checkout — ignored files '
-                "like .env and node_modules aren't there.",
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: t.textSecondary,
-                ),
-              ),
-            ),
-            const SizedBox(width: AbTokens.space10),
-            AbButton(
-              label: 'Add setup steps',
-              compact: true,
-              // The container, not `ref`: the write outlives this widget by
-              // design — it retires the nudge on success, and a layout change
-              // or a target switch can tear the canvas down mid-flight.
-              onTap: () => detached(
-                'NEW_SESSION',
-                'write worktree.setup starter block',
-                () => _applyStarterSetup(context, ref.container, entryId),
-              ),
-            ),
-            const SizedBox(width: AbTokens.space4),
-            AbIconButton(
-              icon: AbIcons.close,
-              tone: AbIconButtonTone.muted,
-              tooltip: "Dismiss — won't ask again for this project",
-              onTap: () => detached(
-                'NEW_SESSION',
-                'dismiss worktree.setup nudge',
-                () => ref
-                    .read(worktreeSetupNudgeSeenProvider.notifier)
-                    .markSeen(entryId),
-              ),
-            ),
-          ],
+        closeLabel: "Dismiss — won't ask again for this project",
+        onClose: () => detached(
+          'NEW_SESSION',
+          'dismiss worktree.setup nudge',
+          () => ref
+              .read(worktreeSetupNudgeSeenProvider.notifier)
+              .markSeen(entryId),
         ),
       ),
     );

@@ -1,22 +1,17 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
+import '../design/ab_carbon.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_separator.dart';
-import '../design/widgets/ab_text_field.dart';
-import '../utils/platform_utils.dart';
+import 'carbon_confirm.dart';
 
 /// What a tap or drag on the preview lays down.
 enum PreviewDrawTool { pen, line, rect, ellipse, note }
@@ -50,7 +45,7 @@ const double kPreviewDrawStrokeWidth = 3.0;
 
 /// Type size for a note mark. Large enough to survive being scaled into a
 /// full-resolution screenshot and read back by whoever opens the PNG.
-const double kPreviewDrawNoteFontSize = AbTokens.fontLg;
+double get kPreviewDrawNoteFontSize => AbTokens.fontLg;
 
 /// A note wraps rather than running edge to edge, so it reads as a card and
 /// not a banner across the screenshot.
@@ -226,9 +221,37 @@ class PreviewDrawOverlay extends StatefulWidget {
   State<PreviewDrawOverlay> createState() => PreviewDrawOverlayState();
 }
 
+/// The pen palette. Held as a choice rather than a [Color] so a palette or
+/// brightness switch re-resolves the selected swatch instead of leaving the
+/// bar pointing at a colour that is no longer in it.
+enum _PenColor {
+  red('Red'),
+  yellow('Yellow'),
+  green('Green'),
+  blue('Blue'),
+  contrast('Contrast');
+
+  const _PenColor(this.label);
+
+  final String label;
+
+  Color resolve(CarbonColors colors) => switch (this) {
+    _PenColor.red => colors.supportError,
+    _PenColor.yellow => colors.supportWarning,
+    _PenColor.green => colors.supportSuccess,
+    _PenColor.blue => colors.interactive,
+    _PenColor.contrast => colors.textPrimary,
+  };
+}
+
 class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   final List<PreviewDrawMark> _marks = [];
   final GlobalKey _canvasKey = GlobalKey();
+
+  /// A context under the Carbon scope, for presenting the discard modal: this
+  /// State's own context sits above the scope and would hand the modal no
+  /// Carbon theme.
+  final GlobalKey _scopedKey = GlobalKey();
   final TextEditingController _noteController = TextEditingController();
   final FocusNode _noteFocus = FocusNode();
 
@@ -239,7 +262,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   final FocusNode _overlayFocus = FocusNode(debugLabel: 'PreviewDrawOverlay');
 
   PreviewDrawTool _tool = PreviewDrawTool.pen;
-  Color? _color;
+  _PenColor _pen = _PenColor.red;
   bool _sending = false;
 
   /// Index into [_marks] of the note being typed into, or null. A note mark
@@ -290,8 +313,6 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     _undo();
     return KeyEventResult.handled;
   }
-
-  Color _penColor(BuildContext context) => _color ?? context.antgrid.error;
 
   Size get _canvasSize {
     final box = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
@@ -445,13 +466,15 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
       widget.onClose();
       return;
     }
-    final discard = await AbConfirmDialog.show(
-      context: context,
+    final scoped = _scopedKey.currentContext;
+    if (scoped == null) return;
+    final discard = await showCarbonConfirm(
+      scoped,
       title: 'Discard drawing?',
       body: 'Your marks on this page will be lost.',
       confirmLabel: 'Discard',
       cancelLabel: 'Keep drawing',
-      destructive: true,
+      danger: true,
     );
     if (!mounted || !discard) return;
     widget.onClose();
@@ -479,69 +502,81 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
 
   @override
   Widget build(BuildContext context) {
-    final color = _penColor(context);
     return Focus(
       focusNode: _overlayFocus,
       autofocus: true,
       onKeyEvent: _onOverlayKey,
-      child: Stack(
-        key: _canvasKey,
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              key: const ValueKey('preview-draw-canvas'),
-              behavior: HitTestBehavior.opaque,
-              onTapUp: (d) => _onTapUp(d, color),
-              onPanStart: _tool == PreviewDrawTool.note
-                  ? null
-                  : (d) => _startMark(d.localPosition, color),
-              onPanUpdate: _tool == PreviewDrawTool.note
-                  ? null
-                  : (d) => _extendMark(d.localPosition),
-              onPanEnd: _tool == PreviewDrawTool.note
-                  ? null
-                  : (_) => _endMark(),
-              // Belt-and-suspenders alongside the point clamping above: a
-              // `CustomPaint` doesn't clip its own canvas by default, so
-              // without this any point that slipped through un-clamped would
-              // still paint over whatever sits outside the preview.
-              child: ClipRect(
-                child: CustomPaint(
-                  painter: _MarksPainter(_marks),
-                  child: const SizedBox.expand(),
+      // One scope at a fixed position: the bar, the note editor and the
+      // discard modal's presenting context all need the same Carbon theme,
+      // and the canvas between them builds no Carbon widget.
+      child: AbCarbonScope(
+        child: Builder(
+          key: _scopedKey,
+          builder: (scoped) {
+            final theme = CarbonTheme.of(scoped);
+            final color = _pen.resolve(theme.colors);
+            return Stack(
+              key: _canvasKey,
+              children: [
+                Positioned.fill(
+                  child: GestureDetector(
+                    key: const ValueKey('preview-draw-canvas'),
+                    behavior: HitTestBehavior.opaque,
+                    onTapUp: (d) => _onTapUp(d, color),
+                    onPanStart: _tool == PreviewDrawTool.note
+                        ? null
+                        : (d) => _startMark(d.localPosition, color),
+                    onPanUpdate: _tool == PreviewDrawTool.note
+                        ? null
+                        : (d) => _extendMark(d.localPosition),
+                    onPanEnd: _tool == PreviewDrawTool.note
+                        ? null
+                        : (_) => _endMark(),
+                    // Belt-and-suspenders alongside the point clamping above:
+                    // a `CustomPaint` doesn't clip its own canvas by default,
+                    // so without this any point that slipped through
+                    // un-clamped would still paint over whatever sits outside
+                    // the preview.
+                    child: ClipRect(
+                      child: CustomPaint(
+                        painter: _MarksPainter(_marks),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ),
-          if (_editing != null) _buildNoteEditor(color),
-          Positioned(
-            left: AbTokens.space8,
-            right: AbTokens.space8,
-            bottom: AbTokens.space12,
-            child: Center(
-              child: _DrawToolBar(
-                tool: _tool,
-                color: color,
-                busy: _sending,
-                hasMarks: _marks.isNotEmpty,
-                onTool: (t) {
-                  _commitNote();
-                  setState(() => _tool = t);
-                },
-                onColor: (c) => setState(() => _color = c),
-                onUndo: _undo,
-                onClear: _clear,
-                onClose: () => unawaited(requestClose()),
-                onSend: () => unawaited(_send()),
-              ),
-            ),
-          ),
-        ],
+                if (_editing != null) _buildNoteEditor(theme, color),
+                Positioned(
+                  left: CarbonSpacing.spacing03,
+                  right: CarbonSpacing.spacing03,
+                  bottom: CarbonSpacing.spacing04,
+                  child: Center(
+                    child: _DrawToolBar(
+                      tool: _tool,
+                      pen: _pen,
+                      busy: _sending,
+                      hasMarks: _marks.isNotEmpty,
+                      onTool: (t) {
+                        _commitNote();
+                        setState(() => _tool = t);
+                      },
+                      onPen: (p) => setState(() => _pen = p),
+                      onUndo: _undo,
+                      onClear: _clear,
+                      onClose: () => unawaited(requestClose()),
+                      onSend: () => unawaited(_send()),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
 
-  Widget _buildNoteEditor(Color color) {
+  Widget _buildNoteEditor(CarbonThemeData theme, Color color) {
     final anchor = _marks[_editing!].points.first;
     final size = _canvasSize;
     // Clamp so a mark placed near the right or bottom edge still opens a
@@ -555,7 +590,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     final top = size.height > 0
         ? anchor.dy.clamp(
             0.0,
-            (size.height - AbTokens.rowHeightLg).clamp(0.0, size.height),
+            (size.height - theme.controlHeight).clamp(0.0, size.height),
           )
         : anchor.dy;
     return Positioned(
@@ -571,18 +606,22 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
           }
           return KeyEventResult.ignored;
         },
-        child: AbTextField(
+        child: CarbonTextInput(
           controller: _noteController,
           focusNode: _noteFocus,
-          hintText: 'Note',
+          placeholder: 'Note',
+          semanticLabel: 'Note text',
           autofocus: true,
-          // Tinted to match the color the note will render in, so the editor
-          // already reads as the card it's about to become.
-          fillColor: color.withValues(alpha: 0.12),
-          suffix: AbIconButton(
-            icon: AbIcons.close,
-            tooltip: 'Cancel note',
-            onTap: _cancelNote,
+          // The colour the note will render in, since the field itself cannot
+          // be tinted to match.
+          prefix: _Swatch(color: color),
+          // A field action, not a bare button: its tap counts as inside the
+          // field, so a mouse press cannot blur-commit the note before Cancel
+          // discards it.
+          suffix: CarbonFieldAction(
+            icon: const CarbonIcon(CarbonIcons.close),
+            semanticLabel: 'Cancel note',
+            onPressed: _cancelNote,
           ),
           onSubmitted: (_) => _commitNote(),
         ),
@@ -591,7 +630,8 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   }
 }
 
-const double _kNoteEditorWidth = 220.0;
+const double _kNoteEditorWidth =
+    CarbonSpacing.spacing13 + CarbonSpacing.spacing10;
 
 class _MarksPainter extends CustomPainter {
   const _MarksPainter(this.marks);
@@ -609,6 +649,29 @@ class _MarksPainter extends CustomPainter {
   bool shouldRepaint(covariant _MarksPainter oldDelegate) => true;
 }
 
+/// A round colour chip: the pen colour in the bar's picker button, the
+/// palette's entries and the note editor's prefix.
+class _Swatch extends StatelessWidget {
+  const _Swatch({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
+    return SizedBox.square(
+      dimension: CarbonSpacing.spacing04,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: colors.borderStrong01),
+        ),
+      ),
+    );
+  }
+}
+
 /// The floating bar: shape tools, then color, then the two ways out. Floats
 /// over the page rather than docking above or below it, so arming the pencil
 /// costs the preview no layout at all — nothing moves, nothing reflows, and
@@ -616,11 +679,11 @@ class _MarksPainter extends CustomPainter {
 class _DrawToolBar extends StatelessWidget {
   const _DrawToolBar({
     required this.tool,
-    required this.color,
+    required this.pen,
     required this.busy,
     required this.hasMarks,
     required this.onTool,
-    required this.onColor,
+    required this.onPen,
     required this.onUndo,
     required this.onClear,
     required this.onClose,
@@ -628,124 +691,299 @@ class _DrawToolBar extends StatelessWidget {
   });
 
   final PreviewDrawTool tool;
-  final Color color;
+  final _PenColor pen;
   final bool busy;
   final bool hasMarks;
   final ValueChanged<PreviewDrawTool> onTool;
-  final ValueChanged<Color> onColor;
+  final ValueChanged<_PenColor> onPen;
   final VoidCallback onUndo;
   final VoidCallback onClear;
   final VoidCallback onClose;
   final VoidCallback onSend;
 
-  static const _tools = <(PreviewDrawTool, String, String)>[
-    (PreviewDrawTool.pen, AbIcons.draw, 'Freehand'),
-    (PreviewDrawTool.line, AbIcons.drawLine, 'Line'),
-    (PreviewDrawTool.rect, AbIcons.drawRect, 'Rectangle'),
-    (PreviewDrawTool.ellipse, AbIcons.drawEllipse, 'Ellipse'),
-    (PreviewDrawTool.note, AbIcons.comment, 'Note'),
+  static const _tools = <(PreviewDrawTool, CarbonIcons, String)>[
+    (PreviewDrawTool.pen, CarbonIcons.draw, 'Freehand'),
+    // Thin, not thick: at the icon size a thick stroke reads as a bar.
+    (PreviewDrawTool.line, CarbonIcons.lineThin, 'Line'),
+    (PreviewDrawTool.rect, CarbonIcons.squareOutline, 'Rectangle'),
+    (PreviewDrawTool.ellipse, CarbonIcons.circleOutline, 'Ellipse'),
+    (PreviewDrawTool.note, CarbonIcons.chat, 'Note'),
   ];
 
   @override
   Widget build(BuildContext context) {
-    final palette = [
-      context.antgrid.error,
-      context.antgrid.warning,
-      context.antgrid.success,
-      context.antgrid.accent,
-      context.antgrid.textPrimary,
-    ];
-    return Container(
-      height: isMobilePlatform ? AbTokens.rowHeightXl : AbTokens.rowHeightLg,
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
+    final theme = CarbonTheme.of(context);
+    return DecoratedBox(
       decoration: BoxDecoration(
-        color: context.antgrid.bgSurface,
-        border: Border.all(color: context.antgrid.borderDefault),
-        borderRadius: AbTokens.borderRadiusFull,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Only the tool/color cluster scrolls. Undo, Clear and the two ways
-          // out are all pinned outside it: a dozen cells cannot fit a
-          // phone-width panel, and a control someone needs to reach every
-          // time they overdraw must never be the one that scrolls out of
-          // view — that used to include Undo/Clear, which is exactly the bug
-          // this pinning fixes (they were reachable only by swiping the
-          // toolbar itself, and read as simply missing).
-          Flexible(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final (kind, icon, label) in _tools)
-                    _BarCell(
-                      tooltip: label,
-                      selected: kind == tool,
-                      onTap: () => onTool(kind),
-                      child: AbIcon(
-                        icon,
-                        size: AbTokens.iconButtonGlyph,
-                        color: kind == tool
-                            ? context.antgrid.accent
-                            : context.antgrid.textSecondary,
-                      ),
-                    ),
-                  const _BarDivider(),
-                  _ColorPickerCell(
-                    color: color,
-                    palette: palette,
-                    onColor: onColor,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const _BarDivider(),
-          _BarCell(
-            tooltip: 'Undo',
-            selected: false,
-            onTap: hasMarks ? onUndo : null,
-            child: AbIcon(
-              AbIcons.undo,
-              size: AbTokens.iconButtonGlyph,
-              color: hasMarks
-                  ? context.antgrid.textSecondary
-                  : context.antgrid.textDisabled,
-            ),
-          ),
-          _BarCell(
-            tooltip: 'Clear',
-            selected: false,
-            onTap: hasMarks ? onClear : null,
-            child: AbIcon(
-              AbIcons.trash,
-              size: AbTokens.iconButtonGlyph,
-              color: hasMarks
-                  ? context.antgrid.textSecondary
-                  : context.antgrid.textDisabled,
-            ),
-          ),
-          const _BarDivider(),
-          _BarCell(
-            tooltip: 'Close',
-            selected: false,
-            onTap: onClose,
-            child: AbIcon(
-              AbIcons.close,
-              size: AbTokens.iconButtonGlyph,
-              color: context.antgrid.textSecondary,
-            ),
-          ),
-          const SizedBox(width: AbTokens.space6),
-          AbButton(
-            label: busy ? 'Sending…' : 'Send',
-            variant: AbButtonVariant.primary,
-            onTap: busy ? null : onSend,
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: theme.colors.shadow,
+            blurRadius: 6,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
+      child: CarbonLayerSurface(
+        border: true,
+        padding: const EdgeInsets.symmetric(
+          horizontal: CarbonSpacing.spacing03,
+          vertical: CarbonSpacing.spacing02,
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) => _buildRow(
+            // Send's label is the widest pinned control; below this width it
+            // gives way to an icon so the tools keep a usable viewport.
+            compact: constraints.maxWidth < _kCompactBarWidth,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRow({required bool compact}) {
+    // Every control stays on screen: when the tools and the actions cannot
+    // share a row they stack, rather than one group scrolling out of view.
+    // Controls reachable only by swiping the bar read as simply missing.
+    return _ToolBarLayout(
+      tools: _EdgeFadeScroll(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CarbonContentSwitcher<PreviewDrawTool>(
+              size: CarbonContentSwitcherSize.small,
+              iconOnly: true,
+              semanticLabel: 'Drawing tools',
+              value: tool,
+              onChanged: onTool,
+              options: [
+                for (final (kind, icon, label) in _tools)
+                  CarbonOption<PreviewDrawTool>(
+                    value: kind,
+                    label: label,
+                    icon: CarbonIcon(icon),
+                  ),
+              ],
+            ),
+            const _BarDivider(),
+            _ColorPickerCell(pen: pen, onPen: onPen),
+          ],
+        ),
+      ),
+      divider: const _BarDivider(),
+      actions: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.undo),
+            semanticLabel: 'Undo',
+            onPressed: hasMarks ? onUndo : null,
+          ),
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.erase),
+            semanticLabel: 'Clear',
+            onPressed: hasMarks ? onClear : null,
+          ),
+          const _BarDivider(),
+          CarbonButton.iconOnly(
+            icon: const CarbonIcon(CarbonIcons.close),
+            semanticLabel: 'Close',
+            onPressed: onClose,
+          ),
+          const SizedBox(width: CarbonSpacing.spacing03),
+          if (compact)
+            CarbonButton.iconOnly(
+              icon: const CarbonIcon(CarbonIcons.send),
+              semanticLabel: 'Send',
+              kind: CarbonButtonKind.primary,
+              busy: busy,
+              onPressed: onSend,
+            )
+          else
+            CarbonButton(label: 'Send', busy: busy, onPressed: onSend),
+        ],
+      ),
+    );
+  }
+}
+
+const double _kCompactBarWidth = 360;
+
+/// The bar's two groups, [tools] (shapes and colour) and [actions] (Undo,
+/// Clear and the two ways out), on one row split by [divider] when both fit
+/// at their natural width; otherwise stacked tools-over-actions with the
+/// divider dropped, each row centred.
+///
+/// Decided from the groups' intrinsic widths rather than a fixed breakpoint,
+/// because those move with density, text scale and the Send label.
+class _ToolBarLayout extends MultiChildRenderObjectWidget {
+  _ToolBarLayout({
+    required Widget tools,
+    required Widget divider,
+    required Widget actions,
+  }) : super(children: <Widget>[tools, divider, actions]);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderToolBarLayout();
+}
+
+class _ToolBarParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderToolBarLayout extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _ToolBarParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _ToolBarParentData> {
+  static const double _rowGap = CarbonSpacing.spacing02;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _ToolBarParentData) {
+      child.parentData = _ToolBarParentData();
+    }
+  }
+
+  (RenderBox, RenderBox, RenderBox) get _groups {
+    final tools = firstChild!;
+    final divider = childAfter(tools)!;
+    return (tools, divider, childAfter(divider)!);
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    final (tools, _, actions) = _groups;
+    return math.max(
+      tools.getMinIntrinsicWidth(double.infinity),
+      actions.getMinIntrinsicWidth(double.infinity),
+    );
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    final (tools, divider, actions) = _groups;
+    return tools.getMaxIntrinsicWidth(double.infinity) +
+        divider.getMaxIntrinsicWidth(double.infinity) +
+        actions.getMaxIntrinsicWidth(double.infinity);
+  }
+
+  @override
+  void performLayout() {
+    final (tools, divider, actions) = _groups;
+    final loose = BoxConstraints(maxWidth: constraints.maxWidth);
+    // Half a pixel of slack: intrinsic and laid-out widths can differ by
+    // rounding, which must not flip a bar that exactly fits into two rows.
+    final stacked =
+        computeMaxIntrinsicWidth(double.infinity) > constraints.maxWidth + 0.5;
+    tools.layout(loose, parentUsesSize: true);
+    actions.layout(loose, parentUsesSize: true);
+    divider.layout(
+      stacked ? BoxConstraints.tight(Size.zero) : loose,
+      parentUsesSize: true,
+    );
+    final toolsData = tools.parentData! as _ToolBarParentData;
+    final dividerData = divider.parentData! as _ToolBarParentData;
+    final actionsData = actions.parentData! as _ToolBarParentData;
+    if (stacked) {
+      final width = math.max(tools.size.width, actions.size.width);
+      toolsData.offset = Offset((width - tools.size.width) / 2, 0);
+      dividerData.offset = Offset.zero;
+      actionsData.offset = Offset(
+        (width - actions.size.width) / 2,
+        tools.size.height + _rowGap,
+      );
+      size = constraints.constrain(
+        Size(width, tools.size.height + _rowGap + actions.size.height),
+      );
+      return;
+    }
+    final height = math.max(
+      tools.size.height,
+      math.max(divider.size.height, actions.size.height),
+    );
+    var x = 0.0;
+    for (final (child, data) in [
+      (tools, toolsData),
+      (divider, dividerData),
+      (actions, actionsData),
+    ]) {
+      data.offset = Offset(x, (height - child.size.height) / 2);
+      x += child.size.width;
+    }
+    size = constraints.constrain(Size(x, height));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+}
+
+/// A horizontal scroller that fades whichever edge has content beyond it.
+///
+/// The tool cluster scrolls only in a panel narrower than the cluster itself,
+/// such as a quarter-width touch pane. Clipped hard there, it cuts the content
+/// switcher mid-cell and reads as a stray rule rather than as more tools.
+class _EdgeFadeScroll extends StatefulWidget {
+  const _EdgeFadeScroll({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_EdgeFadeScroll> createState() => _EdgeFadeScrollState();
+}
+
+class _EdgeFadeScrollState extends State<_EdgeFadeScroll> {
+  bool _fadeStart = false;
+  bool _fadeEnd = false;
+
+  bool _onMetrics(ScrollMetrics m) {
+    final start = m.extentBefore > 0;
+    final end = m.extentAfter > 0;
+    if (start != _fadeStart || end != _fadeEnd) {
+      setState(() {
+        _fadeStart = start;
+        _fadeEnd = end;
+      });
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scroller = NotificationListener<ScrollMetricsNotification>(
+      onNotification: (n) => _onMetrics(n.metrics),
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (n) => _onMetrics(n.metrics),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: widget.child,
+        ),
+      ),
+    );
+    // Always masked, even with nothing to fade: swapping the wrapper in and
+    // out would remount the scroller and drop its offset mid-drag.
+    // dstIn keeps only the mask's alpha, so any opaque token serves as "show".
+    final show = CarbonTheme.of(context).colors.textPrimary;
+    const hide = Color(0x00000000);
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (bounds) {
+        final stop = bounds.width <= 0
+            ? 0.0
+            : (CarbonSpacing.spacing06 / bounds.width).clamp(0.0, 0.5);
+        return LinearGradient(
+          colors: [
+            _fadeStart ? hide : show,
+            show,
+            show,
+            _fadeEnd ? hide : show,
+          ],
+          stops: [0, stop, 1 - stop, 1],
+        ).createShader(bounds);
+      },
+      child: scroller,
     );
   }
 }
@@ -754,16 +992,17 @@ class _BarDivider extends StatelessWidget {
   const _BarDivider();
 
   @override
-  Widget build(BuildContext context) => const Padding(
-    padding: EdgeInsets.symmetric(horizontal: AbTokens.space6),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: CarbonSpacing.spacing02),
     child: SizedBox(
-      height: AbTokens.space16,
-      child: AbSeparator.vertical(weight: AbSeparatorWeight.strong),
+      width: CarbonBorders.hairline,
+      height: CarbonSpacing.spacing05,
+      child: ColoredBox(color: CarbonTheme.of(context).colors.borderStrong01),
     ),
   );
 }
 
-/// Current pen color as a single swatch cell that opens the palette in a
+/// Current pen color as a single swatch button that opens the palette in a
 /// popup, rather than laying all five swatches inline in the toolbar row.
 ///
 /// The inline row used to sit inside the same scrollable cluster as the
@@ -771,123 +1010,83 @@ class _BarDivider extends StatelessWidget {
 /// width entirely — reachable only by swiping the toolbar itself, which read
 /// as the palette simply being gone. One fixed-width trigger has nothing left
 /// to squeeze out.
-class _ColorPickerCell extends StatelessWidget {
-  const _ColorPickerCell({
-    required this.color,
-    required this.palette,
-    required this.onColor,
-  });
+class _ColorPickerCell extends StatefulWidget {
+  const _ColorPickerCell({required this.pen, required this.onPen});
 
-  final Color color;
-  final List<Color> palette;
-  final ValueChanged<Color> onColor;
-
-  Future<void> _open(BuildContext context) async {
-    final anchor = abMenuAnchorRect(context);
-    if (anchor == null) return;
-    final picked = await showAbPanel<Color>(
-      context: context,
-      anchorRect: anchor,
-      width: 156,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(AbTokens.space4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final swatch in palette)
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AbTokens.space2,
-                ),
-                child: GestureDetector(
-                  onTap: () => Navigator.of(ctx).pop(swatch),
-                  child: Container(
-                    width: AbTokens.space16,
-                    height: AbTokens.space16,
-                    decoration: BoxDecoration(
-                      color: swatch,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: swatch == color
-                            ? ctx.antgrid.textPrimary
-                            : ctx.antgrid.borderStrong,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (picked != null) onColor(picked);
-  }
+  final _PenColor pen;
+  final ValueChanged<_PenColor> onPen;
 
   @override
-  Widget build(BuildContext context) {
-    return _BarCell(
-      tooltip: 'Pen color',
-      selected: false,
-      onTap: () => unawaited(_open(context)),
-      child: Container(
-        width: AbTokens.space16,
-        height: AbTokens.space16,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(color: context.antgrid.borderStrong),
-        ),
-      ),
-    );
-  }
+  State<_ColorPickerCell> createState() => _ColorPickerCellState();
 }
 
-/// A bar cell: a fixed square target around whatever glyph or swatch it
-/// holds, with selection shown as a ring on the CELL — the swatches differ
-/// only in color, so there is nothing on them to latch.
-class _BarCell extends StatelessWidget {
-  const _BarCell({
-    required this.tooltip,
-    required this.selected,
-    required this.onTap,
-    required this.child,
-  });
+class _ColorPickerCellState extends State<_ColorPickerCell> {
+  final CarbonPopupController _popup = CarbonPopupController();
 
-  final String tooltip;
-  final bool selected;
-  final VoidCallback? onTap;
-  final Widget child;
+  /// The popup binds Escape on its anchor's subtree, and a tap on an icon
+  /// button does not move focus, so the trigger takes it explicitly or Escape
+  /// would miss the popup and reach the overlay.
+  final FocusNode _triggerFocus = FocusNode(debugLabel: 'PenColorTrigger');
+
+  @override
+  void dispose() {
+    _triggerFocus.dispose();
+    _popup.dispose();
+    super.dispose();
+  }
+
+  void _pick(_PenColor pen) {
+    _popup.close();
+    widget.onPen(pen);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final edge = isMobilePlatform
-        ? AbTokens.tapTargetMin - AbTokens.space8
-        : AbTokens.rowHeightXs;
-    return Semantics(
-      button: true,
-      label: tooltip,
-      selected: selected,
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: MouseRegion(
-          cursor: onTap == null
-              ? SystemMouseCursors.basic
-              : SystemMouseCursors.click,
-          child: Container(
-            width: edge,
-            height: edge,
-            alignment: Alignment.center,
-            decoration: selected
-                ? BoxDecoration(
-                    color: context.antgrid.bgElevated,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: context.antgrid.borderStrong),
-                  )
-                : null,
-            child: child,
+    final colors = CarbonTheme.of(context).colors;
+    return CarbonAnchoredPopup(
+      controller: _popup,
+      preferAbove: true,
+      gap: CarbonSpacing.spacing02,
+      popupBuilder: (popupContext, available) {
+        final theme = CarbonTheme.of(popupContext);
+        final level = CarbonLayer.of(popupContext);
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: theme.layer(level),
+            border: Border.all(color: theme.borderSubtle(level)),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: theme.colors.shadow,
+                blurRadius: 6,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
-        ),
+          child: Padding(
+            padding: const EdgeInsets.all(CarbonSpacing.spacing02),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final option in _PenColor.values)
+                  CarbonButton.iconOnly(
+                    icon: _Swatch(color: option.resolve(theme.colors)),
+                    semanticLabel: option.label,
+                    selected: option == widget.pen,
+                    onPressed: () => _pick(option),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+      child: CarbonButton.iconOnly(
+        icon: _Swatch(color: widget.pen.resolve(colors)),
+        semanticLabel: 'Pen color',
+        focusNode: _triggerFocus,
+        onPressed: () {
+          _triggerFocus.requestFocus();
+          _popup.toggle();
+        },
       ),
     );
   }

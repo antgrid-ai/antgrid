@@ -2,6 +2,7 @@
 // is the sheet's ACCOUNT OF ITSELF: that it names its own subject even on the
 // repeat arm where every explanatory sentence has been retired, and that the
 // sentence it says the backlog starts from is one the user can actually see.
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -13,7 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/prefs_test_mock.dart';
 
-const _blockHead = "WHAT TO DO WHILE YOU'RE AWAY";
+const _blockHead = "What to do while you're away";
 
 /// The machine that has named its lenses, so the lens row renders live rather
 /// than inert. Nothing here turns on which lenses those are.
@@ -45,20 +46,24 @@ Future<void> _pumpSheet(
         theme: ThemeData.dark().copyWith(
           extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
         ),
-        home: Builder(
-          builder: (context) => Scaffold(
-            body: Center(
-              child: GestureDetector(
-                onTap: () => showHandlerArmSheet(
-                  context,
-                  terminalId: 't1',
-                  initial: (judgeTool: null, judgeModel: null, lens: null),
-                  agentObservable: agentObservable,
-                  agentLabel: agentLabel,
-                  openingPrompt: openingPrompt,
-                  explain: explain,
+        // The presenting context sits under a Carbon scope, as the session
+        // kebab's scoped menu does in the app.
+        home: AbCarbonScope(
+          child: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: GestureDetector(
+                  onTap: () => showHandlerArmSheet(
+                    context,
+                    terminalId: 't1',
+                    initial: (judgeTool: null, judgeModel: null, lens: null),
+                    agentObservable: agentObservable,
+                    agentLabel: agentLabel,
+                    openingPrompt: openingPrompt,
+                    explain: explain,
+                  ),
+                  child: const Text('open'),
                 ),
-                child: const Text('open'),
               ),
             ),
           ),

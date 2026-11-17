@@ -1,8 +1,7 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_tokens.dart';
 import '../models/file_tree_models.dart';
 import 'preview_with_source_toggle.dart';
 
@@ -37,16 +36,18 @@ class SvgPreview extends StatelessWidget {
       searchQuery: searchQuery,
       previewBuilder: (context) {
         final svg = content.content ?? '';
-        return Container(
-          color: context.antgrid.bgDeepest,
-          padding: const EdgeInsets.all(AbTokens.space4),
-          child: svg.isEmpty
-              ? const SizedBox.shrink()
-              : SvgPicture.string(
-                  svg,
-                  key: const Key('svg-content'),
-                  fit: BoxFit.contain,
-                ),
+        return ColoredBox(
+          color: CarbonTheme.of(context).colors.background,
+          child: Padding(
+            padding: const EdgeInsets.all(CarbonSpacing.spacing02),
+            child: svg.isEmpty
+                ? const SizedBox.shrink()
+                : SvgPicture.string(
+                    svg,
+                    key: const Key('svg-content'),
+                    fit: BoxFit.contain,
+                  ),
+          ),
         );
       },
     );

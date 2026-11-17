@@ -37,7 +37,9 @@ import '../util/detached.dart';
 import '../util/wrapped_url.dart';
 import '../util/external_url.dart';
 import '../util/terminal_links.dart';
+import 'attach_progress.dart';
 import 'clipboard_image.dart';
+import 'clipboard_files.dart';
 import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -136,6 +138,7 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
   /// without a platform clipboard — under `flutter_test` a real read throws
   /// `NoSuchChannelException` rather than answering "no image".
   final Future<ClipboardImage?> Function() readImage;
+  final Future<List<Uri>> Function() readFiles;
 
   /// True only for the copy the agent panel mounts (`TerminalScreen`), which
   /// publishes [focusAgentInputProvider] so a message composed elsewhere can
@@ -149,6 +152,7 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
     required this.tab,
     required this.terminalService,
     this.readImage = readClipboardImage,
+    this.readFiles = readClipboardFiles,
     this.isAgentSurface = false,
   });
 
@@ -811,20 +815,24 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   ///
   /// The keyboard's own writes go through the engine's transport (which has
   /// the strip beside it to explain a pause), but these are one-shot lines the
-  /// user composed elsewhere — an uploaded file's path, a quick-action key —
-  /// and a dropped one leaves no trace on screen at all.
-  ///
-  /// Returning live is shared by asynchronous uploads and immediate inputs.
+  /// user composed elsewhere — a quick-action key, a sent capture — and a
+  /// dropped one leaves no trace on screen at all.
   bool _typeIntoTerminal(String text) {
-    if (_historyOpen) _closeHistory();
-    final data = _transformInput(text);
+    final data = _prepareTypedInput(text);
     if (data.isEmpty) return true;
-    if (_presentation.selecting) _returnToLive();
     if (widget.terminalService.sendInput(widget.tab.terminalId, data)) {
       return true;
     }
     if (mounted) showSendRefusedToast(context);
     return false;
+  }
+
+  /// Returns the pane to live output and applies held modifiers.
+  String _prepareTypedInput(String text) {
+    if (_historyOpen) _closeHistory();
+    final data = _transformInput(text);
+    if (data.isNotEmpty && _presentation.selecting) _returnToLive();
+    return data;
   }
 
   Future<void> _dropAttach({
@@ -848,6 +856,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   AbToaster? _attachmentToaster;
   UploadTarget? _pickerTarget;
   String? _pickerTerminalId;
+
+  /// This view's terminal on the [TerminalAttachBoard], held while mounted.
+  late final _attachBoard = ref.read(terminalAttachBoardProvider);
+  late String _boardKey;
+  late ValueNotifier<AttachProgress?> _board;
 
   Future<void> _pickAndUpload() async {
     _attachmentToaster = AbToaster.maybeOf(context);
@@ -875,28 +888,25 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     }
   }
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _presentation = TerminalPresentationController(
-      widget.tab,
-      onInput: _beforeSurfaceInput,
-      transformInput: _transformInput,
-      onGuestPointer: _onGuestPointer,
-    );
+  TerminalAttachmentUploader _createUploader({
+    UploadTarget? fixedTarget,
+    String? fixedTerminalId,
+    AbToaster? toaster,
+  }) {
     UploadService? activeUploadService;
     String? uploadTerminalId;
-    _uploader = TerminalAttachmentUploader(
+    return TerminalAttachmentUploader(
       resolveUpload: () {
         final uploadTarget =
+            fixedTarget ??
             _pickerTarget ??
             UploadTarget(
               _container,
               widget.terminalService.session.projectId,
               widget.terminalService.checkoutId,
             );
-        uploadTerminalId = _pickerTerminalId ?? widget.tab.terminalId;
+        uploadTerminalId =
+            fixedTerminalId ?? _pickerTerminalId ?? widget.tab.terminalId;
         // Adapted rather than torn off: the terminal types the absolute path
         // and nothing else, while the rest of [UploadResult] exists for the
         // preview surface, which has no consumer on this path.
@@ -916,37 +926,60 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
           )).path;
         };
       },
-      // Routed through the shared refusal so a staged upload whose path the
-      // transport could not carry says so: the bytes are on the machine but
-      // the line the user needs was dropped, not queued, and silence there
-      // reads as a finished attach.
-      insert: (text) {
+      // A path that never lands still throws: the bytes are on the machine
+      // but silence would read as a finished attach.
+      insert: (text) async {
         final service = activeUploadService!;
         final terminal = service.session
             .servicesForCheckout(service.checkoutId)
             .terminalService;
+        final terminalId = uploadTerminalId!;
+        var data = text;
         if (mounted &&
             identical(terminal, widget.terminalService) &&
-            uploadTerminalId == widget.tab.terminalId) {
-          if (!_typeIntoTerminal(text)) {
-            throw const UploadException('OFFLINE', 'Terminal disconnected');
-          }
-          return;
+            terminalId == widget.tab.terminalId) {
+          data = _prepareTypedInput(text);
+          if (data.isEmpty) return;
         }
-        if (!terminal.sendInput(uploadTerminalId!, text)) {
-          throw const UploadException('OFFLINE', 'Terminal disconnected');
+        if (!await terminal.insertGeneratedText(terminalId, data)) {
+          throw UploadException('NOT_TYPED', text.trim());
         }
       },
       onError: (message) {
         if (mounted) {
           showAbToast(context, message);
         } else {
-          _attachmentToaster?.show(
+          (toaster ?? _attachmentToaster)?.show(
             AbToast(icon: AbIcons.warning, title: message),
           );
         }
       },
+      board: _attachBoard,
+      boardKey: () {
+        final target = fixedTarget ?? _pickerTarget;
+        if (target == null) return _boardKey;
+        return TerminalComposeDrafts.keyFor(
+          projectId: target.projectId,
+          checkoutId: target.checkoutId,
+          terminalId: fixedTerminalId ?? _pickerTerminalId!,
+        );
+      },
     );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _presentation = TerminalPresentationController(
+      widget.tab,
+      onInput: _beforeSurfaceInput,
+      transformInput: _transformInput,
+      onGuestPointer: _onGuestPointer,
+    );
+    _uploader = _createUploader();
+    _boardKey = _terminalKey;
+    _board = _attachBoard.acquire(_boardKey);
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
     _watchConnection();
@@ -982,6 +1015,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   @override
   void didUpdateWidget(TerminalViewWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final boardKey = _terminalKey;
+    if (boardKey != _boardKey) {
+      _attachBoard.release(_boardKey);
+      _boardKey = boardKey;
+      _board = _attachBoard.acquire(boardKey);
+    }
     if (!identical(oldWidget.tab.latestFrame, widget.tab.latestFrame) ||
         !identical(oldWidget.tab.ghostty, widget.tab.ghostty)) {
       oldWidget.terminalService.setClipboardForeground(this, null);
@@ -1015,7 +1054,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         oldWidget.tab.terminalId != widget.tab.terminalId) {
       // The old terminal's draft is already saved — every edit and every
       // open/close writes through — so this only swaps the new one in.
-      if (!_composeDrafts.isOpen(_composeDraftKey)) _composeFocus.unfocus();
+      if (!_composeDrafts.isOpen(_terminalKey)) _composeFocus.unfocus();
       _loadComposeDraft();
       _modifiers.clear();
     }
@@ -1052,10 +1091,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
       _historyOpen = false;
       _dropQueuedSeek();
     }
-    // The booking below is per-PTY, but this State is not: only
-    // `terminal_screen` keys the wrapper by terminalId — the pinned pane
-    // (`terminal_list_view`), `terminal_detail_view` and the setup banner all
-    // mount it unkeyed, so swapping which terminal they show reuses this State.
+    // The booking below is per-PTY, but this State is not: `terminal_screen`
+    // and `terminal_list_view` key the wrapper by terminalId, but
+    // `terminal_detail_view` and the setup banner mount it unkeyed, so swapping
+    // which terminal they show reuses this State.
     // Carried over, `_lastSent*` gate the new PTY against the old one's grid,
     // and two tabs sitting at the same epoch (the common case — both 0, or both
     // bumped in lockstep by a reattach) make the bump no edge at all. That is
@@ -1103,6 +1142,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
 
   @override
   void dispose() {
+    _attachBoard.release(_boardKey);
     WidgetsBinding.instance.removeObserver(this);
     widget.terminalService.setClipboardForeground(this, null);
     _presentation.dispose();
@@ -1578,39 +1618,80 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     LogicalKeyboardKey.shiftRight,
   ]);
 
-  /// Serves one paste chord: an image on the clipboard is uploaded and its
-  /// host path typed; anything else pastes as text, exactly as it always has.
-  ///
-  /// The image probe is scoped to RELAY sessions because intercepting a local
-  /// one would be a downgrade: every agent CLI reads the host clipboard itself
-  /// and turns the image into a native in-conversation attachment, which beats
-  /// a file path it has to open with a read tool. Only when the clipboard and
-  /// the agent are on different machines does the image have no way across.
+  /// Local agents can read their own clipboard; remote ones need the bytes
+  /// staged in their checkout before a path in the prompt is useful.
   Future<void> _paste() async {
     if (_presentation.selecting) _returnToLive();
-    if (widget.terminalService.session.mode == ProjectSessionMode.relay) {
-      final image = await widget.readImage();
-      if (!mounted) return;
-      if (image != null) {
-        // [_dropAttach], not `_uploader.attach` directly: `_historyOpen` was
-        // read when the chord was pressed, and the reader can go up inside the
-        // clipboard read above.
-        await _dropAttach(
-          bytes: image.bytes,
-          fileName: image.fileName,
-          mimeType: image.mimeType,
-        );
+    final terminalService = widget.terminalService;
+    final terminalId = widget.tab.terminalId;
+    bool isCurrentTerminal() =>
+        mounted &&
+        identical(widget.terminalService, terminalService) &&
+        widget.tab.terminalId == terminalId;
+
+    if (terminalService.session.mode == ProjectSessionMode.relay) {
+      final readFiles = widget.readFiles;
+      final readImage = widget.readImage;
+      final uploader = _createUploader(
+        fixedTarget: UploadTarget(
+          _container,
+          terminalService.session.projectId,
+          terminalService.checkoutId,
+        ),
+        fixedTerminalId: terminalId,
+        toaster: AbToaster.maybeOf(context),
+      );
+      try {
+        final files = await readFiles();
+        final image = files.isEmpty ? await readImage() : null;
+        // Text paste must remain available while an attachment is uploading.
+        if (files.isNotEmpty || image != null) {
+          await uploader.exclusive(() async {
+            if (isCurrentTerminal()) {
+              if (_historyOpen) _closeHistory();
+              if (_presentation.selecting) _returnToLive();
+            }
+            if (files.isNotEmpty) {
+              await attachClipboardFiles(
+                files: files,
+                attach: uploader.attach,
+                onError: uploader.onError,
+              );
+            } else if (image != null) {
+              await uploader.attach(
+                bytes: image.bytes,
+                fileName: image.fileName,
+                mimeType: image.mimeType,
+              );
+            }
+          });
+          return;
+        }
+      } catch (_) {
+        uploader.onError('Could not read files from the clipboard');
         return;
+      } finally {
+        uploader.dispose();
       }
     }
+    if (!isCurrentTerminal()) return;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!mounted) return;
+    if (!isCurrentTerminal()) return;
     // Same gap as the image branch, one await later: this one would write the
     // clipboard straight into a prompt the archive is covering.
     if (_historyOpen) _closeHistory();
     final text = data?.text;
     if (text == null || text.isEmpty) return;
-    _presentation.engine.writeBytes(utf8.encode(_sanitizePaste(text)));
+    final engine = _presentation.engine;
+    var paste = _sanitizePaste(text);
+    if (engine.terminal.getMode(VtModes.bracketedPaste)) {
+      // Raw multiline reads can overwrite earlier chunks in Claude Code's
+      // input handler. Frame the entire paste only when the guest opted in.
+      // An embedded ESC could otherwise terminate that framing early.
+      paste = paste.replaceAll('\x1b', '');
+      paste = '\x1b[200~$paste\x1b[201~';
+    }
+    engine.writeBytes(utf8.encode(paste));
   }
 
   /// Text an Alt-modified key should carry after the ESC prefix, or null when
@@ -1748,11 +1829,24 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                   children: [
                     _buildTerminal(context, dim: chrome?.dim ?? false),
                     // Attachment transitions must not resize the guest's grid.
+                    // The attach chrome hangs below the strip rather than
+                    // under it: a phone's upload runs through exactly the
+                    // reconnect the strip announces.
                     Positioned(
                       top: 0,
                       left: 0,
                       right: 0,
-                      child: _buildHydrationStrip(hydration, inputPaused),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _buildHydrationStrip(hydration, inputPaused),
+                          Align(
+                            alignment: Alignment.topLeft,
+                            child: _buildAttachChrome(),
+                          ),
+                        ],
+                      ),
                     ),
                     if (_composeOpen && !_hasPhysicalKeyboard)
                       _buildComposeBox(),
@@ -1763,10 +1857,50 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
         // Keeping this row mounted preserves terminal geometry while browsing.
         if (!_hasPhysicalKeyboard && !showStoppedView)
           ValueListenableBuilder<AttachProgress?>(
-            valueListenable: _uploader.progress,
+            valueListenable: _board,
             builder: (context, attach, _) => _buildQuickActions(attach != null),
           ),
       ],
+    );
+  }
+
+  /// Top-LEFT, deliberately: `SendToAgentButton` owns top-right and both can
+  /// be live at once, while the bottom edge is where the prompt — and the path
+  /// this types into it — lands.
+  Widget _buildAttachChrome() {
+    final showAttachButton =
+        !widget.isAgentSurface && _hasPhysicalKeyboard && _canAttachFromMenu;
+    return ValueListenableBuilder<AttachProgress?>(
+      valueListenable: _board,
+      builder: (context, attach, _) {
+        if (!showAttachButton && attach == null) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.all(AbTokens.space8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (showAttachButton)
+                TerminalAttachOverlayButton(
+                  onAttach: _pickAndUpload,
+                  pick: pickUploadFile,
+                  onPicked: (picked) =>
+                      _dropAttach(bytes: picked.bytes, fileName: picked.name),
+                  busy: attach != null,
+                  onError: (m) {
+                    if (mounted) showAbToast(context, m);
+                  },
+                ),
+              if (attach != null) ...[
+                if (showAttachButton) const SizedBox(height: AbTokens.space6),
+                TerminalUploadStrip(progress: attach),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1880,8 +2014,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     // straight back.
     final showPaneChrome = !_historyOpen;
     final showSendButton = _hasSelection && agentTab != null && showPaneChrome;
-    final showAttachButton =
-        !widget.isAgentSurface && _hasPhysicalKeyboard && _canAttachFromMenu;
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
@@ -1906,7 +2038,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
     // scaler never reaches them — pre-scale the size instead. `_hPad` is
     // deliberately font-independent and must not scale with this.
     final terminalFontSize =
-        MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
+        MediaQuery.textScalerOf(context).scale(AbTokens.terminalBaseFont) *
         effectiveZoom;
 
     // One local feeds both the measurement and the view, so the two are
@@ -2306,40 +2438,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
                       ),
                     ),
                   ),
-                // Top-LEFT, deliberately: `SendToAgentButton` owns top-right and
-                // both can be live at once, while the bottom edge is where the
-                // prompt — and the path this types into it — lands.
-                Positioned(
-                  top: AbTokens.space8,
-                  left: AbTokens.space8,
-                  child: ValueListenableBuilder<AttachProgress?>(
-                    valueListenable: _uploader.progress,
-                    builder: (context, attach, _) => Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (showAttachButton)
-                          TerminalAttachOverlayButton(
-                            onAttach: _pickAndUpload,
-                            pick: pickUploadFile,
-                            onPicked: (picked) => _dropAttach(
-                              bytes: picked.bytes,
-                              fileName: picked.name,
-                            ),
-                            busy: attach != null,
-                            onError: (m) {
-                              if (mounted) showAbToast(context, m);
-                            },
-                          ),
-                        if (attach != null) ...[
-                          if (showAttachButton)
-                            const SizedBox(height: AbTokens.space6),
-                          TerminalUploadStrip(progress: attach),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
                 if (_hasArchivedRows && widget.tab.history.boundary != null)
                   Positioned(
                     top: 0,
@@ -2714,8 +2812,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
 
   /// Derived from [widget] on every read, never cached: [didUpdateWidget]
   /// accepts a new terminal or service, and a stale key would file one
-  /// terminal's draft under another's.
-  String get _composeDraftKey => TerminalComposeDrafts.keyFor(
+  /// terminal's draft or attach under another's.
+  String get _terminalKey => TerminalComposeDrafts.keyFor(
     projectId: widget.terminalService.projectId,
     checkoutId: widget.terminalService.checkoutId,
     terminalId: widget.tab.terminalId,
@@ -2725,13 +2823,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper>
   /// the user's call, and a remount is not one.
   void _loadComposeDraft() {
     _composeDraft.removeListener(_saveComposeDraft);
-    _composeDraft.text = _composeDrafts.textFor(_composeDraftKey);
-    _composeOpen = _composeDrafts.isOpen(_composeDraftKey);
+    _composeDraft.text = _composeDrafts.textFor(_terminalKey);
+    _composeOpen = _composeDrafts.isOpen(_terminalKey);
     _composeDraft.addListener(_saveComposeDraft);
   }
 
   void _saveComposeDraft() => _composeDrafts.save(
-    _composeDraftKey,
+    _terminalKey,
     text: _composeDraft.text,
     open: _composeOpen,
   );

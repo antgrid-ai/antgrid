@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "status": "not_run_user_selected_local_retrieval",
+  "source_revision": "faf754671f5b850e1b4d1ff870db37a6a2480df6",
+  "dataset_revision": "11164976b4f920cdb0d0cd570ca572e49acea1e8",
+  "mini_swe_agent_revision": "bc85a45654e6348dcc6e4c5a40ad146ed0bb144d",
+  "selection": "python; earliest numeric issue per repository; first three repositories in case-insensitive lexical order",
+  "metadata_caveat": "Viewer rows are discovery metadata, not a revision-addressed dataset. Before execution, rederive these targets from test.parquet at dataset_revision and require exact matching IDs and execution fields.",
+  "metadata_files": [
+    {
+      "name": "rows-0.json",
+      "sha256": "ff7bc4cb02d563da3316eb47ed4e2c18e5fa8b62120cc0228e68e4c68f419c7c",
+      "bytes": 3110634
+    },
+    {
+      "name": "rows-100.json",
+      "sha256": "f1d76766dfbcdaf2bf819c0cb3b08ba2d10fb9d6d68034b4819d8dfaab8861a5",
+      "bytes": 225439
+    }
+  ],
+  "target_count_observed": 111,
+  "history_filter": "exact repository and language, strictly smaller trailing issue number; target and future histories excluded",
+  "targets": [
+    {
+      "instance_id": "adamchainz__flake8-comprehensions-553",
+      "repo": "adamchainz/flake8-comprehensions",
+      "base_commit": "226a7e0e58b231d8ae47080a4459172b9a29b708",
+      "image_name": "docker.io/swerebenchv2/adamchainz-flake8-comprehensions:553-226a7e0",
+      "language": "python",
+      "eligible_history": [
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-143",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-143/adamchainz__flake8-comprehensions-143.traj.json"
+        },
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-179",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-179/adamchainz__flake8-comprehensions-179.traj.json"
+        },
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-195",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-195/adamchainz__flake8-comprehensions-195.traj.json"
+        },
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-197",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-197/adamchainz__flake8-comprehensions-197.traj.json"
+        },
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-200",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-200/adamchainz__flake8-comprehensions-200.traj.json"
+        },
+        {
+          "instance_id": "adamchainz__flake8-comprehensions-205",
+          "path": "history/python/adamchainz__flake8-comprehensions/adamchainz__flake8-comprehensions-205/adamchainz__flake8-comprehensions-205.traj.json"
+        }
+      ],
+      "excluded_target_or_future_count": 1
+    },
+    {
+      "instance_id": "aio-libs__aiohttp-7907",
+      "repo": "aio-libs/aiohttp",
+      "base_commit": "31d0834e34d7c122918a1061ed9222963e1135be",
+      "image_name": "docker.io/swerebenchv2/aio-libs-aiohttp:7907-31d0834",
+      "language": "python",
+      "eligible_history": [
+        {
+          "instance_id": "aio-libs__aiohttp-5344",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-5344/aio-libs__aiohttp-5344.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-6485",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-6485/aio-libs__aiohttp-6485.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-6495",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-6495/aio-libs__aiohttp-6495.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-6653",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-6653/aio-libs__aiohttp-6653.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-6747",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-6747/aio-libs__aiohttp-6747.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7150",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7150/aio-libs__aiohttp-7150.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7180",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7180/aio-libs__aiohttp-7180.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7206",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7206/aio-libs__aiohttp-7206.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7319",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7319/aio-libs__aiohttp-7319.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7368",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7368/aio-libs__aiohttp-7368.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7378",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7378/aio-libs__aiohttp-7378.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7601",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7601/aio-libs__aiohttp-7601.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7680",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7680/aio-libs__aiohttp-7680.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7690",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7690/aio-libs__aiohttp-7690.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7703",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7703/aio-libs__aiohttp-7703.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7713",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7713/aio-libs__aiohttp-7713.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7714",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7714/aio-libs__aiohttp-7714.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7716",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7716/aio-libs__aiohttp-7716.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7720",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7720/aio-libs__aiohttp-7720.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7781",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7781/aio-libs__aiohttp-7781.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7829",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7829/aio-libs__aiohttp-7829.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7865",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7865/aio-libs__aiohttp-7865.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7869",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7869/aio-libs__aiohttp-7869.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7889",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7889/aio-libs__aiohttp-7889.traj.json"
+        },
+        {
+          "instance_id": "aio-libs__aiohttp-7890",
+          "path": "history/python/aio-libs__aiohttp/aio-libs__aiohttp-7890/aio-libs__aiohttp-7890.traj.json"
+        }
+      ],
+      "excluded_target_or_future_count": 103
+    },
+    {
+      "instance_id": "alteryx__woodwork-640",
+      "repo": "alteryx/woodwork",
+      "base_commit": "7bde24e9c9b5c5a0e228b4c62c094fced9901c3b",
+      "image_name": "docker.io/swerebenchv2/alteryx-woodwork:640-7bde24e",
+      "language": "python",
+      "eligible_history": [
+        {
+          "instance_id": "alteryx__woodwork-563",
+          "path": "history/python/alteryx__woodwork/alteryx__woodwork-563/alteryx__woodwork-563.traj.json"
+        },
+        {
+          "instance_id": "alteryx__woodwork-588",
+          "path": "history/python/alteryx__woodwork/alteryx__woodwork-588/alteryx__woodwork-588.traj.json"
+        },
+        {
+          "instance_id": "alteryx__woodwork-619",
+          "path": "history/python/alteryx__woodwork/alteryx__woodwork-619/alteryx__woodwork-619.traj.json"
+        },
+        {
+          "instance_id": "alteryx__woodwork-632",
+          "path": "history/python/alteryx__woodwork/alteryx__woodwork-632/alteryx__woodwork-632.traj.json"
+        },
+        {
+          "instance_id": "alteryx__woodwork-636",
+          "path": "history/python/alteryx__woodwork/alteryx__woodwork-636/alteryx__woodwork-636.traj.json"
+        }
+      ],
+      "excluded_target_or_future_count": 34
+    }
+  ],
+  "execution": {
+    "model_calls": 0,
+    "image_pulls": 0,
+    "history_downloads": 0,
+    "matched_pairs": 0
+  },
+  "runtime": {
+    "python_version": "3.14.6",
+    "python_modules": {
+      "pandas": false,
+      "pyarrow": false,
+      "datasets": false,
+      "minisweagent": false,
+      "docker": false,
+      "litellm": false
+    },
+    "free_bytes": 55290200064,
+    "docker": {
+      "installed": true,
+      "available": true,
+      "client_version": "28.0.4",
+      "server_version": "28.0.4",
+      "server_os": "linux",
+      "server_arch": "amd64"
+    },
+    "model_auth": "not_probed; user selected local retrieval only"
+  },
+  "observed_at": "2026-11-10T12:54:11.562238+00:00"
+}

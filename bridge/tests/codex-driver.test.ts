@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { CodexDriver, type CodexEndpoint } from "../../packages/antgrid-agents/src/agents/codex/chat-backend";
+import { createDriver } from "../../packages/antgrid-agents/src/agents/codex/driver";
+import { MEMORY_AGENT_GUIDANCE } from "../../packages/antgrid-agents/src/memory-guidance";
 import type { AbMessage } from "../src/protocol";
 
 // Fake endpoint: capture outbound, let the test fire notifications/requests.
@@ -945,5 +947,127 @@ describe("CodexDriver capability discovery", () => {
       process.off("unhandledRejection", onUnhandled);
     }
     expect(unhandled).toEqual([]);
+  });
+});
+
+describe("CodexDriver memory guidance", () => {
+  const GUIDE = "MEMORY GUIDE";
+  function run(opts: {
+    guidance?: () => Promise<string | undefined>;
+    resumeId?: string;
+    configRead?: () => any;
+    inject?: () => any;
+  }) {
+    const { ep, requests } = makeFakeEndpoint({
+      onRequest: (method) => {
+        if (method === "thread/start") return { thread: { id: "th1" } };
+        if (method === "thread/resume") return { thread: { id: "th-r", turns: [] } };
+        if (method === "config/read") return opts.configRead ? opts.configRead() : { config: {} };
+        if (method === "thread/inject_items") return opts.inject ? opts.inject() : {};
+        return {};
+      },
+    });
+    const driver = new CodexDriver({
+      sessionId: "s1", endpoint: ep, sendMessage: () => {}, cwd: "/x", memoryGuidance: opts.guidance,
+    });
+    return { start: () => driver.start(opts.resumeId), requests };
+  }
+
+  it("memory off sends no config/read and no developerInstructions", async () => {
+    const { start, requests } = run({ guidance: async () => undefined });
+    await start();
+    expect(requests.some((r) => r.method === "config/read")).toBe(false);
+    expect(requests.find((r) => r.method === "thread/start")?.params).toEqual({ cwd: "/x" });
+  });
+
+  it("a thread without a provider adds no round trips", async () => {
+    const { start, requests } = run({});
+    await start();
+    expect(requests.some((r) => r.method === "config/read")).toBe(false);
+  });
+
+  it("sends only the guidance when the user has no developer_instructions", async () => {
+    const { start, requests } = run({ guidance: async () => GUIDE });
+    await start();
+    const call = requests.find((r) => r.method === "config/read");
+    expect(call?.params).toEqual({ cwd: "/x" });
+    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBe(GUIDE);
+  });
+
+  it("puts the user's developer_instructions before the guidance", async () => {
+    const { start, requests } = run({
+      guidance: async () => GUIDE,
+      configRead: () => ({ config: { developer_instructions: "USER RULES" } }),
+    });
+    await start();
+    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBe(`USER RULES\n\n${GUIDE}`);
+  });
+
+  it("sends no developerInstructions when config/read fails", async () => {
+    const { start, requests } = run({
+      guidance: async () => GUIDE,
+      configRead: () => { throw new Error("nope"); },
+    });
+    await start();
+    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBeUndefined();
+  });
+
+  it("resume sends developerInstructions and injects one developer message", async () => {
+    const { start, requests } = run({ guidance: async () => GUIDE, resumeId: "th-r" });
+    await start();
+    expect(requests.find((r) => r.method === "thread/resume")?.params).toEqual({ threadId: "th-r", developerInstructions: GUIDE });
+    const inject = requests.find((r) => r.method === "thread/inject_items");
+    expect(inject?.params).toEqual({
+      threadId: "th-r",
+      items: [{ type: "message", role: "developer", content: [{ type: "input_text", text: GUIDE }] }],
+    });
+  });
+
+  it("a failed inject does not fail the start", async () => {
+    const { start } = run({
+      guidance: async () => GUIDE, resumeId: "th-r",
+      inject: () => { throw new Error("unsupported"); },
+    });
+    await expect(start()).resolves.toBeUndefined();
+  });
+
+  it("resume without guidance does not inject", async () => {
+    const { start, requests } = run({ guidance: async () => undefined, resumeId: "th-r" });
+    await start();
+    expect(requests.some((r) => r.method === "thread/inject_items")).toBe(false);
+    expect(requests.find((r) => r.method === "thread/resume")?.params).toEqual({ threadId: "th-r" });
+  });
+});
+
+describe("createDriver memory guidance", () => {
+  async function started(memoryGuidance: (() => Promise<string | undefined>) | undefined, order: string[] = []) {
+    const { ep, requests } = makeFakeEndpoint({
+      onRequest: (m) => (m === "thread/start" ? { thread: { id: "th1" } } : {}),
+    });
+    const driver = createDriver({
+      sessionId: "s1", projectPath: "/x", approvalPolicy: "default", send: () => {},
+      onAgentSession: () => {}, emitUpdateCheck: () => {},
+      chatAugment: () => { order.push("augment"); return { args: [], env: {} }; },
+      memoryGuidance: memoryGuidance && (() => { order.push("guidance"); return memoryGuidance(); }),
+    } as any, () => { order.push("spawn"); return { endpoint: ep, failureDiagnosis: Promise.resolve(null), kill: async () => {} }; });
+    await driver.start();
+    return requests;
+  }
+
+  it("asks for guidance after the augmentation and before the spawn", async () => {
+    const order: string[] = [];
+    await started(async () => undefined, order);
+    expect(order).toEqual(["augment", "guidance", "spawn"]);
+  });
+
+  it("sends the context's guidance", async () => {
+    const requests = await started(async () => MEMORY_AGENT_GUIDANCE);
+    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBe(MEMORY_AGENT_GUIDANCE);
+  });
+
+  it("without a guidance provider: no config/read", async () => {
+    const requests = await started(undefined);
+    expect(requests.some((r) => r.method === "config/read")).toBe(false);
+    expect(requests.find((r) => r.method === "thread/start")?.params.developerInstructions).toBeUndefined();
   });
 });

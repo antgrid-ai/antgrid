@@ -365,17 +365,20 @@ describe("cheapNamingModel", () => {
 
   // opencode and its fork kilo serve whatever providers the user configured, so
   // naming asks the installed CLI for the model it titles its own sessions with.
-  // The probes answer in opencode 1.19.5's own output shapes, which kilo 7.8.x
-  // shares; the resolution rules themselves are covered by
+  // OpenCode 2 is probed through `opencode api --standalone <operation>`, which
+  // prints the request location and `data`; kilo 7.8.x keeps opencode 1.19.5's
+  // debug/models output. The resolution rules themselves are covered by
   // opencode-naming-model.test.ts in antgrid-agents.
-  function opencodeSpawn(answers: { config: object; models: string; stateDir: string }) {
+  function opencodeSpawn(answers: { config: object; models: string; stateDir: string; api?: Record<string, unknown> }) {
     const calls: string[][] = [];
     const options: Array<Record<string, any>> = [];
     const spawn = ((cmd: string[], o?: Record<string, any>) => {
       calls.push(cmd);
       options.push(o ?? {});
       const key = cmd.slice(1, 3).join(" ");
-      const stdout = key === "debug config" ? JSON.stringify(answers.config, null, 2)
+      const api = key === "api --standalone" ? answers.api?.[cmd[3]!] : undefined;
+      const stdout = api !== undefined ? JSON.stringify({ location: { directory: "/scratch" }, data: api }, null, 2)
+        : key === "debug config" ? JSON.stringify(answers.config, null, 2)
         : key === "debug paths" ? `home       /scratch\nstate      ${answers.stateDir}\n`
         : key === "models --verbose" ? answers.models
         : "Name the task\n";
@@ -385,6 +388,11 @@ describe("cheapNamingModel", () => {
   }
   const verboseModel = (providerID: string, id: string, family: string, release_date: string) =>
     `${providerID}/${id}\n${JSON.stringify({ id, providerID, family, release_date, name: id, status: "active" }, null, 2)}\n`;
+  const v2Model = (providerID: string, id: string, family: string) => ({
+    id, providerID, family, name: id, status: "active", enabled: true,
+    capabilities: { tools: true, input: ["text"], output: ["text"] },
+  });
+  const V2_AGENTS = [{ id: "build", mode: "primary" }, { id: "title", mode: "primary", hidden: true }];
   function stateDirWithRecent(providerID: string, modelID: string): string {
     const dir = tmp();
     writeFileSync(join(dir, "model.json"), JSON.stringify({ recent: [{ providerID, modelID }] }));
@@ -393,13 +401,16 @@ describe("cheapNamingModel", () => {
 
   test("opencode names with the small model opencode itself would title with", async () => {
     const { spawn, calls, options } = opencodeSpawn({
-      config: {},
-      stateDir: stateDirWithRecent("anthropic", "claude-sonnet-5"),
-      models: [
-        verboseModel("anthropic", "claude-sonnet-5", "claude-sonnet", "2026-08-01"),
-        verboseModel("anthropic", "claude-haiku-5-5", "claude-haiku", "2026-08-01"),
-        verboseModel("anthropic", "claude-haiku-4-5", "claude-haiku", "2025-10-15"),
-      ].join(""),
+      config: {}, stateDir: tmp(), models: "",
+      api: {
+        "agent.list": V2_AGENTS,
+        "model.default": v2Model("anthropic", "claude-sonnet-5", "claude-sonnet"),
+        "model.list": [
+          v2Model("anthropic", "claude-sonnet-5", "claude-sonnet"),
+          v2Model("anthropic", "claude-haiku-5-5", "claude-haiku"),
+          v2Model("anthropic", "claude-haiku-4-5", "claude-haiku"),
+        ],
+      },
     });
     const result = await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
     expect(result).toMatchObject({ ok: true, title: "Name the task" });
@@ -408,6 +419,9 @@ describe("cheapNamingModel", () => {
     expect(run.slice(-3, -1)).toEqual(["--model", "anthropic/claude-haiku-5-5"]);
     // The probes resolve the config the naming run sees: same binary, same env.
     expect(calls.slice(0, -1).map((argv) => argv[0])).toEqual(["opencode", "opencode", "opencode"]);
+    // A probe without --standalone would start the user's shared OpenCode
+    // service with this :memory: database, and it outlives the probe.
+    for (const argv of calls.slice(0, -1)) expect(argv).toContain("--standalone");
     for (const o of options) expect(o.env.OPENCODE_DB).toBe(":memory:");
   });
 
@@ -415,9 +429,12 @@ describe("cheapNamingModel", () => {
   // titling falls back to the session's model; so does this.
   test("opencode with no small model for its provider names on its own default", async () => {
     const { spawn, calls } = opencodeSpawn({
-      config: {},
-      stateDir: stateDirWithRecent("openai", "gpt-6.1-sol"),
-      models: verboseModel("openai", "gpt-6.1-sol", "gpt-sol", "2026-09-29"),
+      config: {}, stateDir: tmp(), models: "",
+      api: {
+        "agent.list": V2_AGENTS,
+        "model.default": v2Model("openai", "gpt-6.1-sol", "gpt-sol"),
+        "model.list": [v2Model("openai", "gpt-6.1-sol", "gpt-sol")],
+      },
     });
     await generateTitleFromContext("ctx", { tool: "opencode", spawn, installedTools: ["opencode"] });
     expect(calls.at(-1)!.slice(0, 2)).toEqual(["opencode", "run"]);

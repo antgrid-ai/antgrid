@@ -4,7 +4,6 @@ import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
 import 'agent_transport.dart' show selectedTargetProvider;
 import 'providers.dart';
-import 'session_bus_inbox.dart';
 import 'sessions.dart' show activeSessionIdProvider;
 import 'value_controller.dart';
 
@@ -103,66 +102,6 @@ void revealHandlerTabNow(WidgetRef ref) {
 final pendingFilePathProvider =
     NotifierProvider<ValueController<PendingNav<String>?>, PendingNav<String>?>(
       () => ValueController(null),
-    );
-
-/// The focused session's mailbox, or an empty one while no session is focused.
-///
-/// One narrowing rule for everything that speaks for the focused session's bus
-/// state. Two lookups of their own could answer differently about the same
-/// mailbox, which is the failure [workspaceBadgesProvider] already narrows the
-/// handler count to avoid.
-final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
-  final sessionId = ref.watch(activeSessionIdProvider);
-  if (sessionId == null) return const SessionInboxState();
-  return ref.watch(sessionInboxProvider(sessionId));
-}, name: 'focusedSessionInbox');
-
-/// Whether the focused session has bus traffic to show — the ONE rule behind
-/// the session kebab's Messages row, which is the only door to the mailbox
-/// sheet. Nothing else announces a peer's mail.
-///
-/// A session that has only ever sent still fails it. The app's two reads are
-/// the mailbox and one thread by id, and a thread id is reachable only from an
-/// inbound post, so there is nothing to open; `session-bus:threads` is the read
-/// that would fix it, and until it exists a row here would promise a sheet with
-/// nothing in it.
-///
-/// LATCHING, and this is the whole reason it is a notifier rather than a
-/// derived value: the mailbox empties when the AGENT reads its mail, which can
-/// land while the menu is open and the user is reaching for the row. A row that
-/// vanished under the pointer would take the sheet with it. The latch is
-/// dropped when focus moves to another session, and again whenever this
-/// provider itself is rebuilt.
-class SessionBusActivity extends Notifier<bool> {
-  String? _sessionId;
-  bool _seen = false;
-
-  @override
-  bool build() {
-    final sessionId = ref.watch(activeSessionIdProvider);
-    if (sessionId != _sessionId) {
-      _sessionId = sessionId;
-      _seen = false;
-    }
-    if (sessionId == null) return false;
-    // `dropped` is a lifetime total on the store, so the two together answer
-    // "has this session ever been on the bus" rather than "does it have mail
-    // right now" — which is the question the row is for, since a sheet is worth
-    // opening for a receipt on something already read.
-    final active = ref.watch(
-      focusedSessionInboxProvider.select(
-        (s) => s.dropped > 0 || s.posts.isNotEmpty,
-      ),
-    );
-    if (active) _seen = true;
-    return _seen;
-  }
-}
-
-final sessionHasBusActivityProvider =
-    NotifierProvider<SessionBusActivity, bool>(
-      SessionBusActivity.new,
-      name: 'sessionHasBusActivity',
     );
 
 /// The workspace tabs on offer right now, in tab order.

@@ -121,6 +121,7 @@ describe("session:* messages", () => {
       ["session:unarchive", { requestId: "r", sessionId: "s" }],
       ["session:delete", { requestId: "r", sessionId: "s" }],
       ["session:set-mode", { requestId: "r", sessionId: "s", mode: "chat" }],
+      ["session:restart", { requestId: "r", sessionId: "s", reason: "memory" }],
       ["session:focus", { sessionId: "s" }],
     ] as const;
     for (const [type, payload] of types) {
@@ -128,6 +129,37 @@ describe("session:* messages", () => {
       const parsed = AbMessageSchema.safeParse(JSON.parse(JSON.stringify(msg)));
       expect(parsed.success).toBe(true);
     }
+  });
+
+  it("session:restart requires reason \"memory\"", () => {
+    const parse = (payload: object) =>
+      AbMessageSchema.safeParse(JSON.parse(JSON.stringify(createMessage("session:restart" as any, payload as any)))).success;
+    expect(parse({ requestId: "r", sessionId: "s" })).toBe(false);
+    expect(parse({ requestId: "r", sessionId: "s", reason: "other" })).toBe(false);
+    expect(parse({ requestId: "r", sessionId: "s", reason: "memory" })).toBe(true);
+  });
+
+  it("session:result accepts restarted", () => {
+    const msg = createMessage("session:result", { requestId: "r", ok: true, restarted: true });
+    const parsed = AbMessageSchema.safeParse(JSON.parse(JSON.stringify(msg)));
+    expect(parsed.success).toBe(true);
+    if (parsed.success && parsed.data.type === "session:result") expect(parsed.data.restarted).toBe(true);
+  });
+
+  it("startedWithoutMemory is optional and survives the roundtrip", () => {
+    const entry = {
+      id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
+      archived: false, running: true, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const,
+      agentSessionResumable: true, forkSupported: false, handoffSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
+      checkoutId: "c1", checkoutKind: "managed-worktree" as const, checkoutState: "ready" as const,
+    };
+    const parse = (sessions: object[]) => {
+      const parsed = parseMessage(JSON.stringify(createMessage("session:list:result", { requestId: "r", sessions } as any)));
+      if (parsed?.type !== "session:list:result") throw new Error("expected session:list:result");
+      return parsed.sessions[0];
+    };
+    expect(parse([entry])?.startedWithoutMemory).toBeUndefined();
+    expect(parse([{ ...entry, startedWithoutMemory: true }])?.startedWithoutMemory).toBe(true);
   });
 
   it("session:result and session:updated roundtrip", () => {

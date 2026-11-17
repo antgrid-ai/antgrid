@@ -29,22 +29,9 @@ function artifactsOf(parts: readonly BusPart[]): BusArtifactHandle[] {
     .map((p) => ({ artifactId: p.artifactId, name: p.name, summary: p.summary }));
 }
 
-/**
- * The line one inbound event owes the local agent, or null when it owes none.
- *
- * A post owes none, and permanently: it is read when the target chooses,
- * so rendering one here would interrupt a turn on the sender's say-so with
- * none of the pair budget in front of it. It is parked in the mailbox instead.
- *
- * A notify owes exactly one, keyed by the message id so a redelivered frame the
- * coordinator re-emits costs nothing at the queue. Which template it gets turns
- * on whether the thread already existed AT THIS RECEIVER and not on whether the
- * frame carries an id: every send mints one, so an id is always present, and
- * `opensThread` is the only thing that separates a first contact from a
- * continuation.
- */
+/** Every send carries a thread ID; only receiver-side opensThread tells us
+ * whether to introduce an exchange or render a reply. */
 export function lineForEvent(event: SessionBusEvent): Omit<QueuedLine, "queuedAt"> | null {
-  if (event.kind === "post") return null;
   const { envelope } = event;
   const delivery = {
     peer: event.peer,

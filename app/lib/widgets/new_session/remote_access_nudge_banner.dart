@@ -1,17 +1,13 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../launcher/host_control_client.dart';
 import '../../providers/first_run.dart';
 import '../../providers/remote_access.dart';
 import '../../providers/remote_access_nudge.dart';
+import '../../util/detached.dart';
 import '../remote_access_panel.dart' show confirmAndEnableRemoteAccess;
 
 /// Remote-access nudge on the New Session canvas (desktop only), mounted
@@ -66,7 +62,6 @@ class RemoteAccessNudgeBanner extends ConsumerWidget {
       );
     }
 
-    final t = context.antgrid;
     final message = switch (nudge) {
       SoftRemoteNudge() =>
         'Drive this machine from your phone — sign in there with this '
@@ -77,71 +72,45 @@ class RemoteAccessNudgeBanner extends ConsumerWidget {
     };
     return Padding(
       padding: const EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space12,
-        AbTokens.space16,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing04,
+        CarbonSpacing.spacing05,
         0,
       ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space12,
-          vertical: AbTokens.space8,
-        ),
-        decoration: BoxDecoration(
-          color: t.bgSurface,
-          border: Border.all(color: t.borderSubtle),
-          borderRadius: BorderRadius.circular(AbTokens.radius8),
-        ),
-        child: Row(
-          children: [
-            // Same glyph as the title-bar chip — it reports the same fact.
-            AbIcon(AbIcons.radioTower, size: 13, color: t.textMuted),
-            const SizedBox(width: AbTokens.space8),
-            Expanded(
-              child: Text(
-                message,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: t.textSecondary,
-                ),
-              ),
-            ),
-            if (nudge is DeviceRemoteNudge) ...[
-              const SizedBox(width: AbTokens.space10),
-              AbButton(
+      // Subtitle only: a title would merge into one run with the sentence the
+      // tests and screen readers look for. The soft variant deliberately has no
+      // action: it is a low-key mention, and the title-bar chip is the
+      // affordance it points at.
+      child: CarbonNotification(
+        subtitle: message,
+        action: nudge is DeviceRemoteNudge
+            ? CarbonNotificationAction(
                 label: 'Turn on',
-                compact: true,
                 // After a confirmed enable, policy.enabled flips true and the
                 // nudge provider returns null — the banner unmounts on its
                 // own, no extra state. context/ref are handed over
                 // synchronously; the shared flow resolves the notifier before
                 // its await.
-                onTap: () => confirmAndEnableRemoteAccess(context, ref),
-              ),
-            ],
-            // The soft variant deliberately has no action button: it is a
-            // low-key mention, and the title-bar chip is the affordance it
-            // points at.
-            const SizedBox(width: AbTokens.space4),
-            AbIconButton(
-              icon: AbIcons.close,
-              tone: AbIconButtonTone.muted,
-              tooltip: nudge is DeviceRemoteNudge
-                  ? "Dismiss — won't ask again on this machine"
-                  : 'Dismiss',
-              onTap: () {
-                final n = ref.read(firstRunProvider.notifier);
-                // Per-machine, because FirstRunStore is this install's local
-                // storage — dismissing here never mutes another desktop.
-                if (nudge is DeviceRemoteNudge) {
-                  n.dismissNudgeDevice();
-                } else {
-                  n.dismissNudgeSoft();
-                }
-              },
-            ),
-          ],
-        ),
+                onPressed: () => detached(
+                  'NEW_SESSION',
+                  'enable remote access',
+                  () => confirmAndEnableRemoteAccess(context, ref),
+                ),
+              )
+            : null,
+        closeLabel: nudge is DeviceRemoteNudge
+            ? "Dismiss — won't ask again on this machine"
+            : 'Dismiss',
+        onClose: () {
+          final n = ref.read(firstRunProvider.notifier);
+          // Per-machine, because FirstRunStore is this install's local
+          // storage — dismissing here never mutes another desktop.
+          if (nudge is DeviceRemoteNudge) {
+            n.dismissNudgeDevice();
+          } else {
+            n.dismissNudgeSoft();
+          }
+        },
       ),
     );
   }

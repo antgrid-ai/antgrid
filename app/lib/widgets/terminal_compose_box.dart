@@ -46,9 +46,9 @@ class TerminalComposeBox extends StatefulWidget {
   /// growth cap alike. Generous against the field's real line height
   /// ([AbPromptField] sets none, so it is the sans body size times the font's
   /// own leading), so the cap never clips a row that [maxLines] promised. One
-  /// constant on purpose: a budget computed from a different size than the cap
+  /// value on purpose: a budget computed from a different size than the cap
   /// hands the field lines it then cannot show.
-  static const double lineHeight = AbTokens.fontBody * 1.5;
+  static double get lineHeight => AbTokens.fontBody * 1.5;
 
   @override
   State<TerminalComposeBox> createState() => _TerminalComposeBoxState();

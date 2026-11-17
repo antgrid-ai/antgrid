@@ -13,12 +13,19 @@ import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/mobile_bottom_nav.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
+
+/// The leading drawer button. A Carbon tooltip is not a Material one, so
+/// `byTooltip` cannot find it; it is named by its semantic label instead.
+final _projectsButton = find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'Projects',
+);
 
 /// The platform override must be cleared inside the test body — the binding
 /// asserts every foundation debug variable is unset before tearDown runs.
@@ -219,7 +226,7 @@ void main() {
 
       await swipeLeft(tester);
       expect(find.byType(MobileBottomNav), findsOneWidget);
-      expect(find.byTooltip('Projects'), findsNothing);
+      expect(_projectsButton, findsNothing);
     });
   });
 
@@ -281,7 +288,7 @@ void main() {
       expect(find.byType(AgentPanel), findsOneWidget);
 
       expect(c.read(openDrawerProvider), isNotNull);
-      await tester.tap(find.byTooltip('Projects'));
+      await tester.tap(_projectsButton);
       await settleShell(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);

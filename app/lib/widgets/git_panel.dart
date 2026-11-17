@@ -1,53 +1,36 @@
 import 'dart:async' show unawaited;
 
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey, TextInputAction;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
 import '../constants/breakpoints.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_chip.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_diff_stat.dart';
-import '../design/widgets/ab_disclosure_chevron.dart';
-import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_inline_banner.dart';
-import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_segmented.dart';
-import '../design/widgets/ab_text_field.dart';
-import '../design/widgets/ab_tap_target.dart';
-import '../design/widgets/ab_tooltip.dart';
-import '../design/widgets/ab_loading.dart';
-import '../design/widgets/ab_separator.dart';
-import '../design/widgets/ab_swipe_actions.dart';
-import '../models/ab_message.dart'
-    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
+import '../design/ab_carbon.dart';
+import '../models/ab_message.dart' show GitCommitFileEntry, GitLogEntry;
+import '../models/file_tree_models.dart';
 import '../models/git_status_index.dart';
 import '../models/git_sync_state.dart';
-import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
+import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
 import '../util/detached.dart';
 import '../util/relative_time.dart';
 import '../widgets/copy_path.dart';
-import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
-import '../widgets/file_tree_view.dart';
-import '../widgets/git_status_color.dart';
-import '../widgets/git_sync_failure_handoff.dart';
-import '../widgets/send_capture_to_agent.dart';
+import '../widgets/workspace_tab_bar.dart';
 import 'ab_status_helpers.dart' show caughtErrorCopy;
-import '../providers/demo_mode.dart';
+import 'carbon_confirm.dart';
+import 'carbon_diff_stat.dart';
+import 'carbon_empty_state.dart';
+import 'git_change_list.dart';
+import 'git_status_color.dart';
+import 'git_sync_failure_handoff.dart';
+import 'send_capture_to_agent.dart';
 
 /// Standalone git-changes panel extracted from FileExplorerScreen.
 ///
@@ -110,9 +93,15 @@ class _GitPanelState extends ConsumerState<GitPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // The one scope for everything below, loading and error included, so the
+    // panel never changes theme as data arrives.
+    return AbCarbonScope(child: _PanelSurface(child: _buildContent(context)));
+  }
+
+  Widget _buildContent(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
     if (fileService == null) {
-      return const AbLoading(message: 'loading changes...');
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...'));
     }
     final draft = _drafts.putIfAbsent(fileService, TextEditingController.new);
     final panel = _PanelContext(
@@ -149,15 +138,16 @@ class _GitPanelState extends ConsumerState<GitPanel> {
           panel: panel,
           counts: counts,
           git: git ?? GitPaneState.empty,
-          body: const AbLoading(message: 'loading changes...'),
+          body: const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading changes...')),
         ),
         error: (error, _) => _GitPanelScaffold(
           panel: panel,
           counts: counts,
           git: git ?? GitPaneState.empty,
-          body: AbEmptyState.error(
-            title: "Couldn't load changes",
-            subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
+          body: CarbonEmptyState(
+            heading: "Couldn't load changes",
+            body: caughtErrorCopy(error, 'Try again in a moment.'),
+            error: true,
           ),
         ),
         data: (state) =>
@@ -216,6 +206,22 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   }
 }
 
+/// A scope paints no background of its own, so the panel supplies the page
+/// colour the Carbon layers sit on.
+class _PanelSurface extends StatelessWidget {
+  const _PanelSurface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: CarbonTheme.of(context).colors.background,
+      child: child,
+    );
+  }
+}
+
 /// What [_GitPanelState] owns and every branch of the panel threads through:
 /// the service, the commit draft, and the two change groups' folds.
 class _PanelContext {
@@ -267,7 +273,7 @@ class _GitPanelScaffold extends StatelessWidget {
             git: git,
             fileService: panel.fileService,
           ),
-        const AbSeparator.horizontal(),
+        const GitSectionDivider(),
         Expanded(child: body),
       ],
     );
@@ -333,88 +339,92 @@ class _GitBranchBar extends StatelessWidget {
     // A commit and a push both move the same branch; neither may start while
     // the other runs.
     final busy = syncBusy || git.committing;
+    // Reading order: the primary action is last, which is also what lands it
+    // on top when the set stacks in a narrow pane.
     final actions = <Widget>[
-      if (counts.hasChanges) _commitButton(context),
       // A branch that has never been pushed has nothing to pull and no counts
       // to show — one action, named for what it does, matching VS Code.
       if (sync.canPublish)
-        AbButton(
+        CarbonButton(
           label: syncBusy ? 'Publishing…' : 'Publish Branch',
-          expand: true,
-          wrapLabel: true,
-          maxLines: 1,
-          fontSize: AbTokens.fontSm,
-          leading: syncBusy
-              ? const AbLoadingDot(size: AbTokens.fontXs)
-              : AbIcon(
-                  AbIcons.upload,
-                  size: AbTokens.iconButtonGlyph,
-                  color: context.antgrid.textSecondary,
-                ),
-          onTap: busy ? null : _fileService.push,
+          kind: CarbonButtonKind.secondary,
+          icon: const CarbonIcon(CarbonIcons.upload),
+          busy: syncBusy,
+          onPressed: busy ? null : _fileService.push,
         )
-      else if (sync.hasUpstream)
-        _SyncSplit(
-          sync: sync,
-          syncing: git.syncing,
-          committing: git.committing,
-          fileService: _fileService,
+      else if (sync.hasUpstream) ...[
+        _syncButton(
+          label: 'Pull',
+          icon: CarbonIcons.arrowDown,
+          count: sync.behind,
+          running: git.syncing == GitSyncOp.pull,
+          onPressed: (busy || !sync.canPull) ? null : _fileService.pull,
         ),
+        _syncButton(
+          label: 'Push',
+          icon: CarbonIcons.arrowUp,
+          count: sync.ahead,
+          running: git.syncing == GitSyncOp.push,
+          onPressed: (busy || !sync.canPush) ? null : _fileService.push,
+        ),
+      ],
+      if (counts.hasChanges) _commitButton(),
     ];
 
     return Padding(
-      padding: const EdgeInsets.all(AbTokens.space12),
-      child: AbCompactTapTargets(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _BranchLine(sync: sync, onRefresh: _refresh),
-            if (counts.hasChanges) ...[
-              const SizedBox(height: AbTokens.space10),
-              _CommitMessageField(panel: panel, onCommit: _commit),
-            ],
-            // Above the button it explains, not down in the tree: a conflict is
-            // why Commit is dead, and a user who cannot see one without
-            // scrolling reads that button as broken.
-            if (_commitBlocked) ...[
-              const SizedBox(height: AbTokens.space8),
-              _ConflictNotice(count: counts.conflictPaths.length),
-            ],
-            if (actions.isNotEmpty) ...[
-              const SizedBox(height: AbTokens.space8),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  // Side by side, each action gets half the pane; on a
-                  // tablet with the sidebar docked that half cannot hold a
-                  // label, so they stack at full width instead.
-                  if (constraints.maxWidth < _kSideBySideActionsWidth) {
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (final (i, action) in actions.indexed) ...[
-                          if (i > 0) const SizedBox(height: AbTokens.space6),
-                          SizedBox(height: AbTokens.rowHeightXs, child: action),
-                        ],
-                      ],
-                    );
-                  }
-                  return SizedBox(
-                    height: AbTokens.rowHeightXs,
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (final (i, action) in actions.indexed) ...[
-                          if (i > 0) const SizedBox(width: AbTokens.space6),
-                          Expanded(child: action),
-                        ],
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ],
+      padding: const EdgeInsets.all(CarbonSpacing.spacing04),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _BranchLine(sync: sync, onRefresh: _refresh),
+          if (counts.hasChanges) ...[
+            const SizedBox(height: CarbonSpacing.spacing03),
+            _CommitMessageField(panel: panel, onCommit: _commit),
           ],
-        ),
+          // Above the button it explains, not down in the tree: a conflict is
+          // why Commit is dead, and a user who cannot see one without
+          // scrolling reads that button as broken.
+          if (_commitBlocked) ...[
+            const SizedBox(height: CarbonSpacing.spacing03),
+            _ConflictNotice(count: counts.conflictPaths.length),
+          ],
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: CarbonSpacing.spacing03),
+            CarbonButtonSet(
+              alignment: CarbonButtonSetAlignment.fill,
+              children: actions,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Pull or Push. Both stay mounted whenever the branch tracks an upstream,
+  /// even when one of them has nothing to do — a control that vanishes the
+  /// moment its count reaches zero moves its neighbour under a finger already
+  /// travelling toward it.
+  ///
+  /// The counts are as fresh as the last fetch (see [GitSyncState]), which is
+  /// what Pull is for. Nothing here probes the network on its own.
+  Widget _syncButton({
+    required String label,
+    required CarbonIcons icon,
+    required int count,
+    required bool running,
+    required VoidCallback? onPressed,
+  }) {
+    return CarbonTooltip(
+      message: count > 0
+          ? '$label $count commit${count == 1 ? '' : 's'}'
+          : label,
+      child: CarbonButton(
+        label: count > 0 ? '$label $count' : label,
+        kind: CarbonButtonKind.secondary,
+        icon: CarbonIcon(icon),
+        busy: running,
+        onPressed: onPressed,
+        focusableWhenDisabled: true,
       ),
     );
   }
@@ -425,30 +435,17 @@ class _GitBranchBar extends StatelessWidget {
   /// been written. Disabling here moves the refusal to before the typing, and
   /// the conflict notice above is what keeps a dead button from reading as a
   /// broken one.
-  Widget _commitButton(BuildContext context) {
-    final button = AbButton(
+  Widget _commitButton() {
+    final button = CarbonButton(
       label: git.committing
           ? 'Committing…'
           : counts.stagedCount == 0
           ? 'Commit'
           : 'Commit (${counts.stagedCount})',
-      expand: true,
-      // Ellipsize rather than overflow in a pane narrower still than the
-      // width the actions stack at.
-      wrapLabel: true,
-      maxLines: 1,
-      fontSize: AbTokens.fontSm,
-      fontWeight: FontWeight.w600,
-      leading: git.committing
-          ? const AbLoadingDot(size: AbTokens.fontXs)
-          : AbIcon(
-              AbIcons.gitCommit,
-              size: AbTokens.iconButtonGlyph,
-              // Match the primary variant's accentForeground label.
-              color: context.antgrid.accentForeground,
-            ),
-      variant: AbButtonVariant.primary,
-      onTap: _canCommit ? _commit : null,
+      icon: const CarbonIcon(CarbonIcons.commit),
+      busy: git.committing,
+      onPressed: _canCommit ? _commit : null,
+      focusableWhenDisabled: true,
     );
     final String? why;
     if (_commitBlocked) {
@@ -462,17 +459,9 @@ class _GitBranchBar extends StatelessWidget {
       why = null;
     }
     if (why == null) return button;
-    return AbTooltip(
-      message: why,
-      // A disabled child swallows no pointer here (AbButton drops its gesture
-      // detector rather than absorbing), so hover still reaches the tooltip.
-      triggerMode: TooltipTriggerMode.tap,
-      child: button,
-    );
+    return CarbonTooltip(message: why, child: button);
   }
 }
-
-const double _kSideBySideActionsWidth = 280;
 
 /// Branch name, where it stands against the remote, and Refresh.
 class _BranchLine extends StatelessWidget {
@@ -483,7 +472,8 @@ class _BranchLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
     final branch = sync.branch;
     final remote = sync.remote;
     // Null branch is both "not reported yet" and "detached"; neither is a
@@ -492,17 +482,21 @@ class _BranchLine extends StatelessWidget {
     if (branch == null) {
       status = null;
     } else if (!sync.hasUpstream) {
-      status = _LocalOnlyPill(hasRemote: sync.hasRemote);
+      status = CarbonTooltip(
+        message: sync.hasRemote
+            ? 'Not published to the remote yet'
+            : 'This repository has no remote',
+        child: const CarbonTag(label: 'Local only', size: CarbonTagSize.small),
+      );
     } else if (remote != null && remote.isNotEmpty) {
-      status = AbTooltip(
+      status = CarbonTooltip(
         message: 'Tracking ${sync.remoteRefLabel ?? remote}',
         child: Text(
           '→ $remote',
           maxLines: 1,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            color: p.textMuted,
-          ),
+          softWrap: false,
+          overflow: TextOverflow.ellipsis,
+          style: theme.typography.code.copyWith(color: colors.textSecondary),
         ),
       );
     } else {
@@ -510,93 +504,42 @@ class _BranchLine extends StatelessWidget {
     }
     return Row(
       children: [
-        AbIcon(
-          AbIcons.gitBranch,
-          size: AbTokens.iconButtonGlyph,
-          color: p.textMuted,
-        ),
-        const SizedBox(width: AbTokens.space8),
+        CarbonIcon(CarbonIcons.branch, color: colors.iconSecondary),
+        const SizedBox(width: CarbonSpacing.spacing03),
         Expanded(
           child: Row(
             children: [
               if (branch != null)
                 Flexible(
-                  child: AbTooltip(
+                  // The branch keeps most of a narrow row; the remote it
+                  // tracks gives way first.
+                  flex: 2,
+                  child: CarbonTooltip(
                     message: branch,
                     child: Text(
                       branch,
                       maxLines: 1,
                       softWrap: false,
                       overflow: TextOverflow.ellipsis,
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: p.textPrimary,
+                      style: theme.typography.code.copyWith(
+                        color: colors.textPrimary,
                       ),
                     ),
                   ),
                 ),
               if (status != null) ...[
-                const SizedBox(width: AbTokens.space8),
-                status,
+                const SizedBox(width: CarbonSpacing.spacing03),
+                Flexible(child: status),
               ],
             ],
           ),
         ),
-        AbIconButton(
-          icon: AbIcons.refresh,
-          tooltip: 'Refresh',
-          onTap: onRefresh,
+        GitIconAction(
+          icon: CarbonIcons.renew,
+          label: 'Refresh',
+          onPressed: onRefresh,
         ),
       ],
-    );
-  }
-}
-
-/// The badge an unpublished branch carries in place of its upstream.
-class _LocalOnlyPill extends StatelessWidget {
-  const _LocalOnlyPill({required this.hasRemote});
-
-  final bool hasRemote;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    return AbTooltip(
-      message: hasRemote
-          ? 'Not published to the remote yet'
-          : 'This repository has no remote',
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space8,
-          vertical: AbTokens.space2,
-        ),
-        decoration: BoxDecoration(
-          border: Border.all(color: p.borderDefault),
-          borderRadius: AbTokens.borderRadiusFull,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: AbTokens.dotSizeSm,
-              height: AbTokens.dotSizeSm,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: p.textMuted,
-              ),
-            ),
-            const SizedBox(width: AbTokens.space4),
-            Text(
-              'Local only',
-              maxLines: 1,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: p.textMuted,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -617,10 +560,12 @@ class _CommitMessageField extends StatelessWidget {
             onCommit,
         const SingleActivator(LogicalKeyboardKey.enter, meta: true): onCommit,
       },
-      child: AbTextField(
+      child: CarbonTextInput(
         controller: panel.draft,
         focusNode: panel.draftFocus,
-        hintText: 'Commit message',
+        variant: CarbonTextInputVariant.multiline,
+        placeholder: 'Commit message',
+        semanticLabel: 'Commit message',
         minLines: 2,
         maxLines: 6,
         keyboardType: TextInputType.multiline,
@@ -637,323 +582,25 @@ class _ConflictNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
     return Row(
       children: [
-        AbChip.system(
+        CarbonTag(
           label: count == 1 ? '1 conflict' : '$count conflicts',
-          color: context.antgrid.gitConflict,
+          color: CarbonTagColor.red,
+          size: CarbonTagSize.small,
         ),
-        const SizedBox(width: AbTokens.space8),
+        const SizedBox(width: CarbonSpacing.spacing03),
         Expanded(
           child: Text(
             'Resolve before committing',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
+            style: theme.typography.helper.copyWith(
+              color: theme.colors.textSecondary,
             ),
           ),
         ),
-      ],
-    );
-  }
-}
-
-/// Pull and Push as one split control, each half labelled with its count.
-///
-/// Both halves stay mounted whenever the branch tracks an upstream, even when
-/// one of them has nothing to do — a control that vanishes the moment its
-/// count reaches zero moves its neighbour under a finger already travelling
-/// toward it.
-///
-/// The counts are as fresh as the last fetch (see [GitSyncState]), which is
-/// what Pull is for. Nothing here probes the network on its own.
-class _SyncSplit extends StatelessWidget {
-  const _SyncSplit({
-    required this.sync,
-    required this.syncing,
-    required this.committing,
-    required this.fileService,
-  });
-
-  final GitSyncState sync;
-  final GitSyncOp? syncing;
-  final bool committing;
-  final FileService fileService;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    // Both are disabled while either runs, or while a commit does: they all
-    // mutate the same branch, and a pull racing a push is a state neither
-    // result can describe.
-    final busy = syncing != null || committing;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: p.bgSurface,
-        borderRadius: AbTokens.borderRadius5,
-        border: Border.all(color: p.borderDefault),
-      ),
-      child: ClipRRect(
-        borderRadius: AbTokens.borderRadius5,
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: _SplitCell(
-                icon: AbIcons.arrowDown,
-                label: 'Pull',
-                count: sync.behind,
-                countColor: p.textMuted,
-                tooltip: sync.behind > 0
-                    ? 'Pull ${sync.behind} commit${sync.behind == 1 ? '' : 's'}'
-                    : 'Pull',
-                running: syncing == GitSyncOp.pull,
-                onTap: (busy || !sync.canPull) ? null : fileService.pull,
-              ),
-            ),
-            const AbSeparator.vertical(),
-            Expanded(
-              child: _SplitCell(
-                icon: AbIcons.arrowUp,
-                label: 'Push',
-                count: sync.ahead,
-                countColor: sync.ahead > 0 ? p.accent : p.textMuted,
-                tooltip: sync.ahead > 0
-                    ? 'Push ${sync.ahead} commit${sync.ahead == 1 ? '' : 's'}'
-                    : 'Push',
-                running: syncing == GitSyncOp.push,
-                onTap: (busy || !sync.canPush) ? null : fileService.push,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// One half of [_SyncSplit]. `onTap: null` renders it disabled in place.
-class _SplitCell extends StatefulWidget {
-  const _SplitCell({
-    required this.icon,
-    required this.label,
-    required this.count,
-    required this.countColor,
-    required this.tooltip,
-    required this.running,
-    required this.onTap,
-  });
-
-  final String icon;
-  final String label;
-  final int count;
-  final Color countColor;
-  final String tooltip;
-
-  /// This half's op is the one in flight — its glyph becomes the spinner, and
-  /// it is NOT dimmed with the rest, since it is the one thing happening.
-  final bool running;
-  final VoidCallback? onTap;
-
-  @override
-  State<_SplitCell> createState() => _SplitCellState();
-}
-
-class _SplitCellState extends State<_SplitCell> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final enabled = widget.onTap != null;
-    Widget cell = Container(
-      color: enabled && _hovered ? p.bgElevated : null,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (widget.running)
-            const AbLoadingDot(size: AbTokens.fontXs)
-          else
-            AbIcon(widget.icon, size: AbTokens.fontSm, color: p.textSecondary),
-          const SizedBox(width: AbTokens.space4),
-          Flexible(
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: p.textSecondary,
-              ),
-            ),
-          ),
-          const SizedBox(width: AbTokens.space4),
-          Text(
-            '${widget.count}',
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXs,
-              color: widget.countColor,
-            ),
-          ),
-        ],
-      ),
-    );
-    if (!enabled && !widget.running) {
-      cell = Opacity(opacity: AbTokens.opacityDisabled, child: cell);
-    }
-    return AbTooltip(
-      message: widget.tooltip,
-      child: MouseRegion(
-        cursor: enabled ? SystemMouseCursors.click : MouseCursor.defer,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: cell,
-        ),
-      ),
-    );
-  }
-}
-
-/// The disclosure that opens and closes one of the column's two sections: a
-/// chevron, the section's name, and its size.
-class _SectionToggle extends StatelessWidget {
-  const _SectionToggle({
-    required this.label,
-    required this.expanded,
-    required this.onTap,
-    this.count,
-  });
-
-  final String label;
-  final bool expanded;
-  final VoidCallback? onTap;
-
-  /// Rendered verbatim, so a paginated list can say `50+`.
-  final String? count;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final count = this.count;
-    return Semantics(
-      button: onTap != null,
-      expanded: onTap != null ? expanded : null,
-      child: MouseRegion(
-        cursor: onTap != null ? SystemMouseCursors.click : MouseCursor.defer,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (onTap != null) ...[
-                AbDisclosureChevron(expanded: expanded),
-                const SizedBox(width: AbTokens.space6),
-              ],
-              // The label yields before the count does: in a narrow pane the
-              // size is the part still worth reading.
-              Flexible(
-                child: Text(
-                  label.toUpperCase(),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXxs,
-                    fontWeight: FontWeight.w600,
-                    color: p.textSecondary,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-              ),
-              if (count != null) ...[
-                const SizedBox(width: AbTokens.space6),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AbTokens.space4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: p.bgElevated,
-                    borderRadius: AbTokens.borderRadius3,
-                  ),
-                  child: Text(
-                    count,
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXxs,
-                      color: p.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The fixed band both section headers share, so the two read as one family.
-class _SectionHeaderBand extends StatelessWidget {
-  const _SectionHeaderBand({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: AbTokens.rowHeightSm,
-      child: Padding(
-        padding: const EdgeInsets.only(
-          left: AbTokens.space10,
-          right: AbTokens.space8,
-        ),
-        child: AbCompactTapTargets(child: Row(children: children)),
-      ),
-    );
-  }
-}
-
-/// The header of one of the change list's two groups, laid out the way VS
-/// Code's Source Control view lays out its own: a fold, the group's name and
-/// count, then the group's bulk actions as icons on the right.
-class _ChangeGroupHeader extends StatelessWidget {
-  const _ChangeGroupHeader({
-    required this.label,
-    required this.count,
-    required this.expanded,
-    required this.onToggle,
-    required this.actions,
-  });
-
-  final String label;
-  final int count;
-  final bool expanded;
-  final VoidCallback onToggle;
-  final List<Widget> actions;
-
-  @override
-  Widget build(BuildContext context) {
-    return _SectionHeaderBand(
-      children: [
-        Expanded(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: _SectionToggle(
-              label: label,
-              count: '$count',
-              expanded: expanded,
-              onTap: onToggle,
-            ),
-          ),
-        ),
-        ...actions,
       ],
     );
   }
@@ -976,16 +623,17 @@ class _StagedGroupHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _ChangeGroupHeader(
+    return GitSectionHeader(
       label: 'Staged Changes',
-      count: staged.changedCount,
+      count: '${staged.changedCount}',
       expanded: expanded,
       onToggle: onToggle,
       actions: [
-        AbIconButton(
-          icon: AbIcons.gitUnstage,
-          tooltip: 'Unstage All Changes',
-          onTap: () => fileService.unstageFiles(staged.byPath.keys.toList()),
+        GitIconAction(
+          icon: CarbonIcons.subtract,
+          label: 'Unstage All Changes',
+          onPressed: () =>
+              fileService.unstageFiles(staged.byPath.keys.toList()),
         ),
       ],
     );
@@ -1019,15 +667,15 @@ class _UnstagedGroupHeader extends StatelessWidget {
     final paths = unstaged.revertablePaths;
     if (paths.isEmpty) return;
     final count = paths.length;
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
+    final confirmed = await showCarbonConfirm(
+      context,
       title: 'Discard all changes',
       body:
           'Discard the unstaged changes in $count file${count == 1 ? '' : 's'}? '
           'New files are deleted; staged changes are kept. '
           'This cannot be undone.',
       confirmLabel: 'Discard All',
-      destructive: true,
+      danger: true,
     );
     if (confirmed) fileService.discard(paths);
   }
@@ -1046,8 +694,8 @@ class _UnstagedGroupHeader extends StatelessWidget {
     if (paths.isEmpty) return;
     final unresolved = unstaged.unresolvedConflictPaths;
     if (unresolved.isNotEmpty) {
-      final confirmed = await AbConfirmDialog.show(
-        context: context,
+      final confirmed = await showCarbonConfirm(
+        context,
         title: 'Stage merge conflicts',
         body: unresolved.length == 1
             ? 'Stage all changes? "${unresolved.first}" is still an unresolved '
@@ -1065,23 +713,31 @@ class _UnstagedGroupHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _ChangeGroupHeader(
+    return GitSectionHeader(
       label: 'Changes',
-      count: unstaged.changedCount,
+      count: '${unstaged.changedCount}',
       expanded: expanded,
       onToggle: onToggle,
       actions: [
-        AbIconButton(
-          icon: AbIcons.revert,
-          tooltip: 'Discard All Changes',
-          onTap: unstaged.revertablePaths.isEmpty
+        GitIconAction(
+          icon: CarbonIcons.undo,
+          label: 'Discard All Changes',
+          onPressed: unstaged.revertablePaths.isEmpty
               ? null
-              : () => _discardAll(context),
+              : () => detached(
+                  'GitPanel',
+                  'discard all confirm',
+                  () => _discardAll(context),
+                ),
         ),
-        AbIconButton(
-          icon: AbIcons.gitStage,
-          tooltip: 'Stage All Changes',
-          onTap: () => _stageAll(context),
+        GitIconAction(
+          icon: CarbonIcons.add,
+          label: 'Stage All Changes',
+          onPressed: () => detached(
+            'GitPanel',
+            'stage all confirm',
+            () => _stageAll(context),
+          ),
         ),
       ],
     );
@@ -1116,19 +772,16 @@ class _GitHistorySectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _SectionHeaderBand(
-      children: [
-        _SectionToggle(
-          label: 'History',
-          expanded: !collapsed,
-          onTap: onToggleCollapsed,
-        ),
-        const Spacer(),
+    return GitSectionHeader(
+      label: 'History',
+      expanded: !collapsed,
+      onToggle: onToggleCollapsed,
+      actions: [
         if (!collapsed && history.expandedShas.isNotEmpty)
-          AbIconButton(
-            icon: AbIcons.collapseAll,
-            tooltip: 'Collapse All',
-            onTap: fileService.collapseAllHistory,
+          GitIconAction(
+            icon: CarbonIcons.collapseAll,
+            label: 'Collapse All',
+            onPressed: fileService.collapseAllHistory,
           ),
       ],
     );
@@ -1159,29 +812,33 @@ class _SyncFailureStrip extends ConsumerWidget {
     // why; a red "failed" strip offering to send the agent after it would
     // present a sample with no remote as a broken one.
     if (ref.watch(demoModeProvider)) return const SizedBox.shrink();
-    return AbInlineBanner(
-      text: '${failure.op.label} failed — ${failure.message}',
-      color: context.antgrid.gitConflict,
-      trailing: AbIconButton(
-        icon: AbIcons.close,
-        tooltip: 'Dismiss',
-        onTap: () => fileService.dismissSyncFailure(failure),
+    return Padding(
+      padding: const EdgeInsets.only(
+        left: CarbonSpacing.spacing04,
+        right: CarbonSpacing.spacing04,
+        bottom: CarbonSpacing.spacing03,
       ),
-      // Below the message rather than beside it: git's stderr runs to several
-      // lines, and a button in the same row squeezes it into a narrow column.
-      footer: failure.warrantsAgent
-          ? AbButton(
-              label: 'Ask agent to fix',
-              // A tap handler discards the future it starts, so a rejection
-              // inside the dialog or the send would reach
-              // `PlatformDispatcher.onError` as a fatal with no in-app frames.
-              onTap: () => detached(
-                'GitPanel',
-                'hand sync failure to agent',
-                () => _handOff(context, ref),
-              ),
-            )
-          : null,
+      child: CarbonNotification(
+        kind: CarbonNotificationKind.error,
+        title: '${failure.op.label} failed',
+        subtitle: failure.message,
+        closeLabel: 'Dismiss',
+        onClose: () => fileService.dismissSyncFailure(failure),
+        action: failure.warrantsAgent
+            ? CarbonNotificationAction(
+                label: 'Ask agent to fix',
+                // A tap handler discards the future it starts, so a rejection
+                // inside the dialog or the send would reach
+                // `PlatformDispatcher.onError` as a fatal with no in-app
+                // frames.
+                onPressed: () => detached(
+                  'GitPanel',
+                  'hand sync failure to agent',
+                  () => _handOff(context, ref),
+                ),
+              )
+            : null,
+      ),
     );
   }
 
@@ -1212,34 +869,45 @@ class _CompactViewerBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: AbTokens.rowHeightSm,
+    final theme = CarbonTheme.of(context);
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: theme.minTarget),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
-        child: AbCompactTapTargets(
-          child: Row(
-            children: [
-              AbIconButton(
-                icon: AbIcons.back,
-                onTap: onBack,
-                tooltip: 'Back to changed files',
-              ),
-              const SizedBox(width: AbTokens.space6),
-              Expanded(
-                child: Text(
-                  path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: context.antgrid.textMuted,
-                  ),
+        padding: const EdgeInsets.only(right: CarbonSpacing.spacing04),
+        child: Row(
+          children: [
+            GitIconAction(
+              icon: CarbonIcons.arrowLeft,
+              label: 'Back to changed files',
+              onPressed: onBack,
+            ),
+            const SizedBox(width: CarbonSpacing.spacing03),
+            Expanded(
+              child: Text(
+                path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.typography.code.copyWith(
+                  color: theme.colors.textSecondary,
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _VerticalDivider extends StatelessWidget {
+  const _VerticalDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    return SizedBox(
+      width: CarbonBorders.hairline,
+      child: ColoredBox(color: theme.borderSubtle(CarbonLayer.of(context))),
     );
   }
 }
@@ -1274,7 +942,7 @@ class _GitPanelBody extends ConsumerWidget {
           return Row(
             children: [
               SizedBox(width: _columnWidth, child: _buildColumn(context)),
-              const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
+              const _VerticalDivider(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
           );
@@ -1286,7 +954,7 @@ class _GitPanelBody extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _CompactViewerBar(path: diffPath, onBack: fileService.clearDiff),
-              const AbSeparator.horizontal(),
+              const GitSectionDivider(),
               Expanded(child: _buildContentArea(context, ref)),
             ],
           );
@@ -1311,7 +979,7 @@ class _GitPanelBody extends ConsumerWidget {
           collapsed: false,
           onToggleCollapsed: null,
         ),
-        const AbSeparator.horizontal(),
+        const GitSectionDivider(),
         Expanded(
           child: _HistoryList(git: git, fileService: fileService),
         ),
@@ -1365,7 +1033,7 @@ class _GitPanelBody extends ConsumerWidget {
               )
             else
               _buildChangeGroups(context),
-            const AbSeparator.horizontal(),
+            const GitSectionDivider(),
           ],
           _GitHistorySectionHeader(
             fileService: fileService,
@@ -1374,7 +1042,7 @@ class _GitPanelBody extends ConsumerWidget {
             onToggleCollapsed: fileService.toggleHistoryCollapsed,
           ),
           if (historyOpen) ...[
-            const AbSeparator.horizontal(),
+            const GitSectionDivider(),
             Expanded(
               flex: changesOpen ? 2 : 1,
               child: _HistoryList(git: git, fileService: fileService),
@@ -1437,8 +1105,7 @@ class _GitPanelBody extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           for (final (i, group) in groups.indexed) ...[
-            if (i > 0)
-              AbSeparator.horizontal(key: ValueKey('${group.key}-sep')),
+            if (i > 0) GitSectionDivider(key: ValueKey('${group.key}-sep')),
             KeyedSubtree(
               key: ValueKey('${group.key}-header'),
               child: group.header,
@@ -1447,7 +1114,7 @@ class _GitPanelBody extends ConsumerWidget {
         ],
       );
     }
-    return RefreshIndicator(
+    return CarbonPullToRefresh(
       onRefresh: () async {
         fileService.requestFullTree();
         await Future.delayed(const Duration(milliseconds: 500));
@@ -1456,7 +1123,7 @@ class _GitPanelBody extends ConsumerWidget {
       // the list moves; nothing else in the app can close it from here.
       child: NotificationListener<ScrollNotification>(
         onNotification: (_) {
-          AbSwipeActions.closeAny();
+          closeOpenGitSwipeTray();
           return false;
         },
         child: CustomScrollView(
@@ -1465,7 +1132,7 @@ class _GitPanelBody extends ConsumerWidget {
               if (i > 0)
                 SliverToBoxAdapter(
                   key: ValueKey('${group.key}-sep'),
-                  child: const AbSeparator.horizontal(),
+                  child: const GitSectionDivider(),
                 ),
               SliverToBoxAdapter(
                 key: ValueKey('${group.key}-header'),
@@ -1485,32 +1152,29 @@ class _GitPanelBody extends ConsumerWidget {
     );
   }
 
-  // The same widget the Files tab renders, in its [changesOnly] mode: decorated,
-  // and a flat list of the changed paths rather than a tree. [state.root] is
-  // passed for the signature's sake and goes unread there (see FileTreeView's
-  // own doc), which is what keeps this list from rearranging itself when the
-  // tree lands.
   Widget _buildFileList(
     BuildContext context,
     GitStatusIndex gitStatus, {
     required Key key,
     required bool staged,
   }) {
-    return FileTreeView(
+    return GitChangeGroupSliver(
       key: key,
-      sliver: true,
-      root: state.root,
-      expandedPaths: state.expandedPaths,
-      selectedFilePath: state.git.diffPath,
-      gitStatus: gitStatus,
-      changesOnly: true,
-      // A flat list has no folder rows to toggle.
-      onToggleExpanded: (_) {},
-      onFileSelected: (path) => fileService.requestDiff(path),
+      index: gitStatus,
+      selectedPath: state.git.diffPath,
+      onOpen: fileService.requestDiff,
       onStage: (path) => fileService.stageFiles([path]),
       onUnstage: (path) => fileService.unstageFiles([path]),
-      onDiscard: (path) => _confirmDiscard(context, path, staged: staged),
-      onResolveConflict: (path) => _confirmResolve(context, path),
+      onDiscard: (path) => detached(
+        'GitPanel',
+        'discard confirm',
+        () => _confirmDiscard(context, path, staged: staged),
+      ),
+      onResolve: (path) => detached(
+        'GitPanel',
+        'resolve confirm',
+        () => _confirmResolve(context, path),
+      ),
     );
   }
 
@@ -1539,8 +1203,8 @@ class _GitPanelBody extends ConsumerWidget {
           e.conflictKind == 'deletedByThem' ||
           e.conflictKind == 'bothDeleted',
     );
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
+    final confirmed = await showCarbonConfirm(
+      context,
       title: 'Mark resolved',
       body: deletionConflict
           ? 'One side of the merge deleted "$path" while the other changed it. '
@@ -1588,8 +1252,8 @@ class _GitPanelBody extends ConsumerWidget {
                 'discarded too. This cannot be undone.'
           : 'Revert "$path" to the last commit? This cannot be undone.';
     }
-    final confirmed = await AbConfirmDialog.show(
-      context: context,
+    final confirmed = await showCarbonConfirm(
+      context,
       title: staged && !isNew ? 'Revert changes' : 'Discard changes',
       body: body,
       confirmLabel: isNew
@@ -1597,16 +1261,20 @@ class _GitPanelBody extends ConsumerWidget {
           : staged
           ? 'Revert'
           : 'Discard',
-      destructive: true,
+      danger: true,
     );
     if (confirmed) fileService.discard([path], includeStaged: staged);
   }
 
   Widget _buildContentArea(BuildContext context, WidgetRef ref) {
     final git = state.git;
+    final theme = CarbonTheme.of(context);
+    final message = theme.typography.body.copyWith(
+      color: theme.colors.textSecondary,
+    );
     if (git.diffPath != null) {
       if (git.diffLoading) {
-        return const AbLoading();
+        return const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
       }
       if (git.diffContent != null) {
         // A commit-scoped diff's status letter comes from that commit's own
@@ -1640,20 +1308,10 @@ class _GitPanelBody extends ConsumerWidget {
           ),
         );
       }
-      return Center(
-        child: Text(
-          'No changes',
-          style: TextStyle(color: context.antgrid.textMuted),
-        ),
-      );
+      return Center(child: Text('No changes', style: message));
     }
 
-    return Center(
-      child: Text(
-        'Select a file to view',
-        style: TextStyle(color: context.antgrid.textMuted),
-      ),
-    );
+    return Center(child: Text('Select a file to view', style: message));
   }
 }
 
@@ -1705,28 +1363,28 @@ class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
         if (widget.hasChanges) ...[
           Padding(
             padding: const EdgeInsets.symmetric(
-              horizontal: AbTokens.space12,
-              vertical: AbTokens.space8,
+              horizontal: CarbonSpacing.spacing04,
+              vertical: CarbonSpacing.spacing03,
             ),
-            // AbSegmented hugs its content rather than sharing the row, so on
-            // the narrowest phones double-digit counts can outgrow it; scrolling
-            // absorbs that instead of a RenderFlex overflow.
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: AbSegmented<_GitCompactTab>(
-                segments: [
-                  AbSegment(
-                    value: _GitCompactTab.changes,
-                    label: 'Changes · ${widget.changedCount}',
-                  ),
-                  AbSegment(value: _GitCompactTab.history, label: 'History'),
-                ],
-                selected: _tab,
-                onSelect: (value) => setState(() => _tab = value),
-              ),
+            child: CarbonContentSwitcher<_GitCompactTab>(
+              size: CarbonContentSwitcherSize.small,
+              expand: true,
+              semanticLabel: 'Changes or history',
+              options: [
+                CarbonOption(
+                  value: _GitCompactTab.changes,
+                  label: 'Changes · ${widget.changedCount}',
+                ),
+                const CarbonOption(
+                  value: _GitCompactTab.history,
+                  label: 'History',
+                ),
+              ],
+              value: _tab,
+              onChanged: (value) => setState(() => _tab = value),
             ),
           ),
-          const AbSeparator.horizontal(),
+          const GitSectionDivider(),
         ],
         Expanded(
           // Keyed so the toggle row coming and going never re-parents History.
@@ -1774,13 +1432,6 @@ class _HistoryListState extends State<_HistoryList> {
   }
 
   void _onScroll() {
-    // A hovered row's tooltip is a fixed-position overlay entry — it has no
-    // idea the list under it just moved, since a scroll carries no pointer
-    // event to tell it the target left the cursor. Left alone it lingers
-    // over the row's new (scrolled) position until its own show timer
-    // expires, reading as the tooltip sliding toward the list's edge and
-    // popping off.
-    Tooltip.dismissAllToolTips();
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     if (position.pixels >= position.maxScrollExtent - 400) {
@@ -1792,67 +1443,73 @@ class _HistoryListState extends State<_HistoryList> {
   Widget build(BuildContext context) {
     final history = widget.git.history;
     if (history.initialLoad && history.commits.isEmpty) {
-      return const AbLoading(message: 'loading history...');
+      return const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading history...'));
     }
     if (history.error != null && history.commits.isEmpty) {
-      return AbEmptyState.error(
-        title: 'Could not load history',
-        subtitle: history.error,
-        action: AbButton(
+      return CarbonEmptyState(
+        heading: 'Could not load history',
+        body: history.error,
+        error: true,
+        action: CarbonButton(
           label: 'Retry',
-          compact: true,
-          onTap: widget.fileService.loadHistory,
+          kind: CarbonButtonKind.tertiary,
+          onPressed: widget.fileService.loadHistory,
         ),
       );
     }
     if (history.commits.isEmpty) {
-      return const AbEmptyState(
-        title: 'No commits yet',
-        icon: AbIcons.gitCommit,
+      return const CarbonEmptyState(
+        heading: 'No commits yet',
+        icon: CarbonIcons.commit,
       );
     }
 
-    return RefreshIndicator(
+    return CarbonPullToRefresh(
       onRefresh: () async {
         widget.fileService.loadHistory();
         await Future.delayed(const Duration(milliseconds: 500));
       },
-      child: ListView.builder(
+      child: CustomScrollView(
         controller: _scrollController,
-        itemCount: history.commits.length + 1,
-        itemBuilder: (context, index) {
-          if (index == history.commits.length) {
-            return _HistoryFooter(
+        slivers: [
+          CarbonContainedListSliver(
+            label: null,
+            variant: CarbonContainedListVariant.disclosed,
+            itemCount: history.commits.length,
+            itemBuilder: (context, index) {
+              final commit = history.commits[index];
+              final expanded = history.expandedShas.contains(commit.sha);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _CommitHeaderRow(
+                    commit: commit,
+                    expanded: expanded,
+                    onTap: () =>
+                        widget.fileService.toggleCommitExpanded(commit.sha),
+                  ),
+                  if (expanded)
+                    _CommitFilesSection(
+                      sha: commit.sha,
+                      files: history.filesBySha[commit.sha],
+                      loading: history.filesLoadingShas.contains(commit.sha),
+                      error: history.filesErrorBySha[commit.sha],
+                      openPath: widget.git.diffCommitSha == commit.sha
+                          ? widget.git.diffPath
+                          : null,
+                      fileService: widget.fileService,
+                    ),
+                ],
+              );
+            },
+          ),
+          SliverToBoxAdapter(
+            child: _HistoryFooter(
               history: history,
               fileService: widget.fileService,
-            );
-          }
-          final commit = history.commits[index];
-          final expanded = history.expandedShas.contains(commit.sha);
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _CommitHeaderRow(
-                commit: commit,
-                expanded: expanded,
-                onTap: () =>
-                    widget.fileService.toggleCommitExpanded(commit.sha),
-              ),
-              if (expanded)
-                _CommitFilesSection(
-                  sha: commit.sha,
-                  files: history.filesBySha[commit.sha],
-                  loading: history.filesLoadingShas.contains(commit.sha),
-                  error: history.filesErrorBySha[commit.sha],
-                  openPath: widget.git.diffCommitSha == commit.sha
-                      ? widget.git.diffPath
-                      : null,
-                  fileService: widget.fileService,
-                ),
-              const AbSeparator.horizontal(),
-            ],
-          );
-        },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1870,45 +1527,33 @@ class _HistoryFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
     if (history.loadingMore) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: AbTokens.space16),
-        child: Center(child: AbLoadingDot()),
+        padding: EdgeInsets.all(CarbonSpacing.spacing05),
+        child: Center(
+          child: CarbonInlineLoading(status: CarbonInlineLoadingStatus.active),
+        ),
       );
     }
     if (history.error != null) {
       return Padding(
-        padding: const EdgeInsets.all(AbTokens.space12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              history.error!,
-              textAlign: TextAlign.center,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.error,
-              ),
-            ),
-            const SizedBox(height: AbTokens.space8),
-            AbButton(
-              label: 'Retry',
-              compact: true,
-              onTap: fileService.loadMoreHistory,
-            ),
-          ],
+        padding: const EdgeInsets.all(CarbonSpacing.spacing04),
+        child: CarbonInlineLoading(
+          status: CarbonInlineLoadingStatus.error,
+          description: history.error,
+          onRetry: fileService.loadMoreHistory,
         ),
       );
     }
     if (!history.hasMore) {
       return Padding(
-        padding: const EdgeInsets.symmetric(vertical: AbTokens.space16),
+        padding: const EdgeInsets.all(CarbonSpacing.spacing05),
         child: Center(
           child: Text(
             'No more commits',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
+            style: theme.typography.helper.copyWith(
+              color: theme.colors.textSecondary,
             ),
           ),
         ),
@@ -1918,10 +1563,11 @@ class _HistoryFooter extends StatelessWidget {
   }
 }
 
-/// One commit's row: a graph-rail dot, its subject, and the author/date/sha
-/// meta line. Tapping anywhere on the row toggles the file list beneath it;
-/// long-pressing opens a copy-SHA menu — the touch replacement for a desktop
-/// row's spare icon buttons, which a phone-width row has no room for.
+/// One commit's row: a disclosure chevron, its subject, and the
+/// author/date/sha meta line. Tapping anywhere on the row toggles the file
+/// list beneath it; long-pressing (or right-clicking) opens a copy-SHA menu —
+/// the touch replacement for a desktop row's spare icon buttons, which a
+/// phone-width row has no room for.
 class _CommitHeaderRow extends StatelessWidget {
   const _CommitHeaderRow({
     required this.commit,
@@ -1933,24 +1579,11 @@ class _CommitHeaderRow extends StatelessWidget {
   final bool expanded;
   final VoidCallback onTap;
 
-  Future<void> _showActions(BuildContext context, Offset globalPosition) async {
-    final action = await showAbMenu<String>(
-      context: context,
-      anchorRect: Rect.fromCenter(center: globalPosition, width: 1, height: 1),
-      header: commit.shortSha,
-      entries: const [
-        AbMenuItem(label: 'Copy full SHA', icon: AbIcons.copy, value: 'sha'),
-        AbMenuItem(
-          label: 'Copy short SHA',
-          icon: AbIcons.copy,
-          value: 'shortSha',
-        ),
-      ],
-    );
-    if (!context.mounted || action == null) return;
+  Future<void> _copy(BuildContext context, String text) async {
+    if (!context.mounted) return;
     await copyTextWithToast(
       context,
-      action == 'sha' ? commit.sha : commit.shortSha,
+      text,
       copied: 'Copied to clipboard',
       failed: 'Could not copy the SHA.',
     );
@@ -1958,111 +1591,101 @@ class _CommitHeaderRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final type = theme.typography;
     final when = DateTime.tryParse(commit.authorDate);
-    return GestureDetector(
-      // A void callback discards whatever future it starts — see
-      // util/detached.dart — so a rejected `showAbMenu`/clipboard write would
-      // otherwise reach `PlatformDispatcher.onError` as an unattributed fatal.
-      onLongPressStart: (details) => detached(
-        'GitPanel',
-        'commit history long-press actions',
-        () => _showActions(context, details.globalPosition),
+    final subject = Text(
+      commit.subject,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: type.body.copyWith(color: colors.textPrimary),
+    );
+    final meta = type.helper.copyWith(color: colors.textSecondary);
+    final row = CarbonContainedListRow(
+      title: commit.subject,
+      onPressed: onTap,
+      leading: CarbonIcon(
+        expanded ? CarbonIcons.chevronDown : CarbonIcons.chevronRight,
+        color: colors.iconSecondary,
       ),
-      // The rail's line segments fill the row via Expanded, which needs a
-      // determinate height to resolve against — IntrinsicHeight measures the
-      // row's natural (title+subtitle) height first and hands that down,
-      // the same trick AbSegmented uses to stretch its own cell dividers.
-      child: IntrinsicHeight(
-        child: AbListRow(
-          onTap: onTap,
-          hoverable: true,
-          density: AbRowDensity.md,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          titleMaxLines: 2,
-          leading: _CommitRail(expanded: expanded),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           // A commit subject clips at 2 lines; the tooltip is the only way to
           // read the rest of a longer one, matching VS Code's history hover.
-          title: AbTooltip(
-            message: commit.subject,
-            child: Text(commit.subject),
-          ),
-          // Author and time share one Expanded, not a Flexible beside a Spacer:
-          // two flex children split the free space evenly, the author leaves
-          // its half unused, and the sha landed mid-row at a spot set by the
-          // author's name length rather than at the edge.
-          subtitle: Row(
+          theme.isTouch
+              ? subject
+              : CarbonTooltip(message: commit.subject, child: subject),
+          Row(
             children: [
+              // Author and time share one Expanded, not a Flexible beside a
+              // Spacer: two flex children split the free space evenly, the
+              // author leaves its half unused, and the sha landed mid-row at a
+              // spot set by the author's name length rather than at the edge.
               Expanded(
                 child: Row(
                   children: [
                     Flexible(
                       child: Text(
                         commit.authorName,
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis,
+                        style: meta,
                       ),
                     ),
-                    const SizedBox(width: AbTokens.space6),
+                    const SizedBox(width: CarbonSpacing.spacing03),
                     if (when != null)
-                      AbTooltip(
-                        message: absoluteTime(when),
-                        child: Text(relativeTime(when)),
-                      ),
+                      // A tooltip's own long-press timer would cancel the
+                      // pointer before the row's copy-SHA menu opens.
+                      theme.isTouch
+                          ? Text(relativeTime(when), style: meta)
+                          : CarbonTooltip(
+                              message: absoluteTime(when),
+                              child: Text(relativeTime(when), style: meta),
+                            ),
                   ],
                 ),
               ),
-              const SizedBox(width: AbTokens.space8),
+              const SizedBox(width: CarbonSpacing.spacing03),
               Text(
                 commit.shortSha,
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: p.textMuted,
-                ),
+                style: type.code.copyWith(color: colors.textSecondary),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The History list's graph rail: one continuous line down the column with a
-/// dot at each commit, filled with the accent while that commit is expanded.
-///
-/// Each row draws only its own short segment (top half-line, dot, bottom
-/// half-line), stretched to that row's height by the [IntrinsicHeight] in
-/// [_CommitHeaderRow] — with consecutive commit rows sitting flush against
-/// the hairline [AbSeparator] between them, the segments read as one
-/// unbroken rail with no cross-row layout coordination needed. The rail does
-/// NOT continue through an expanded commit's file list, the same way a git
-/// graph doesn't draw through expanded detail.
-class _CommitRail extends StatelessWidget {
-  const _CommitRail({required this.expanded});
-
-  final bool expanded;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final line = Expanded(child: Container(width: 1.5, color: p.borderDefault));
-    return SizedBox(
-      width: 16,
-      child: Column(
-        children: [
-          line,
-          Container(
-            width: 7,
-            height: 7,
-            margin: const EdgeInsets.symmetric(vertical: 3),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: expanded ? p.accent : p.textMuted,
-            ),
-          ),
-          line,
         ],
       ),
+    );
+    return CarbonContextMenu(
+      entries: [
+        CarbonMenuGroup(
+          label: commit.shortSha,
+          children: [
+            CarbonMenuItem(
+              label: 'Copy full SHA',
+              icon: const CarbonIcon(CarbonIcons.copy),
+              // A void callback discards the future it starts — see
+              // util/detached.dart.
+              onPressed: () => detached(
+                'GitPanel',
+                'copy full sha',
+                () => _copy(context, commit.sha),
+              ),
+            ),
+            CarbonMenuItem(
+              label: 'Copy short SHA',
+              icon: const CarbonIcon(CarbonIcons.copy),
+              onPressed: () => detached(
+                'GitPanel',
+                'copy short sha',
+                () => _copy(context, commit.shortSha),
+              ),
+            ),
+          ],
+        ),
+      ],
+      child: row,
     );
   }
 }
@@ -2089,50 +1712,35 @@ class _CommitFilesSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    const inset = EdgeInsets.symmetric(
+      horizontal: CarbonSpacing.spacing05,
+      vertical: CarbonSpacing.spacing03,
+    );
     if (loading) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: AbTokens.space12),
-        child: Center(child: AbLoadingDot()),
+        padding: inset,
+        child: CarbonInlineLoading(status: CarbonInlineLoadingStatus.active),
       );
     }
     if (error != null) {
       return Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space16,
-          vertical: AbTokens.space8,
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                error!,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: context.antgrid.error,
-                ),
-              ),
-            ),
-            AbButton(
-              label: 'Retry',
-              compact: true,
-              onTap: () => fileService.retryCommitFiles(sha),
-            ),
-          ],
+        padding: inset,
+        child: CarbonInlineLoading(
+          status: CarbonInlineLoadingStatus.error,
+          description: error,
+          onRetry: () => fileService.retryCommitFiles(sha),
         ),
       );
     }
     final entries = files ?? const <GitCommitFileEntry>[];
     if (entries.isEmpty) {
       return Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space16,
-          vertical: AbTokens.space8,
-        ),
+        padding: inset,
         child: Text(
           'No file changes',
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXs,
-            color: context.antgrid.textMuted,
+          style: theme.typography.helper.copyWith(
+            color: theme.colors.textSecondary,
           ),
         ),
       );
@@ -2169,49 +1777,67 @@ class _CommitFileRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
-    return AbListRow(
-      onTap: onTap,
-      hoverable: true,
-      selected: selected,
-      selectionStyle: AbRowSelection.surface,
-      density: AbRowDensity.sm,
-      // Indented under the commit's own leading rail so the file list
-      // reads as nested content, matching the depth-indent the Changes tab's
-      // folder tree uses for the same reason.
-      horizontalPadding: AbTokens.space12 + AbTokens.space16,
-      leading: SizedBox(
-        width: 14,
-        child: Text(
-          file.status,
-          textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            fontWeight: FontWeight.w600,
-            color: gitStatusColor(context, file.status),
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final type = theme.typography;
+    final oldPath = file.oldPath;
+    final path = Text(
+      file.path,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: type.code.copyWith(color: colors.textPrimary),
+    );
+    return Padding(
+      // Indented under the commit's own chevron so the file list reads as
+      // nested content.
+      padding: const EdgeInsets.only(left: CarbonSpacing.spacing05),
+      child: CarbonContainedListRow(
+        title: file.path,
+        selected: selected,
+        onPressed: onTap,
+        leading: SizedBox(
+          width: theme.iconSize,
+          child: Text(
+            file.status,
+            textAlign: TextAlign.center,
+            style: type.code.copyWith(
+              color: gitStatusColor(colors, file.status),
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
-      ),
-      // A long path clips to the row's width with no way to read the rest of
-      // it — the hover tooltip is what VS Code's own changed-files list shows
-      // in exactly this spot.
-      title: AbTooltip(
-        message: file.path,
-        child: Text(
-          file.path,
-          style: AbTokens.monoStyle(color: selected ? p.accent : p.textPrimary),
+        content: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // A long path clips to the row's width with no way to read
+                  // the rest of it — the hover tooltip is what VS Code's own
+                  // changed-files list shows in exactly this spot.
+                  theme.isTouch
+                      ? path
+                      : CarbonTooltip(message: file.path, child: path),
+                  if (oldPath != null)
+                    Text(
+                      oldPath,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: type.helper.copyWith(color: colors.textSecondary),
+                    ),
+                ],
+              ),
+            ),
+            if (file.additions > 0 || file.deletions > 0) ...[
+              const SizedBox(width: CarbonSpacing.spacing03),
+              CarbonDiffStat(
+                additions: file.additions,
+                deletions: file.deletions,
+              ),
+            ],
+          ],
         ),
       ),
-      subtitle: file.oldPath != null
-          ? AbTooltip(message: file.oldPath!, child: Text(file.oldPath!))
-          : null,
-      trailing: (file.additions > 0 || file.deletions > 0)
-          ? AbDiffStat(
-              additions: file.additions,
-              deletions: file.deletions,
-              fontSize: AbTokens.fontXxs,
-            )
-          : null,
     );
   }
 }

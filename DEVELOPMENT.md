@@ -881,7 +881,7 @@ migrations. A `postgres:16-alpine` container is enough.
 | Path | What it is |
 |---|---|
 | `bridge/` | TypeScript/Bun. Runs on your machine: agent terminals (PTY), file watching, git, port scanning, HTTP tunnelling. Ships inside the desktop app. |
-| `relay/` | TypeScript/Bun. Central WebSocket control plane — authenticates devices and carries presence, policy, heartbeat and encrypted push delivery; rejects application payloads. |
+| `relay/` | TypeScript/Bun. Central WebSocket control plane — authenticates devices and carries presence, policy, heartbeat and encrypted push delivery; never accepts a readable application payload and queues sealed agent-to-agent bus messages. |
 | `app/` | Flutter/Dart + Riverpod. Desktop and mobile UI: terminal viewer, file explorer, git review, browser preview. |
 | `web/` | TypeScript/Bun + Hono + Postgres. Accounts and sign-in, subscriptions, device registration, Ed25519 JWT minting for the relay's gate. |
 | `packages/antgrid-wire` | TypeScript. Session-frame type names, stream-open records, relay control-envelope schemas, shared client-IP resolver. Consumed by bridge, relay, web and evals. |

@@ -100,7 +100,15 @@ import type { TestEnv } from "./harness";
   private async snapshotRoundTrip(timeoutMs: number): Promise<{ ok: true }> {
     const requestId = `snap-${Math.random().toString(36).slice(2)}`;
     const responseP = this.client.waitFor((m: any) => m.type === "response" && m.requestId === requestId, timeoutMs);
-    this.client.sendEncrypted(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
+    try {
+      this.client.sendEncrypted(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
+    } catch (err) {
+      // Mid-restart the send throws before the native session is back. Left
+      // unhandled, the waiter rejects at teardown and bun abandons the rest of
+      // cleanup, orphaning the bridge.
+      responseP.catch(() => {});
+      throw err;
+    }
     const res = (await responseP) as { ok?: boolean };
     if (!res?.ok) throw new Error(`state.snapshot returned ok:false (${JSON.stringify(res)})`);
     return { ok: true };

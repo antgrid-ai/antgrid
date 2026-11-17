@@ -1,14 +1,16 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_empty_state.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
-import 'package:antgrid/design/widgets/ab_scrollbar.dart';
+import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/widgets/carbon_empty_state.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:re_editor/re_editor.dart';
+
+import '../helpers/pump_until.dart';
 
 void main() {
   Widget buildTestWidget({
@@ -22,13 +24,15 @@ void main() {
     return ProviderScope(
       child: MaterialApp(
         home: Scaffold(
-          body: FileContentViewer(
-            fileContent: fileContent,
-            isLoading: isLoading,
-            selectedFilePath: selectedFilePath,
-            fileWasModified: fileWasModified,
-            onRefreshContent: onRefreshContent,
-            onClose: onClose,
+          body: AbCarbonScope(
+            child: FileContentViewer(
+              fileContent: fileContent,
+              isLoading: isLoading,
+              selectedFilePath: selectedFilePath,
+              fileWasModified: fileWasModified,
+              onRefreshContent: onRefreshContent,
+              onClose: onClose,
+            ),
           ),
         ),
       ),
@@ -40,7 +44,7 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(buildTestWidget(isLoading: true));
-      expect(find.byType(AbLoading), findsOneWidget);
+      expect(find.byType(CarbonLoading), findsOneWidget);
     });
 
     testWidgets('shows "Select a file to view" when content is null', (
@@ -63,7 +67,7 @@ void main() {
         ),
       );
 
-      expect(find.byType(AbEmptyState), findsOneWidget);
+      expect(find.byType(CarbonEmptyState), findsOneWidget);
       expect(find.text('This file was deleted'), findsOneWidget);
 
       // Tap close button
@@ -134,7 +138,64 @@ void main() {
       );
 
       expect(find.text('Binary file cannot be displayed'), findsOneWidget);
-      expect(find.text('!'), findsOneWidget);
+      expect(find.byType(CarbonNotification), findsOneWidget);
+    });
+
+    group('find bar', () {
+      // Focus falls back to the editor when the bar closes, which arms its
+      // cursor-blink timer. Unmounting instead trips a use-after-dispose in
+      // re_editor's blink controller, so take focus away to stop the blink.
+      Future<void> releaseEditorFocus(WidgetTester tester) async {
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+
+      Future<void> openFind(WidgetTester tester) async {
+        await tester.pumpWidget(
+          buildTestWidget(
+            selectedFilePath: 'a.txt',
+            fileContent: const FileContent(
+              path: 'a.txt',
+              content: 'alpha\nbeta\nalpha',
+              size: 16,
+            ),
+          ),
+        );
+        await tester.pumpUntil(
+          () => find.byType(CarbonLoading).evaluate().isEmpty,
+          reason: 'the editor to become interactive',
+        );
+        await tester.tap(find.bySemanticsLabel('Search in file'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(CarbonSearch), findsOneWidget);
+      }
+
+      testWidgets('Escape with an empty field closes it', (tester) async {
+        await openFind(tester);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+
+        expect(find.byType(CarbonSearch), findsNothing);
+        await releaseEditorFocus(tester);
+      });
+
+      // CarbonSearch spends Escape on clearing a typed query, so the bar
+      // stayed open for the first press.
+      testWidgets('Escape with a query typed closes it in one press', (
+        tester,
+      ) async {
+        await openFind(tester);
+        await tester.enterText(find.byType(EditableText), 'alpha');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+
+        expect(find.byType(CarbonSearch), findsNothing);
+        await releaseEditorFocus(tester);
+      });
     });
   });
 
@@ -155,9 +216,11 @@ void main() {
             child: SizedBox(
               width: 400,
               height: 300,
-              child: FileContentViewer(
-                fileContent: wideFile,
-                selectedFilePath: 'lib/a.dart',
+              child: AbCarbonScope(
+                child: FileContentViewer(
+                  fileContent: wideFile,
+                  selectedFilePath: 'lib/a.dart',
+                ),
               ),
             ),
           ),
@@ -181,7 +244,10 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
 
       // Parked mid-file, so an upward auto-scroll has somewhere to go —
       // at offset zero this test could not fail.
@@ -211,7 +277,10 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
 
       final rect = tester.getRect(find.byType(CodeEditor));
       final pointer = TestPointer(1, PointerDeviceKind.mouse);
@@ -231,10 +300,14 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(host());
-      await tester.pumpAndSettle();
+      await tester.pumpUntil(
+        () => find.byType(CarbonLoading).evaluate().isEmpty,
+        reason: 'the highlighted editor to become interactive',
+      );
+      await tester.pump();
 
       final bars = tester
-          .widgetList<AbScrollbar>(find.byType(AbScrollbar))
+          .widgetList<RawScrollbar>(find.byType(RawScrollbar))
           .toList();
       expect(
         bars.map((b) => b.scrollbarOrientation),
@@ -258,13 +331,14 @@ void main() {
 
     Widget host({FileContent? fileContent, int? searchLine}) => ProviderScope(
       child: MaterialApp(
-        theme: ThemeData(extensions: const [kDefaultPalette]),
         home: Scaffold(
-          body: FileContentViewer(
-            fileContent: fileContent,
-            isLoading: false,
-            selectedFilePath: 'notes.txt',
-            searchLine: searchLine,
+          body: AbCarbonScope(
+            child: FileContentViewer(
+              fileContent: fileContent,
+              isLoading: false,
+              selectedFilePath: 'notes.txt',
+              searchLine: searchLine,
+            ),
           ),
         ),
       ),
@@ -275,7 +349,9 @@ void main() {
           w is CustomPaint &&
           w.painter.runtimeType.toString() == '_LineMarkPainter',
     );
-    final markColor = kDefaultPalette.accent.withValues(alpha: 0.18);
+    final markColor = CarbonThemeData.forBrightness(
+      Brightness.light,
+    ).colors.interactive.withValues(alpha: 0.18);
 
     testWidgets('a file opened at a line marks that line', (tester) async {
       await tester.pumpWidget(host());

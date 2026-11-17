@@ -16,7 +16,8 @@ import {
   isSessionBusTool,
   scheduleBody,
 } from "../src/mcp/server";
-import { ReplyBodySchema, SendBodySchema } from "../src/session-bus/api";
+import { SendBodySchema } from "../src/session-bus/api";
+import { BUS_HELD_REASON_TEXT, refusalSentence } from "../src/session-bus/errors";
 
 const saved = {
   port: process.env.ANTGRID_API_PORT,
@@ -128,11 +129,9 @@ describe("the session-bus tools", () => {
     expect(isSessionBusTool("antgrid_get_artifact")).toBe(true);
     expect(isSessionBusTool("antgrid_list_sessions")).toBe(true);
     expect(isSessionBusTool("antgrid_whoami")).toBe(true);
-    expect(isSessionBusTool("antgrid_post")).toBe(true);
     expect(isSessionBusTool("antgrid_notify")).toBe(true);
-    expect(isSessionBusTool("antgrid_reply")).toBe(true);
-    expect(isSessionBusTool("antgrid_inbox")).toBe(true);
     expect(isSessionBusTool("antgrid_thread")).toBe(true);
+    expect(isSessionBusTool("antgrid_request")).toBe(true);
   });
 
   // The bridge authored the refusal and owns the wording; this process appends
@@ -172,7 +171,7 @@ describe("the session-bus tools", () => {
       ],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "network", lastPushAgoMs: 12_000, machines: [{ machineId: "peer", machineLabel: "macbook-pro", status: "answered", rows: 1, droppedRows: 0, truncatedCard: 0, ageMs: 12_000 }], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "network", asOfAgoMs: 12_000, machines: [{ machineId: "peer", machineLabel: "macbook-pro", status: "answered", rows: 1, droppedRows: 0, truncatedCard: 0, ageMs: 12_000 }], staleMachines: 0, notConnected: 0 },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const text = result.content[0]!.text;
@@ -242,12 +241,12 @@ describe("the session-bus tools", () => {
       sessions: [row],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "machine", lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "machine", why: "not-refreshed" },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const line = result.content[0]!.text.split("\n").find((l) => l.startsWith("- ["));
     expect(line).toBeDefined();
-    const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_post")!.inputSchema.properties.to as any;
+    const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_notify")!.inputSchema.properties.to as any;
     for (const key of to.required as string[]) {
       expect(line).toContain(String(row[key as keyof typeof row]));
     }
@@ -262,10 +261,10 @@ describe("the session-bus tools", () => {
       sessions: [],
       truncated: 0,
       machineId: "self",
-      reach: { scope: "network", lastPushAgoMs: 3_000, machines: [{ machineId: "peer", machineLabel: "thinkpad", status: "answered", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 3_000 }], staleMachines: 0, notConnected: 0 },
+      reach: { scope: "network", asOfAgoMs: 3_000, machines: [{ machineId: "peer", machineLabel: "thinkpad", status: "answered", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 3_000 }], staleMachines: 0, notConnected: 0 },
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
-    expect(result.content[0]!.text).toContain("Reach: 1 other machine read 3s ago.");
+    expect(result.content[0]!.text).toContain("Reach: 1 other machine asked, last answer 3s ago.");
     expect(result.content[0]!.text).toContain("thinkpad: nothing on this repository as of 3s ago");
   });
 
@@ -276,11 +275,12 @@ describe("the session-bus tools", () => {
       machineId: "self",
       reach: {
         scope: "network",
-        lastPushAgoMs: 1_000,
+        asOfAgoMs: 1_000,
         machines: [
           { machineId: "m1", machineLabel: "thinkpad", status: "refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
           { machineId: "m2", machineLabel: "old-mini", status: "no-card", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
           { machineId: "m3", machineLabel: "studio", status: "reach-refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
+          { machineId: "m4", machineLabel: "laptop", status: "not-asked", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
         ],
         staleMachines: 0,
         notConnected: 2,
@@ -293,7 +293,27 @@ describe("the session-bus tools", () => {
     // the second one has remote access ON, so sending its user to that setting
     // is sending them somewhere they will find nothing to change.
     expect(text).toContain("studio: reachable by agents is off there");
-    expect(text).toContain("2 machines in your account are not connected to this desktop and were not asked");
+    // Answered about other repositories only: never "nothing on this repository".
+    expect(text).toContain("laptop: not asked about this repository yet");
+    expect(text).toContain("2 machines in your account have no messaging key yet and were not asked");
+  });
+
+  test("machines asked that never answered give no answer age", async () => {
+    stub(() => Response.json({
+      sessions: [],
+      truncated: 0,
+      machineId: "self",
+      reach: {
+        scope: "network",
+        asOfAgoMs: null,
+        machines: [{ machineId: "m1", machineLabel: "thinkpad", status: "unreachable", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 0 }],
+        staleMachines: 0,
+        notConnected: 0,
+      },
+    }));
+    const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+    expect(text).toContain("Reach: 1 other machine asked, last answer never.");
+    expect(text).toContain("thinkpad: did not answer");
   });
 
   test("a machine-scope reach says which of the two reasons it was", async () => {
@@ -306,6 +326,15 @@ describe("the session-bus tools", () => {
     const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
     expect(text).toContain("Reach: this machine has no relay identity yet");
     expect(text).not.toContain("desktop app");
+  });
+
+  test("central-offline and not-refreshed each say why only this machine is listed", async () => {
+    for (const [why, needle] of [["central-offline", "not connected to the relay"], ["not-refreshed", "have not been asked yet"]] as const) {
+      stub(() => Response.json({ sessions: [], truncated: 0, machineId: "self", reach: { scope: "machine", why } }));
+      const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+      expect(text).toContain(needle);
+      expect(text).not.toContain("desktop");
+    }
   });
 
   test("a directory refusal reaches the caller with its code, not re-worded", async () => {
@@ -371,9 +400,7 @@ describe("the session-bus tools", () => {
       keysOf(schema).filter((k) => !shapeOf(schema)[k]!.safeParse(undefined).success);
 
     const pairs = [
-      ["antgrid_post", SendBodySchema],
       ["antgrid_notify", SendBodySchema],
-      ["antgrid_reply", ReplyBodySchema],
     ] as const;
 
     for (const [name, schema] of pairs) {
@@ -392,7 +419,7 @@ describe("the session-bus tools", () => {
     // The nested object is the easier half to get wrong, because nothing beside it
     // names the fields it has to match.
     test("the address a send carries is spelled the way the target schema spells it", () => {
-      const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_post")!.inputSchema.properties.to as any;
+      const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_notify")!.inputSchema.properties.to as any;
       expect(Object.keys(to.properties)).toEqual(keysOf(shapeOf(SendBodySchema).to));
       expect(to.required).toEqual(requiredOf(shapeOf(SendBodySchema).to));
     });
@@ -405,40 +432,59 @@ describe("the session-bus tools", () => {
     function sendStub(onBody?: (path: string, body: any, url: URL) => void) {
       stub((path, body, url) => {
         onBody?.(path, body, url);
-        return Response.json({ ok: true, messageId: "m", threadId: "th", sent: true, held: false, opensThread: false });
+        return Response.json({ ok: true, messageId: "m", threadId: "th", sent: true, held: false, opensThread: false, rung: "relayed" });
       });
     }
 
-    test("a send reports the thread it opened and that the frame left", async () => {
-      stub(() => Response.json({ ok: true, messageId: "m-1", threadId: "th-9", sent: true, held: false, opensThread: true }));
-      const result = await callSessionBusTool("antgrid_post", {
+    const view = (extra: Record<string, unknown>) =>
+      Response.json({ ok: true, messageId: "m-1", threadId: "th-9", sent: true, held: false, opensThread: true, ...extra });
+    const tail = "Use antgrid_notify with that thread id to answer.";
+
+    test("a delivered cross-machine send says the other bridge stored it and nothing more", async () => {
+      stub(() => view({ rung: "delivered", machineLabel: "laptop", sessionName: "codec" }));
+      const result = await callSessionBusTool("antgrid_notify", {
         to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" },
         summary: "the codec diff broke",
       });
       expect(result.content[0]!.text).toBe(
-        "Opened thread th-9 (message m-1). It left this machine; antgrid_thread shows a receipt once the peer's bridge accepts it. Use antgrid_reply with that thread id to answer.",
+        `Opened thread th-9 (message m-1). laptop's bridge has it on disk and will show it to codec the next time that session runs. That is not a reply or an action: wait on the thread for one. ${tail}`,
       );
     });
 
-    test("a held frame is not reported as having left", async () => {
-      stub(() => Response.json({ ok: true, messageId: "m-2", threadId: "th-9", sent: false, held: true, opensThread: false }));
-      const result = await callSessionBusTool("antgrid_notify", {
-        to: { projectId: "p2", sessionId: "9c11de" },
-        summary: "the build is red",
-      });
-      expect(result.content[0]!.text).toBe(
-        "On thread th-9 (message m-2). It is held on this machine and has not left yet; it goes when the link is back. Use antgrid_reply with that thread id to answer.",
-      );
+    test("a same-machine delivery is a mailbox row", async () => {
+      stub(() => view({ rung: "delivered", local: true, sessionName: "codec" }));
+      const text = (await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain("codec has it queued for automatic delivery.");
+    });
+
+    test("a relayed send says only that the relay has it", async () => {
+      stub(() => view({ rung: "relayed", machineLabel: "laptop" }));
+      const text = (await callSessionBusTool("antgrid_notify", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain("The relay has it. It reaches laptop when that machine's bridge is online; nothing has read it yet.");
+    });
+
+    test("a held frame is not reported as having left, and says why", async () => {
+      stub(() => view({ opensThread: false, rung: "held", heldReason: "central-offline", retryUntil: Date.now() + 3_600_000 }));
+      const text = (await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "the build is red" })).content[0]!.text;
+      expect(text.startsWith("On thread th-9 (message m-1). Held on this machine (")).toBe(true);
+      expect(text).toContain(BUS_HELD_REASON_TEXT["central-offline"]);
+      expect(text).toMatch(/It is retried for \d+h more; nothing has left yet\./);
+    });
+
+    test("a refused send names its code, says why, and delivered nothing", async () => {
+      stub(() => view({ rung: "refused", refusedCode: "REMOTE_ACCESS_OFF" }));
+      const text = (await callSessionBusTool("antgrid_notify", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain(`Refused (REMOTE_ACCESS_OFF): ${refusalSentence("REMOTE_ACCESS_OFF")}. Nothing was delivered.`);
     });
 
     test("each verb reaches its own route", async () => {
       const paths: string[] = [];
       sendStub((path) => paths.push(path));
       const to = { projectId: "p2", sessionId: "9c11de" };
-      await callSessionBusTool("antgrid_post", { to, summary: "s", text: "t" });
       await callSessionBusTool("antgrid_notify", { to, summary: "s", text: "t" });
-      await callSessionBusTool("antgrid_reply", { threadId: "th-1", summary: "s", text: "t" });
-      expect(paths).toEqual(["/session-bus/post", "/session-bus/notify", "/session-bus/reply"]);
+      await callSessionBusTool("antgrid_notify", { to, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { threadId: "th-1", summary: "s", text: "t" });
+      expect(paths).toEqual(["/session-bus/notify", "/session-bus/notify", "/session-bus/notify"]);
     });
 
     // The address is strict too, so one key inside it that the route does not name
@@ -446,7 +492,7 @@ describe("the session-bus tools", () => {
     test("the address is rebuilt from the fields the route names, not forwarded whole", async () => {
       let received: any = null;
       sendStub((path, body) => { received = body; });
-      await callSessionBusTool("antgrid_post", {
+      await callSessionBusTool("antgrid_notify", {
         to: { machineId: "peer", projectId: "p2", sessionId: "9c11de", machineLabel: "macbook-pro" },
         summary: "s",
         text: "t",
@@ -465,8 +511,8 @@ describe("the session-bus tools", () => {
     test("a null machine survives, and an absent one is simply not sent", async () => {
       const bodies: any[] = [];
       sendStub((path, body) => { bodies.push(body); });
-      await callSessionBusTool("antgrid_post", { to: { machineId: null, projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
-      await callSessionBusTool("antgrid_post", { to: { projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { to: { machineId: null, projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { to: { projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
       expect(bodies[0].to).toEqual({ machineId: null, projectId: "p1", sessionId: "s1" });
       expect(bodies[1].to).toEqual({ projectId: "p1", sessionId: "s1" });
     });
@@ -477,65 +523,67 @@ describe("the session-bus tools", () => {
     test("a reply names a thread and nothing else", async () => {
       let received: any = null;
       sendStub((path, body) => { received = body; });
-      await callSessionBusTool("antgrid_reply", { threadId: "th-1", summary: "answered", text: "the codec" });
+      await callSessionBusTool("antgrid_notify", { threadId: "th-1", summary: "answered", text: "the codec" });
       expect(received).toEqual({ threadId: "th-1", summary: "answered", text: "the codec" });
     });
 
     test("a send refusal reaches the caller with the code the bridge chose", async () => {
       stub(() => Response.json(
-        { error: "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_post lands in its mailbox instead", code: "NOT_RUNNING" },
+        { error: "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_notify lands in its mailbox instead", code: "NOT_RUNNING" },
         { status: 409 },
       ));
       const result = await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s", text: "t" });
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain("antgrid_post lands in its mailbox instead (NOT_RUNNING)");
+      expect(result.content[0]!.text).toContain("antgrid_notify lands in its mailbox instead (NOT_RUNNING)");
+    });
+  });
+
+  describe("antgrid_request", () => {
+    test("posts the request to its route and renders the result", async () => {
+      let received: unknown;
+      let path = "";
+      stub((p, sent) => {
+        path = p;
+        received = sent;
+        return Response.json({ ok: true, result: { sessions: [] } });
+      });
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list", params: {}, timeoutMs: 5000 });
+      expect(path).toBe("/session-bus/request");
+      expect(received).toEqual({ to: "m-1", method: "sessions.list", params: {}, timeoutMs: 5000 });
+      expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [] });
+    });
+
+    test("requires to and method", async () => {
+      expect((await callSessionBusTool("antgrid_request", { method: "x" })).isError).toBe(true);
+      expect((await callSessionBusTool("antgrid_request", { to: "m-1" })).isError).toBe(true);
+    });
+
+    test("a refusal carries its code and a held reason says not delivered yet", async () => {
+      stub(() => Response.json({ error: "no", code: "REQUEST_TIMEOUT", held: "central-offline" }, { status: 504 }));
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("no (REQUEST_TIMEOUT)");
+      expect(result.content[0]!.text).toContain(`not delivered yet: ${BUS_HELD_REASON_TEXT["central-offline"]}`);
+    });
+
+    test("a remote code the bridge forwarded is printed, digits included", async () => {
+      stub(() => Response.json({ error: "no", code: "REQUEST_FAILED", remoteCode: "E2BIG_42" }, { status: 502 }));
+      const result = await callSessionBusTool("antgrid_request", { to: "m-1", method: "sessions.list" });
+      expect(result.content[0]!.text).toContain("remote code: E2BIG_42");
+    });
+
+    test("states the agent-reach and orchestrator conditions", () => {
+      const tool = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_request")!;
+      for (const needle of ["reachable by agents", "orchestrator", "on by default", "not delivered yet", "does not mean its agent acted"]) {
+        expect(tool.description).toContain(needle);
+      }
     });
   });
 
   describe("the mailbox and thread reads", () => {
-    test("a post is rendered with the address that answers it and the body under it", async () => {
-      stub(() => Response.json({
-        posts: [{
-          messageId: "m-1",
-          threadId: "th-1",
-          contextId: "c-1",
-          at: Date.now(),
-          from: { machineId: "peer", projectId: "p2", sessionId: "9c11de" },
-          summary: "the codec diff broke",
-          text: ["look at frame.ts"],
-          unexpected: "your lockfile is stale",
-          artifacts: [{ artifactId: "a-1", name: "diff.txt", mediaType: "text/plain", bytes: 120, sha256: "ab", summary: "the diff" }],
-        }],
-        dropped: 0,
-      }));
-      const text = (await callSessionBusTool("antgrid_inbox", {})).content[0]!.text;
-      expect(text).toContain("Unread posts (1). Reading them here marks them read:");
-      expect(text).toContain('- [peer/p2/9c11de] thread th-1 — the codec diff broke');
-      expect(text).toContain("  look at frame.ts");
-      expect(text).toContain("  Not asked about: your lockfile is stale");
-      expect(text).toContain("  - a-1 diff.txt (text/plain, 120 bytes): the diff");
-    });
-
-    // A bounded mailbox drops its oldest, and a drop the reader is never told
-    // about is a message that, as far as this session can tell, was never sent. It
-    // rides the header even when there is nothing left to read.
-    test("a dropped post is reported, including when the inbox is otherwise empty", async () => {
-      stub(() => Response.json({ posts: [], dropped: 1 }));
-      const text = (await callSessionBusTool("antgrid_inbox", {})).content[0]!.text;
-      expect(text).toBe(
-        "No unread posts; 1 post has been dropped unread from this mailbox since it was created.",
-      );
-    });
-
-    test("an empty mailbox that lost nothing says exactly that", async () => {
-      stub(() => Response.json({ posts: [], dropped: 0 }));
-      expect((await callSessionBusTool("antgrid_inbox", {})).content[0]!.text).toBe("No unread posts.");
-    });
-
-    // The receipt is the only end-to-end witness in the design: an unacked message
-    // is never retried, so the sender's whole knowledge of it is this stamp or its
-    // absence.
-    test("a thread reads in both directions, with the receipt on what this session sent", async () => {
+    // The delivery stamp is the sender's whole knowledge of an outbound message:
+    // each rung says what witnessed it, and none claims the peer's agent read it.
+    test("a thread reads in both directions, with how far each sent message got", async () => {
       const now = Date.now();
       const peer = { machineId: "peer", projectId: "p2", sessionId: "9c11de" };
       let search = "";
@@ -545,19 +593,23 @@ describe("the session-bus tools", () => {
           threadId: "th-1",
           contextId: "c-1",
           entries: [
-            { direction: "out", at: now - 300_000, peer, summary: "asked", text: ["what broke?"], deliveredAt: now - 240_000 },
+            { direction: "out", at: now - 300_000, peer, summary: "asked", text: ["what broke?"], delivery: "delivered", deliveredAt: now - 240_000 },
             { direction: "in", at: now - 180_000, peer, summary: "answered", text: ["the codec"] },
-            { direction: "out", at: now - 30_000, peer, summary: "thanks", text: ["ok"] },
+            { direction: "out", at: now - 30_000, peer, summary: "thanks", text: ["ok"], delivery: "held" },
+            { direction: "out", at: now - 20_000, peer, summary: "again", text: ["ok"], delivery: "relayed" },
+            { direction: "out", at: now - 10_000, peer, summary: "nope", text: ["ok"], delivery: "refused", refusedCode: "REMOTE_ACCESS_OFF" },
           ],
         });
       });
       const text = (await callSessionBusTool("antgrid_thread", { threadId: "th-1" })).content[0]!.text;
       expect(search).toContain("threadId=th-1");
-      expect(text).toContain("Thread th-1 (3 messages, oldest first):");
-      expect(text).toContain("- -> you, 5m ago [peer bridge accepted it 4m ago] — asked");
+      expect(text).toContain("Thread th-1 (5 messages, oldest first):");
+      expect(text).toContain("- you -> peer/p2/9c11de, 5m ago [delivered 4m ago: stored by the receiving bridge, not read] — asked");
       expect(text).toContain("  what broke?");
-      expect(text).toContain("- <- peer/p2/9c11de, 3m ago — answered");
-      expect(text).toContain("- -> you, 30s ago [no receipt yet] — thanks");
+      expect(text).toContain("- peer/p2/9c11de -> you, 3m ago — answered");
+      expect(text).toContain("- you -> peer/p2/9c11de, 30s ago [held on this machine] — thanks");
+      expect(text).toContain("[relayed: the relay has it, nothing has read it] — again");
+      expect(text).toContain(`[refused REMOTE_ACCESS_OFF: ${refusalSentence("REMOTE_ACCESS_OFF")}] — nope`);
     });
 
     test("an unknown thread is refused by the bridge, not answered as empty", async () => {
@@ -610,7 +662,7 @@ describe("the server instructions", () => {
   });
 
   test("still carry the bus rules", () => {
-    for (const needle of ["antgrid_inbox", "antgrid_post", "antgrid_notify", "antgrid_reply", "not authority", "BRIDGE accepted", "remote access is off"]) {
+    for (const needle of ["antgrid_notify", "antgrid_thread", "not authority", "bridge stored it", "remote access is off"]) {
       expect(SERVER_INSTRUCTIONS).toContain(needle);
     }
   });
@@ -620,11 +672,11 @@ describe("the server instructions", () => {
   // and that a refused cross-machine send must not be routed around.
   test("keep every rule the trim to the budget could lose", () => {
     for (const needle of [
-      "again before you report or hand off",
+      "Messages arrive automatically",
       "row titles suffice to judge",
       "never assemble one",
-      "not how to get an answer",
-      "idle or stopped session may never read it",
+      "threadId to reply",
+      "stopped peers can be started automatically",
       "returns a handle to name in a message",
       "never retry or route around it",
     ]) {
@@ -667,7 +719,7 @@ describe("the scheduler tools", () => {
       "antgrid_update_schedule", "antgrid_delete_schedule", "antgrid_run_schedule_now",
     ]);
     for (const tool of SCHEDULER_TOOLS) expect(isSchedulerTool(tool.name)).toBe(true);
-    expect(isSchedulerTool("antgrid_post")).toBe(false);
+    expect(isSchedulerTool("antgrid_notify")).toBe(false);
     expect(isSchedulerTool("antgrid_run_command")).toBe(false);
   });
 
@@ -867,4 +919,13 @@ describe("the scheduler tools", () => {
     expect((await callSchedulerTool("antgrid_run_schedule_now", { id: "sch-1" }, NOW)).content[0]!.text)
       .toContain("Skipped");
   });
+});
+
+test("removed messaging tools are neither advertised nor dispatched", async () => {
+  for (const name of ["antgrid_post", "antgrid_reply", "antgrid_inbox"]) {
+    expect(isSessionBusTool(name)).toBe(false);
+    expect(SERVER_INSTRUCTIONS).not.toContain(name);
+    expect(JSON.stringify(SESSION_BUS_TOOLS)).not.toContain(name);
+    expect((await callSessionBusTool(name, {})).isError).toBe(true);
+  }
 });

@@ -37,6 +37,9 @@ void reveal(ProviderContainer container, WorkspaceView view) {
   container.read(revealWorkspaceViewControlProvider)!.call(view);
 }
 
+/// Pull carries how far the branch is behind (`Pull 2`) once there is any.
+final _pull = find.textContaining(RegExp(r'^Pull\b'));
+
 void main() {
   testWidgets('the Git panel fits the iPad context pane', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -45,7 +48,7 @@ void main() {
       // An overflowing Row reports itself as a test failure on its own; what
       // is left to check is that the labels got a line each to be read on.
       expect(
-        tester.getTopLeft(find.text('Pull')).dy,
+        tester.getTopLeft(_pull).dy,
         greaterThan(tester.getBottomLeft(find.text('Commit (1)')).dy),
       );
     } finally {
@@ -59,7 +62,7 @@ void main() {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     try {
       await openGitOnIpad(tester);
-      await tester.tap(find.text('Pull'));
+      await tester.tap(_pull);
       await settle(tester);
       expect(find.textContaining(kDemoRefusalText), findsOneWidget);
       expect(find.textContaining('Pull failed'), findsNothing);

@@ -54,11 +54,26 @@ const KINDS: ReadonlyArray<readonly [string, (d: BusDelivery) => string]> = [
 // fire together across the fixed prose — is asserted on the assembled wrapper
 // further down, which is the only place it can be seen.
 test("provenance labels cannot smuggle a lift", () => {
-  expect(sanitizeProvenanceLabel("evil.example.com")).toBe("evil example com");
-  expect(sanitizeProvenanceLabel("C:/Users/dev/.ssh")).toBe("C Users dev ssh");
+  expect(sanitizeProvenanceLabel("evil.example.com")).toBe("evil[.]example[.]com");
+  expect(sanitizeProvenanceLabel("https://evil.example.com/x")).toBe("https: evil[.]example[.]com x");
+  expect(sanitizeProvenanceLabel("10.0.0.1")).toBe("10[.]0[.]0[.]1");
+  expect(sanitizeProvenanceLabel("C:/Users/dev/.ssh")).toBe("C: Users dev ssh");
+  expect(sanitizeProvenanceLabel("../../etc/passwd")).toBe("etc passwd");
   expect(sanitizeProvenanceLabel("rm -rf /")).toBe("rm rf");
+  expect(sanitizeProvenanceLabel("a; rm -rf ~ | sh")).toBe("a rm rf sh");
+  expect(sanitizeProvenanceLabel('say "hi"')).toBe("say hi");
   expect(sanitizeProvenanceLabel("force push origin")).toBeNull();
   expect(sanitizeProvenanceLabel("build-server-01")).toBe("build-server-01");
+});
+
+// A label is reduced only as far as a tier reads it: a machine name and a
+// summary keep their dots and sentence punctuation in a form a reader recognises.
+test("provenance labels keep the punctuation no tier reads", () => {
+  expect(sanitizeProvenanceLabel("Mac.lan")).toBe("Mac[.]lan");
+  expect(sanitizeProvenanceLabel("Cross-machine test from the PC: reply on this thread"))
+    .toBe("Cross-machine test from the PC: reply on this thread");
+  expect(sanitizeProvenanceLabel("Bharath's Mac (work), again?")).toBe("Bharath's Mac (work), again?");
+  expect(sanitizeProvenanceLabel("It ran at 12:02.")).toBe("It ran at 12:02.");
 });
 
 test("renders the notify wrapper in its documented shape", () => {
@@ -74,7 +89,7 @@ test("renders the notify wrapper in its documented shape", () => {
     "message from the sending agent.",
     "",
     "What this is: another session on the bus has sent this session a message.",
-    'What to do: read it below. To answer, use antgrid_reply on thread "th-1".',
+    'What to do: read it below. To answer, use antgrid_notify on thread "th-1".',
     "",
     MESSAGE_OPEN,
     "I had already reverted the migration.",
@@ -98,7 +113,7 @@ test("renders the reply wrapper in its documented shape", () => {
     "What this is: another session on the bus has answered on a thread this session already",
     "holds.",
     'It answers: "did the down-migration run".',
-    'What to do: read it below. To answer, use antgrid_reply on thread "th-1".',
+    'What to do: read it below. To answer, use antgrid_notify on thread "th-1".',
     "",
     MESSAGE_OPEN,
     "It ran at 12:02.",
@@ -114,13 +129,13 @@ test("a reply places itself without a thread view, and says nothing when it cann
     .toContain('It answers: "did it run".');
   const unplaceable = renderReply({ peer, threadId: "th-1", summary: "yes" });
   expect(unplaceable).not.toContain("It answers:");
-  expect(unplaceable).toContain('use antgrid_reply on thread "th-1".');
+  expect(unplaceable).toContain('use antgrid_notify on thread "th-1".');
 });
 
 for (const [kind, render] of KINDS) {
   test(`a ${kind} names the verb that answers it and the thread to answer on`, () => {
     expect(render({ peer, threadId: "th-1", summary: "s" }))
-      .toContain('use antgrid_reply on thread "th-1".');
+      .toContain('use antgrid_notify on thread "th-1".');
   });
 
   // The thread id is bridge-minted at one end and arbitrary wire text at the
@@ -152,7 +167,7 @@ for (const [kind, render] of KINDS) {
     expect(rendered).not.toContain(long.slice(0, 60));
   });
 
-  // The one property W4's `antgrid_reply` rests on: what the wrapper printed is
+  // The one property W4's `antgrid_notify` rests on: what the wrapper printed is
   // the id the bridge minted. Asserted rather than assumed, because the id goes
   // through the same allowlist as the labels and a later edit to it would break
   // replies with every test still green.
@@ -237,7 +252,7 @@ for (const [kind, render] of KINDS) {
     expect(rendered.length).toBeLessThanOrEqual(MAX_DELIVERY_CHARS);
     expect(rendered).toStartWith(`[antgrid session bus] delivery: ${kind} (template v3)\n`);
     expect(rendered).toContain('From: session "Trace the 500s" on machine "linux box", project "ingest".');
-    expect(rendered).toContain('use antgrid_reply on thread "th-1".');
+    expect(rendered).toContain('use antgrid_notify on thread "th-1".');
     expect(rendered).toContain(MESSAGE_OPEN);
     expect(rendered).toEndWith(`\n${MESSAGE_CLOSE}`);
     expect(rendered).toContain("[message truncated by the bridge: ");

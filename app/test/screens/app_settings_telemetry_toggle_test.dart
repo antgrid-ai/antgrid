@@ -18,7 +18,7 @@ _buildService() async {
   return (service: AppSettingsService(prefs, seed), prefs: prefs);
 }
 
-/// Brings 'Anonymous usage analytics' fully on-screen. The PRIVACY section sits
+/// Brings 'Anonymous usage analytics' fully on-screen. The Privacy section sits
 /// near the bottom of the settings screen, so a fresh pump leaves it below the
 /// fold; the screen builds every section eagerly, so the row is in the tree but
 /// not yet hittable, and ensureVisible does the alignment a tap needs.
@@ -84,8 +84,7 @@ void main() {
 
     await _scrollToPrivacy(tester);
 
-    // Tap the toggle row label — the parent GestureDetector covers the full
-    // row with HitTestBehavior.opaque so the text is the tap target.
+    // The toggle's label is part of its tap target.
     await tester.tap(find.text('Anonymous usage analytics'));
     await tester.pumpAndSettle();
 

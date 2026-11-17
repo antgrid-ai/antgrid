@@ -40,7 +40,7 @@ describe("bundled plugin root", () => {
 });
 
 describe("opencode launch config", () => {
-  test("names a plugin file that exists", () => {
+  test("names a plugin package that exists", () => {
     const abDir = tmp();
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
@@ -55,6 +55,6 @@ describe("opencode launch config", () => {
     const cfg = JSON.parse(readFileSync(cfgPath!, "utf8"));
     // The end-to-end property the anchor exists for: the URL opencode is told to
     // import resolves to a real file.
-    expect(existsSync(fileURLToPath(cfg.plugin[0]))).toBe(true);
+    expect(existsSync(join(fileURLToPath(cfg.plugins[0]), "package.json"))).toBe(true);
   });
 });

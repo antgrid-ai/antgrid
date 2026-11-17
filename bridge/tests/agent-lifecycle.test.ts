@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { StructuredAgentManager, type StructuredDriver, type DriverRunContext } from "../src/structured/structured-manager";
 import { OpencodeDriver, type OpencodeClientLike } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
-import { waitServerGone } from "../../packages/antgrid-agents/src/agents/opencode/spawn";
 import { createMessage, type AbMessage } from "../src/protocol";
 
 function deferred<T>() {
@@ -198,7 +197,7 @@ describe("agent run lifecycle", () => {
       createSession: async () => "native", events: async function* () {},
       listCommands: () => discovery.promise,
       listAgents: async () => [],
-      listProviders: async () => ({ all: [], default: {}, connected: [] }),
+      listProviders: async () => [],
       dispose: async () => { disposed++; },
     } as unknown as OpencodeClientLike;
     const sent: AbMessage[] = [];
@@ -212,22 +211,5 @@ describe("agent run lifecycle", () => {
     expect(sent).toEqual([]);
     expect(disposed).toBe(1);
     await expect(session.prompt("late prompt")).rejects.toThrow("disposed");
-  });
-});
-
-describe("OpenCode teardown confirmation", () => {
-  it("accepts a refused connection", async () => {
-    const probe = async () => { throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); };
-    await waitServerGone("http://unused", 10, probe);
-  });
-
-  it("does not mistake a request timeout for a stopped server", async () => {
-    const probe = async () => { throw new DOMException("slow server", "TimeoutError"); };
-    await expect(waitServerGone("http://unused", 1, probe)).rejects.toThrow("timed out");
-  });
-
-  it("rejects when the server continues answering", async () => {
-    const probe = async () => new Response("alive");
-    await expect(waitServerGone("http://unused", 1, probe)).rejects.toThrow("timed out");
   });
 });

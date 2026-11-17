@@ -1,8 +1,8 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_tokens.dart';
 import '../../models/handler_state.dart';
+import 'handler_layout.dart';
 
 /// What an ask promises about its own delivery, said before the answer is given
 /// rather than as an apology afterwards.
@@ -14,9 +14,9 @@ const handlerAskLatencyNote =
     'Handler passes your answer on when it next hears from the agent.';
 
 /// What the user is told when the work the question was supposed to be running
-/// alongside has all stopped. [AbColors.warning], because the promise the ask
-/// was raised on has quietly expired: from here the session is waiting on them
-/// after all.
+/// alongside has all stopped. Marked with a warning glyph, because the promise
+/// the ask was raised on has quietly expired: from here the session is waiting
+/// on them after all.
 const handlerAskNothingRunningNote =
     'Nothing else is running — Handler is waiting on this';
 
@@ -65,7 +65,10 @@ class HandlerAskFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
+    final style = theme.typography.helper.copyWith(
+      color: theme.colors.textSecondary,
+    );
     final gated = escalation.unblocked.toSet();
     final running = [
       for (final item in backlog)
@@ -74,12 +77,20 @@ class HandlerAskFooter extends StatelessWidget {
           item,
     ];
     if (running.isEmpty) {
-      return Text(
-        handlerAskNothingRunningNote,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          color: p.warning,
-        ),
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: CarbonSpacing.spacing01),
+            child: CarbonIcon(
+              CarbonIcons.warningFilled,
+              size: handlerRailWidth,
+              color: theme.colors.supportWarning,
+            ),
+          ),
+          const SizedBox(width: CarbonSpacing.spacing03),
+          Expanded(child: Text(handlerAskNothingRunningNote, style: style)),
+        ],
       );
     }
     final hidden = running.length - _maxItemRows;
@@ -90,29 +101,16 @@ class HandlerAskFooter extends StatelessWidget {
         Text(
           'Still working on ${running.length} '
           'item${running.length == 1 ? '' : 's'}',
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXs,
-            color: p.textMuted,
-          ),
+          style: style,
         ),
         for (final item in running.take(_maxItemRows))
           Text(
             item.text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: p.textSecondary,
-            ),
+            style: style,
           ),
-        if (hidden > 0)
-          Text(
-            '+$hidden more',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: p.textMuted,
-            ),
-          ),
+        if (hidden > 0) Text('+$hidden more', style: style),
       ],
     );
   }

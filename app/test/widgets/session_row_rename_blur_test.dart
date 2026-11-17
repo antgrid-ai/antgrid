@@ -1,3 +1,4 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -80,7 +81,7 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            home: Scaffold(
+            home: AbCarbonScope(child: Scaffold(
               body: Column(
                 children: [
                   SizedBox(
@@ -98,7 +99,7 @@ void main() {
                   ),
                 ],
               ),
-            ),
+            )),
           ),
         ),
       );

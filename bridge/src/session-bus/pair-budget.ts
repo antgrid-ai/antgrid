@@ -1,36 +1,6 @@
-// Two agents that can post, notify and reply to each other
-// with nobody between them are a closed loop, and the loop spends tokens on two
-// machines. This bounds it per **(sender, target) pair** — not per session and
-// not per machine — because a per-session ceiling lets a halted pair carry on
-// through a third session, and a per-machine one lets one session spend
-// another's budget (see "the no-progress halt is per (sender, target) PAIR" in
-// bridge/AGENTS.md).
-//
-// The record is MIRRORED, not shared: the two ends of a pair can be on two
-// machines, and neither can write the other's store, so each keeps its own copy
-// and every message is charged at BOTH ends — where it is sent
-// (`SessionBusCoordinator.message`) and where it lands (`onMessage`). Charging
-// only the outbound half is what makes the two copies diverge, and divergence
-// is not a cosmetic difference: each end then counts only the messages IT sent,
-// so [NO_PROGRESS_EXCHANGES] takes twice as many exchanges to reach on an
-// alternating pair, [MAX_NOTIFIES_PER_PAIR_HOUR] is spent twice per hour, and a
-// halt binds only whichever side happened to send last.
-//
-// Two different ceilings share one record because they answer two different
-// questions about the same pair. `notifiesAtMs` bounds how often a pair may
-// INTERRUPT each other's turn — `post` is deliberately unbudgeted, because it
-// waits for the target to look and costs nothing until then.
-// `exchangesSinceProgress` bounds how long a pair may talk with
-// nothing to show for it, across every verb — a halted pair that could still
-// `post` would just relabel every `notify` as a `post` and keep going, which is
-// why {@link checkHalt} is a separate gate every send consults, not a branch
-// inside {@link checkNotify}.
-//
-// A halt SURVIVES a bridge restart on purpose: it is cleared only
-// by a human, and an in-memory halt that a restart forgets is not that.
-// `loadPairBudgets`/`savePairBudgets` are what make the survival real, so a
-// producer that keeps a halted record only in memory has not implemented it.
-
+// Each endpoint mirrors the pair's budget and charges inbound and outbound
+// messages. Charging only outbound messages would double the effective limit.
+// Rate limits expire; a no-progress halt survives restarts until a human clears it.
 import { z } from "zod";
 import { MAX_NOTIFIES_PER_PAIR_HOUR, NO_PROGRESS_EXCHANGES } from "./constants";
 import { refuse, type SessionBusRefusal } from "./errors";
@@ -82,7 +52,7 @@ export interface PairEnd {
 /**
  * Order-independent: the same record whichever end calls it, because "the
  * pair" — not the direction of one send — is what this budget bounds. A
- * reply from B to A has to land on the SAME record A's earlier post to B
+ * reply from B to A has to land on the SAME record A's earlier message to B
  * opened, or the no-progress halt these two counters exist to reach is
  * unreachable — a pair that only ever incremented its own outbound-half
  * counter could ping-pong forever, each side's own tally never reaching
@@ -120,13 +90,6 @@ export function emptyPairBudget(key: string): PairBudgetState {
   return { pairKey: key, notifiesAtMs: [], exchangesSinceProgress: 0, haltedAt: null };
 }
 
-/**
- * A halt refuses every send on the pair, not only `notify`. Sending at all
- * once a pair is halted is exactly what an addressable session must never be
- * able to do. Gating only notify would leave a halted pair looping on `post`
- * forever — the one channel a ceiling never reaches — and the halt would
- * bound nothing. Nothing here mutates.
- */
 export function checkHalt(state: PairBudgetState): SessionBusRefusal | null {
   if (state.haltedAt === null) return null;
   return refuse(
@@ -135,20 +98,12 @@ export function checkHalt(state: PairBudgetState): SessionBusRefusal | null {
   );
 }
 
-/**
- * The rolling-hour notify ceiling. NOTIFY ONLY — `post` is deliberately
- * left unbudgeted, so the refusal names it as the verb that still reaches,
- * the same "refuse, and name the verb that reaches" pattern used elsewhere
- * on the bus. Reads `notifiesAtMs` live rather than trusting it pre-pruned, so
- * a caller holding state between loads still gets a correct answer; nothing
- * here mutates.
- */
 export function checkNotify(state: PairBudgetState, now: number): SessionBusRefusal | null {
   const recent = state.notifiesAtMs.filter((at) => now - at < PAIR_NOTIFY_WINDOW_MS);
   if (recent.length < MAX_NOTIFIES_PER_PAIR_HOUR) return null;
   return refuse(
     "NOTIFY_RATE",
-    `${MAX_NOTIFIES_PER_PAIR_HOUR} notifies per hour on this pair; post instead — it is unbudgeted and still reaches`,
+    `${MAX_NOTIFIES_PER_PAIR_HOUR} notifications per hour on this pair; wait for the rolling-hour budget to recover`,
   );
 }
 
@@ -163,12 +118,6 @@ export function noteNotify(state: PairBudgetState, now: number): PairBudgetState
   return { ...state, notifiesAtMs };
 }
 
-/**
- * Any bus message in or out on this pair — post, notify or reply alike.
- * Increments the no-progress counter and trips the halt at
- * [NO_PROGRESS_EXCHANGES]. Returns the same object once the pair is already
- * halted, so a caller can skip the write.
- */
 export function noteExchange(state: PairBudgetState, now: number): PairBudgetState {
   if (state.haltedAt !== null) return state;
   const exchangesSinceProgress = state.exchangesSinceProgress + 1;
@@ -205,11 +154,6 @@ function trimNotifies(state: PairBudgetState): PairBudgetState {
   return { ...state, notifiesAtMs: state.notifiesAtMs.slice(-NOTIFY_LOG_CAP) };
 }
 
-/** Drop `notifiesAtMs` entries the rolling window has already forgotten. Same
- *  shape as `thread-store.ts`'s `expireThreads` / `mailbox.ts`'s
- *  `expireOldPosts`: run on the way out of the database so a pair idle for a
- *  week does not come back holding notify timestamps the ceiling no longer
- *  counts. Never touches `haltedAt` — a halt has no TTL of its own. */
 export function expireNotifies(state: PairBudgetState, now: number): PairBudgetState {
   const notifiesAtMs = state.notifiesAtMs.filter((at) => now - at < PAIR_NOTIFY_WINDOW_MS);
   return notifiesAtMs.length === state.notifiesAtMs.length ? state : { ...state, notifiesAtMs };
@@ -231,10 +175,6 @@ export function upsertPairBudget(records: readonly PairBudgetState[], next: Pair
   return kept.length > MAX_PAIR_BUDGETS_PER_SESSION ? kept.slice(kept.length - MAX_PAIR_BUDGETS_PER_SESSION) : kept;
 }
 
-/** Expiry runs on the way OUT of the database, same reasoning as
- *  `loadThreads`/`loadMailbox`: a session reloaded after a long silence should
- *  not come back holding notify timestamps the window had already retired.
- *  `haltedAt` is read back verbatim regardless of age — see {@link expireNotifies}. */
 export function loadPairBudgets(abDir: string, projectId: string, sessionId: string, now = Date.now()): PairBudgetState[] {
   const records = readBusDb(
     abDir,

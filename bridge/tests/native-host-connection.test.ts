@@ -1112,6 +1112,20 @@ async function establishedSlot(
   return slot;
 }
 
+test("queued callers can synchronously recheck an expired lease before its cleanup timer runs", async () => {
+  let now = 0;
+  const f = fixture(() => now, () => () => {});
+  const peer = connection(f.endpointId);
+  try {
+    const slot = await establishedSlot(f, peer);
+    expect(f.client.isPeerAuthorized(slot)).toBe(true);
+    now = 60_001;
+    expect(f.client.peerSession(slot)).not.toBeNull();
+    expect(f.client.isPeerAuthorized(slot)).toBe(false);
+    expect(f.client.peerSession(slot)).toBeNull();
+  } finally { await f.client.close(); }
+});
+
 function terminalOpenRecord(projectId: string): number[][] {
   const body = Array.from(encodeStreamOpen({ kind: "terminal", projectId, requestId: crypto.randomUUID() }));
   return [lengthPrefix(body.length), body];

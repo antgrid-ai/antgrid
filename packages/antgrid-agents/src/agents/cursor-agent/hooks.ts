@@ -18,9 +18,10 @@ const log = logger.child({ component: "agent-launch" });
 
 // The user-tier file (~/.cursor/hooks.json) is cursor-agent's only workable
 // injection point: hook tiers MERGE (enterprise→team→project→user, nothing
-// overrides), and --plugin-dir cannot carry hooks — plugin hooks are
-// discovery-only in current builds (PluginHooksService has no callers; verified
-// against build 2026.07.16 — the flag delivers skills/commands/MCP only).
+// overrides), and --plugin-dir cannot carry the hook that matters: plugin hooks
+// reach the hook executor, but the TUI fires `stop` only when the user or
+// project tier defines one (checked against build 2026.11.05), so a
+// plugin-only `stop` never runs.
 // Machine-global is safe because unrelated cursor-agent runs fast-exit: the
 // hook posts nothing without ANTGRID_API_PORT in its environment, which only
 // bridge-spawned PTYs carry (see hook-runner.ts resolvePort), so a run outside

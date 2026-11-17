@@ -1,5 +1,5 @@
 import type { NamingModelProbe } from "../types";
-import { resolveOpencodeNamingModel, type SmallModelRules } from "../opencode/naming-model";
+import { resolveOpencodeV1FamilyNamingModel, type SmallModelRules } from "../opencode/naming-model";
 
 /**
  * Kilo 7.8.x keeps opencode's title path, probe commands and output shapes, and
@@ -16,5 +16,5 @@ const KILO_RULES: SmallModelRules = {
 };
 
 export function resolveKiloNamingModel(probe: NamingModelProbe): Promise<string | undefined> {
-  return resolveOpencodeNamingModel(probe, KILO_RULES);
+  return resolveOpencodeV1FamilyNamingModel(probe, KILO_RULES);
 }

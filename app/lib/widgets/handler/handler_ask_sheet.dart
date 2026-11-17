@@ -1,10 +1,6 @@
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_adaptive_sheet.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_dialog.dart';
-import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import 'handler_why.dart';
 
@@ -51,9 +47,9 @@ Future<HandlerAskSheetResult?> showHandlerAskSheet(
   BuildContext context,
   HandlerEscalation escalation,
 ) {
-  return showAbAdaptiveSheet<HandlerAskSheetResult>(
+  return showCarbonModal<HandlerAskSheetResult>(
     context,
-    child: _HandlerAskForm(escalation: escalation),
+    builder: (_) => _HandlerAskForm(escalation: escalation),
   );
 }
 
@@ -77,99 +73,76 @@ class _HandlerAskFormState extends State<_HandlerAskForm> {
   @override
   Widget build(BuildContext context) {
     final e = widget.escalation;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: abDialogTitlePadding,
-          child: abDialogTitle(
-            // Deliberately not the reply sheet's 'Handler needs you': the agent
-            // is still working, and a title that says it stopped is the one
-            // thing this whole shape exists to stop telling the user.
-            'Handler has a question',
-            onClose: () => Navigator.pop(context),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AbTokens.space16,
-            AbTokens.space8,
-            AbTokens.space16,
-            0,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                e.question,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontBody,
-                  fontWeight: FontWeight.w600,
-                ),
+    final t = CarbonTheme.of(context);
+    // Disabled while the field is blank: an answer of nothing retires the
+    // question on this side and is refused on the other, which the user reads
+    // as an answer given and then lost. Rebuilds on each keystroke via the
+    // controller's own ValueListenable.
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _controller,
+      builder: (context, value, _) => CarbonModal(
+        // Deliberately not the reply sheet's 'Handler needs you': the agent
+        // is still working, and a title that says it stopped is the one
+        // thing this whole shape exists to stop telling the user.
+        title: 'Handler has a question',
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              e.question,
+              style: t.typography.body.copyWith(
+                color: t.colors.textPrimary,
+                fontWeight: FontWeight.w600,
               ),
-              // Behind a disclosure, exactly as on the card: the judge is told
-              // its reasoning is read afterward and never in order to answer,
-              // and this sheet is where the answer is actually composed. An
-              // always-open block here would push the field the user came for
-              // below the fold and make that promise false where it counts.
-              if (e.reasoning.trim().isNotEmpty) ...[
-                const SizedBox(height: AbTokens.space8),
-                HandlerWhyDisclosure(escalation: e),
-              ],
-              const SizedBox(height: AbTokens.space12),
-              AbTextField(
-                controller: _controller,
-                hintText: 'Your answer',
-                autofocus: true,
-              ),
+            ),
+            // Behind a disclosure, exactly as on the card: the judge is told
+            // its reasoning is read afterward and never in order to answer,
+            // and this sheet is where the answer is actually composed. An
+            // always-open block here would push the field the user came for
+            // below the fold and make that promise false where it counts.
+            if (e.reasoning.trim().isNotEmpty) ...[
+              const SizedBox(height: CarbonSpacing.spacing03),
+              HandlerWhyDisclosure(escalation: e),
             ],
-          ),
+            const SizedBox(height: CarbonSpacing.spacing05),
+            CarbonTextInput(
+              controller: _controller,
+              variant: CarbonTextInputVariant.multiline,
+              minLines: 2,
+              maxLines: 6,
+              semanticLabel: 'Your answer',
+              placeholder: 'Your answer',
+              autofocus: true,
+            ),
+          ],
         ),
-        const SizedBox(height: AbTokens.space16),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AbTokens.space16,
-            0,
-            AbTokens.space16,
-            AbTokens.space16,
+        actions: [
+          // Distinct from closing the sheet, which decides nothing. This is
+          // the only exit from a standing ask that is not an answer, and it
+          // reaches the bridge's own decline path — which parks the refusal so
+          // the judge does not simply ask again.
+          CarbonModalAction(
+            label: "Don't answer",
+            kind: CarbonButtonKind.tertiary,
+            onPressed: () => Navigator.pop(context, const HandlerAskDecline()),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              // Distinct from closing the sheet, which decides nothing. This
-              // is the only exit from a standing ask that is not an answer,
-              // and it reaches the bridge's own decline path — which parks the
-              // refusal so the judge does not simply ask again.
-              AbButton(
-                label: "Don't answer",
-                onTap: () => Navigator.pop(context, const HandlerAskDecline()),
-              ),
-              const SizedBox(width: AbTokens.space8),
-              AbButton(label: 'Cancel', onTap: () => Navigator.pop(context)),
-              const SizedBox(width: AbTokens.space8),
-              // Disabled while the field is blank: an answer of nothing retires
-              // the question on this side and is refused on the other, which
-              // the user reads as an answer given and then lost. Rebuilds on
-              // each keystroke via the controller's own ValueListenable.
-              ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _controller,
-                builder: (_, value, _) => AbButton(
-                  label: 'Send answer',
-                  variant: AbButtonVariant.primary,
-                  onTap: value.text.trim().isEmpty
-                      ? null
-                      : () => Navigator.pop(
-                          context,
-                          HandlerAskAnswer(_controller.text),
-                        ),
-                ),
-              ),
-            ],
+          CarbonModalAction(
+            label: 'Cancel',
+            kind: CarbonButtonKind.secondary,
+            onPressed: () => Navigator.pop(context),
           ),
-        ),
-      ],
+          CarbonModalAction(
+            label: 'Send answer',
+            onPressed: value.text.trim().isEmpty
+                ? null
+                : () => Navigator.pop(
+                    context,
+                    HandlerAskAnswer(_controller.text),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }

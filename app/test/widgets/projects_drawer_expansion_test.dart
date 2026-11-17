@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/project_catalog.dart';
@@ -146,7 +147,9 @@ void main() {
           (_) async => [_heartbeat(fresh: machineOnline)],
         ),
       ],
-      child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+      child: const MaterialApp(
+        home: AbCarbonScope(child: Scaffold(body: ProjectsDrawer())),
+      ),
     );
   }
 
@@ -213,9 +216,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(SessionRow), findsNWidgets(2));
-    // The tag sits where a pointer reveals the kebab — on touch the kebab is
-    // always there, so this is a desktop assertion.
-    // Short, so it fits the cell the kebab takes: "MacBook Pro" is MB.
+    // The tag sits where a pointer reveals the session menu — a desktop
+    // assertion. Short, so it fits the cell the menu takes: "MacBook Pro" is
+    // MB.
     expect(find.text('MB'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
@@ -258,7 +261,7 @@ void main() {
     await seedLocal([_session('a', running: true)]);
     await tester.pumpWidget(buildDrawer());
     await tester.pumpAndSettle();
-    expect(find.text('NEEDS YOU'), findsNothing);
+    expect(find.textContaining('Needs you'), findsNothing);
 
     containerOf(tester)
         .read(remoteSessionStatusProvider.notifier)
@@ -267,7 +270,7 @@ void main() {
         });
     await tester.pump();
 
-    expect(find.text('NEEDS YOU'), findsOneWidget);
+    expect(find.text('Needs you · 1'), findsOneWidget);
     expect(find.text('This machine · antgrid'), findsOneWidget);
   });
 
@@ -291,7 +294,7 @@ void main() {
         });
     await tester.pump();
 
-    expect(find.text('NEEDS YOU'), findsOneWidget);
+    expect(find.text('Needs you · $waiting'), findsOneWidget);
     expect(find.text('This machine · antgrid'), findsNWidgets(waiting));
   });
 
@@ -307,7 +310,7 @@ void main() {
 
     await tester.tap(find.byType(MachineScopeButton));
     await tester.pumpAndSettle();
-    expect(find.text('remote off'), findsOneWidget);
+    expect(find.textContaining('remote off'), findsOneWidget);
   });
 
   for (final layout in <({String name, Size size})>[

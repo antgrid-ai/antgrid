@@ -33,7 +33,7 @@ const MAX_MACHINE_LABEL_CHARS = 120;
  * never gets a chance to refuse it: an inbound bus envelope is admitted by
  * `parseMessageFast` on its type tag alone, so an over-long label is folded,
  * acked and rendered, and then fails `readRecords`' row schema on the next cold
- * load — which drops that row silently and takes the mailbox post and the log
+ * load — which drops that row silently and takes the thread entry and the log
  * entry with it. A length nobody can see is the wrong place to discover a bound.
  */
 export function selfMachineLabel(): string | undefined {

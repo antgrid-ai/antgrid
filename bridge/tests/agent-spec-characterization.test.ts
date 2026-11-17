@@ -13,10 +13,10 @@ import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/
 // Every filesystem write is redirected into a fresh temp dir. Nothing here may
 // touch the developer's real ~/.cursor, ~/.claude, ~/.codex or ~/.antgrid —
 // same discipline as runningUnderTest (packages/antgrid-agents/src/agents/test-runner.ts).
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
@@ -24,6 +24,7 @@ import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-res
 import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-runtime";
+import { setMemoryLaunchGate } from "../src/agent-host";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
 import { withUserEnv } from "./support/user-env";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
@@ -63,6 +64,11 @@ function tmp(prefix: string): string {
   tmpDirs.push(dir);
   return dir;
 }
+// The memory server is registered only once the user has enabled memory.
+let releaseMemoryGate: (() => void) | undefined;
+beforeEach(() => { releaseMemoryGate = setMemoryLaunchGate(() => true); });
+afterEach(() => releaseMemoryGate?.());
+
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) {
     try {
@@ -369,6 +375,18 @@ const CODEX_MCP_INJECTION: string[] = [
   `mcp_servers.antgrid.args=["mcp"]`,
   "-c",
   `mcp_servers.antgrid.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.command="${BIN}"`,
+  "-c",
+  `mcp_servers.antgrid-memory.args=["memory-mcp"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.env_vars=["ANTGRID_API_PORT","ANTGRID_TERMINAL_ID","ANTGRID_RUN_ID"]`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_search.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_get.approval_mode="approve"`,
+  "-c",
+  `mcp_servers.antgrid-memory.tools.memory_save.approval_mode="approve"`,
 ];
 
 describe("codex hook trust", () => {
@@ -399,6 +417,7 @@ describe("launch augmentation", () => {
   }
 
   const MCP_ENTRY = { type: "local", command: [BIN, "mcp"] };
+  const MEMORY_MCP_ENTRY = { type: "local", command: [BIN, "memory-mcp"] };
 
   test("claude-code", () => {
     const abDir = tmp("ab-spec-");
@@ -411,8 +430,9 @@ describe("launch augmentation", () => {
       // One token because the flag is variadic — the separated form eats the
       // session's own args, which are folded in right after it.
       `--mcp-config=${join(abDir, "mcp", "claude.json")}`,
+      "--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save",
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
   });
 
@@ -421,7 +441,7 @@ describe("launch augmentation", () => {
     expect(a.args).toEqual([
       "-c", CODEX_NOTIFY_ARG, ...CODEX_TUI_ARGS, ...CODEX_INJECTION, ...CODEX_MCP_INJECTION,
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     // Codex reports no outcome; session-manager reads undefined as success.
     expect(a.notificationsInjected).toBeUndefined();
   });
@@ -430,9 +450,9 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     const a = augment("opencode", abDir, tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
-    expect(Object.keys(a.env).sort()).toEqual(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
+    expect(Object.keys(a.env).sort()).toEqual(["ANTGRID_MEMORY_MCP", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"]);
     expect(a.env.OPENCODE_CONFIG).toBe(join(abDir, "agents", "opencode-session-namer.json"));
-    expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
+    expect(JSON.parse(a.env.OPENCODE_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
     expect(a.notificationsInjected).toBeUndefined();
   });
 
@@ -441,7 +461,7 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     const a = augment("cursor-agent", abDir, cursorDir);
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBe(true);
   });
 
@@ -451,7 +471,7 @@ describe("launch augmentation", () => {
     const abDir = tmp("ab-spec-");
     expect(augmentAgentLaunch("cursor-agent", { abDir, cursorDir: notADir, self: BRIDGE_SELF })).toEqual({
       args: ["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")],
-      env: {},
+      env: { ANTGRID_MEMORY_MCP: "1" },
       notificationsInjected: false,
       observation: NO_OBSERVATION,
     });
@@ -466,15 +486,15 @@ describe("launch augmentation", () => {
       "--additional-mcp-config",
       `@${join(abDir, "mcp", "copilot.json").replace(/\\/g, "/")}`,
     ]);
-    expect(a.env).toEqual({});
+    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
     expect(a.notificationsInjected).toBeUndefined();
   });
 
   test("kilo materializes its identity plugin and MCP entry", () => {
     const a = augment("kilo", tmp("ab-spec-"), tmp("ab-cursor-"));
     expect(a.args).toEqual([]);
-    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT"]);
-    expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY } });
+    expect(Object.keys(a.env)).toEqual(["KILO_CONFIG", "KILO_CONFIG_CONTENT", "ANTGRID_MEMORY_MCP"]);
+    expect(JSON.parse(a.env.KILO_CONFIG_CONTENT)).toEqual({ mcp: { antgrid: MCP_ENTRY, "antgrid-memory": MEMORY_MCP_ENTRY } });
   });
 
   for (const key of ["mistral-vibe"] as const) {
@@ -603,7 +623,7 @@ describe("materialized files", () => {
     // that resolves it relative to a moved source dir writes a config opencode
     // silently never loads.
     const abDir = tmp("ab-spec-");
-    const expectedUrl = pathToFileURL(bundledPluginPath(abDir, "opencode", "plugin.ts")).href;
+    const expectedUrl = pathToFileURL(dirname(bundledPluginPath(abDir, "opencode", "plugin.ts"))).href;
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
     try {
@@ -613,7 +633,7 @@ describe("materialized files", () => {
     }
     // No trailing newline here — this writer stringifies without one.
     expect(readFileSync(join(abDir, "agents", "opencode-session-namer.json"), "utf8")).toBe(
-      JSON.stringify({ plugin: [expectedUrl] }, null, 2),
+      JSON.stringify({ plugins: [expectedUrl] }, null, 2),
     );
   });
 
@@ -1178,7 +1198,7 @@ describe("update specs", () => {
   const expected: PerAgent<{ npmPackage: string; command: string; updateArgs: string[]; readState: boolean } | null> = {
     "claude-code": { npmPackage: "@anthropic-ai/claude-code", command: "claude", updateArgs: ["update"], readState: false },
     codex: { npmPackage: "@openai/codex", command: "codex", updateArgs: ["update"], readState: true },
-    opencode: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"], readState: false },
+    opencode: { npmPackage: "@opencode/cli", command: "opencode", updateArgs: ["upgrade"], readState: false },
     // IDE-bound, no self-updater: a request fails soft rather than throwing.
     "cursor-agent": null,
     "github-copilot": null,
@@ -1201,7 +1221,9 @@ describe("update specs", () => {
       if (spec && "check" in spec) throw new Error("Expected a CLI updater");
       expect(spec?.npmPackage).toBe(want.npmPackage);
       expect(spec?.command).toBe(want.command);
-      expect(spec?.updateArgs).toEqual(want.updateArgs);
+      const args = spec?.updateArgs;
+      // A version-aware updater is pinned at the current major line.
+      expect(typeof args === "function" ? args("2.2.6") : args).toEqual(want.updateArgs);
       expect(typeof spec?.readState).toBe(want.readState ? "function" : "undefined");
     });
   }

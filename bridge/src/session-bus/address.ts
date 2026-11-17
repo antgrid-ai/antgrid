@@ -5,21 +5,6 @@
 import type { SessionMemberKey } from "../protocol";
 import { LOCAL_MACHINE_ID } from "./constants";
 
-/**
- * Whether [machineId] names the machine answering as [selfMachineId].
- *
- * [LOCAL_MACHINE_ID] names it too, under whatever network name it later
- * acquires. A bridge with no relay identity stamps its own frames with the
- * sentinel, and those frames are PERSISTED — a mailbox row, a thread row, the
- * log's peer — so on plain equality a pair that exchanged before the control
- * plane came up would stop matching the moment it did, and two sessions in one
- * process would become permanently unreachable to each other over a name only
- * one of them ever saw change.
- *
- * This only ever widens what THIS machine answers for. A frame still has to
- * name a session the bridge actually holds, so the sentinel buys a sender no
- * reach it did not already have.
- */
 export function namesMachine(machineId: string, selfMachineId: string): boolean {
   return machineId === selfMachineId || machineId === LOCAL_MACHINE_ID;
 }
@@ -27,15 +12,10 @@ export function namesMachine(machineId: string, selfMachineId: string): boolean 
 /**
  * Whether [contextId] names an exchange [sessionId] itself opened.
  *
- * A context is named by the session that opened it, which is also what decides
- * which way a frame on it leaves: its own id means it reaches out through this
- * machine's carrier, any other id means it was contacted and its only way home
- * is the route that brought the context in.
- *
- * One function because three gates in three modules read it — the coordinator's
- * routing, the send path's carrier rung, and the interruption gate in
- * `agent-core.ts` — and a rule narrowed in one of them alone applies the other
- * two to the wrong set of frames.
+ * A context is named by the session that opened it, so mail arriving on a
+ * session's own context answers something that session asked rather than being
+ * another machine's agent reaching in. That is the exemption the agent-reach
+ * gate in `HostServer.handleBusInbound` grants.
  */
 export function isLeadContext(sessionId: string, contextId: string): boolean {
   return contextId === sessionId;

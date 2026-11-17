@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
@@ -5,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:antgrid/design/ab_theme.dart';
-import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/screens/app_settings_screen.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 
@@ -19,7 +20,7 @@ _buildService() async {
   return (service: AppSettingsService(prefs, seed), prefs: prefs);
 }
 
-/// Brings 'Hide git-ignored files' fully on-screen — the FILES section sits
+/// Brings 'Hide git-ignored files' fully on-screen — the Files section sits
 /// below the fold on a fresh pump, same as PRIVACY in the telemetry toggle
 /// test this one is modeled on.
 Future<void> _scrollToFiles(WidgetTester tester) async {
@@ -27,20 +28,14 @@ Future<void> _scrollToFiles(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-/// The RENDERED state of the FILES row's switch: the track paints the accent
-/// when on and the elevated background when off.
+/// The state the Files row's switch ANNOUNCES. Read from the toggle's own
+/// semantics node, so it is the same answer a screen reader gets and no colour
+/// or private widget type is involved.
 bool _toggleIsOn(WidgetTester tester) {
-  final row = find.ancestor(
-    of: find.text('Hide git-ignored files'),
-    matching: find.byWidgetPredicate(
-      (w) => w.runtimeType.toString() == '_ToggleRow',
-    ),
+  final node = tester.getSemantics(
+    find.bySemanticsLabel('Hide git-ignored files'),
   );
-  final track = tester.widget<AnimatedContainer>(
-    find.descendant(of: row, matching: find.byType(AnimatedContainer)),
-  );
-  final color = (track.decoration! as BoxDecoration).color;
-  return color == kDefaultPalette.accent;
+  return node.getSemanticsData().flagsCollection.isToggled == Tristate.isTrue;
 }
 
 void main() {
@@ -74,6 +69,7 @@ void main() {
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
 
+      final semantics = tester.ensureSemantics();
       final (:service, prefs: _) = await _buildService();
 
       await tester.pumpWidget(
@@ -88,16 +84,18 @@ void main() {
       await tester.pumpAndSettle();
       await _scrollToFiles(tester);
 
-      // The pixels, not the notifier: `onTap` computes its new value from the
-      // settings independently of what `enabled:` is wired to, so a tap test
-      // passes just as happily with the switch painted backwards.
+      // What the switch shows, not the notifier: the tap handler computes its
+      // new value from the settings independently of what `value:` is wired
+      // to, so a tap test passes just as happily with the switch backwards.
       expect(_toggleIsOn(tester), isFalse);
 
+      // The label is part of the toggle's tap target.
       await tester.tap(find.text('Hide git-ignored files'));
       await tester.pumpAndSettle();
 
       expect(_toggleIsOn(tester), isTrue);
 
+      semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     },
   );

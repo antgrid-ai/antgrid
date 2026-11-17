@@ -2,10 +2,9 @@
 //
 // These exercise the real `titleBarProjectActions` seam (the production
 // `WindowTitleBarContents` delegates to it), covering the two independent
-// derivations: the machine-wide remote-access chip (AbStateChip), which hangs
+// derivations: the machine-wide remote-access chip (RemoteAccessControl), which hangs
 // off `localDeviceUuidProvider` alone, and the focus-derived RemoteHostChip,
 // which comes from the selectedRegistrationIdProvider → projectsProvider lookup.
-import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -25,7 +24,9 @@ import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
-import 'package:antgrid/widgets/window_title_bar.dart';
+import 'package:antgrid/widgets/session_breadcrumb.dart';
+import 'package:antgrid/widgets/session_overflow_menu.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -33,6 +34,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/test_store_overrides.dart';
+
+/// The leading drawer button. A Carbon tooltip is not a Material one, so
+/// `byTooltip` cannot find it; it is named by its semantic label instead.
+final _projectsButton = find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'Projects',
+);
 
 class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   _FakePolicyNotifier(this._policy);
@@ -134,7 +141,7 @@ void main() {
       mobileAccessEnabled: false,
     );
 
-    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     expect(find.text('Remote off'), findsOneWidget);
     expect(find.byType(RemoteHostChip), findsNothing);
   });
@@ -152,7 +159,7 @@ void main() {
       mobileAccessEnabled: true,
     );
 
-    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     expect(find.text('Remote on'), findsOneWidget);
     expect(find.byType(RemoteHostChip), findsNothing);
   });
@@ -174,7 +181,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsOneWidget);
-      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     },
   );
 
@@ -283,7 +290,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.byKey(const Key('remote-access-chip')), findsOneWidget);
     },
   );
 
@@ -301,7 +308,7 @@ void main() {
       localUuid: null,
     );
 
-    expect(find.byType(AbStateChip), findsNothing);
+    expect(find.byKey(const Key('remote-access-chip')), findsNothing);
   });
 
   testWidgets(
@@ -322,7 +329,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbStateChip), findsNothing);
+      expect(find.byKey(const Key('remote-access-chip')), findsNothing);
     },
   );
 
@@ -350,7 +357,7 @@ void main() {
         );
         await tester.pump();
 
-        expect(find.byTooltip('Projects'), findsOneWidget);
+        expect(_projectsButton, findsOneWidget);
         expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -456,7 +463,7 @@ void main() {
 
       expect(find.byType(AgentBar), findsOneWidget);
       expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
-      expect(find.byTooltip('Projects'), findsNothing);
+      expect(_projectsButton, findsNothing);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
@@ -469,10 +476,18 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       await pumpWide(tester);
 
-      expect(find.byTooltip('Expand'), findsNothing);
-      expect(find.byTooltip('Restore'), findsNothing);
-      expect(find.byTooltip('Collapse panel'), findsNothing);
-      expect(find.byTooltip('Hide panel'), findsNothing);
+      // The strip's pane controls are Carbon tooltips, which byTooltip cannot
+      // see; look for their names inside the bar instead.
+      for (final label in ['Expand', 'Restore', 'Collapse panel', 'Hide panel']) {
+        expect(find.byTooltip(label), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byType(AgentBar),
+            matching: find.bySemanticsLabel(label),
+          ),
+          findsNothing,
+        );
+      }
       expect(find.byTooltip('Hide projects'), findsNothing);
       expect(find.byTooltip('Show projects'), findsNothing);
     } finally {
@@ -579,8 +594,13 @@ void main() {
         await pumpWide(tester);
 
         expect(find.byType(SessionModeControl), findsNothing);
-        expect(find.byType(HandlerHeaderControl), findsNothing);
-        expect(find.byTooltip('Session options'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(SessionOverflowButton),
+            matching: find.byType(CarbonOverflowMenu),
+          ),
+          findsOneWidget,
+        );
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }

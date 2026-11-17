@@ -34,6 +34,6 @@ void main() {
   testWidgets('every platform links the web account page', (tester) async {
     await _pumpSignedIn(tester);
 
-    expect(find.text('MANAGE PASSWORD'), findsOneWidget);
+    expect(find.text('Manage password'), findsOneWidget);
   }, variant: TargetPlatformVariant.all());
 }

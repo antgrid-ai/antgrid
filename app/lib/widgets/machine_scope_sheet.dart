@@ -1,3 +1,5 @@
+import 'package:carbon_flutter/carbon_flutter.dart'
+    show CarbonIcon, CarbonIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -17,6 +19,7 @@ import '../providers/project_index.dart';
 import '../providers/project_work_status.dart';
 import '../providers/recent_sessions.dart';
 import 'machine_scope_menu.dart' show machineStatusLine, openMachineManagement;
+import 'machine_summary_tile.dart';
 
 /// The phone's machine scope switcher: what the scope shows and how much of it
 /// is live, opening [MachineScopeSheet]. The same scope the desktop sidebar's
@@ -41,42 +44,13 @@ class MobileScopeButton extends ConsumerWidget {
       '$running running',
       if (locked > 0) '$locked locked',
     ].join(' · ');
-    return Semantics(
-      button: true,
-      label: 'Machine scope: $label, $summary',
-      excludeSemantics: true,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border.all(color: context.antgrid.borderDefault),
-          borderRadius: AbTokens.borderRadius5,
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: AbTokens.tapTargetMin),
-          child: AbListRow(
-            leading: AbIcon(
-              AbIcons.deviceDesktop,
-              size: AbTokens.iconButtonGlyph,
-              color: context.antgrid.textSecondary,
-            ),
-            title: Text(
-              label,
-              style: AbTokens.sansStyle(fontSize: AbTokens.fontMd),
-            ),
-            subtitle: Text(summary),
-            trailing: AbIcon(
-              AbIcons.chevronDown,
-              size: AbTokens.fontSm,
-              color: context.antgrid.textMuted,
-            ),
-            density: AbRowDensity.sm,
-            horizontalPadding: AbTokens.space10,
-            onTap: () => showAbAdaptiveSheet<void>(
-              context,
-              child: const MachineScopeSheet(),
-            ),
-          ),
-        ),
-      ),
+    return MachineSummaryTile(
+      leading: const CarbonIcon(CarbonIcons.screen),
+      title: label,
+      summary: summary,
+      semanticLabel: 'Machine scope: $label, $summary',
+      onPressed: () =>
+          showAbAdaptiveSheet<void>(context, child: const MachineScopeSheet()),
     );
   }
 }

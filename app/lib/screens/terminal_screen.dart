@@ -1,13 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_loading.dart';
+import '../design/ab_carbon.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/terminal_models.dart';
 import '../project/checkout_readiness.dart';
@@ -22,7 +19,7 @@ import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
-import '../widgets/session_setup_progress.dart';
+import '../widgets/carbon_empty_state.dart';
 import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
@@ -49,7 +46,7 @@ class TerminalScreen extends ConsumerWidget {
     // this provider names — `session`/`terminalAsync` alone can't.
     final readiness = ref.watch(checkoutReadinessProvider);
     if (session == null || !terminalAsync.hasValue) {
-      return AbLoading(message: _bootstrapWaitMessage(readiness));
+      return _PaneWait(message: _bootstrapWaitMessage(readiness));
     }
     final terminalService = session
         .servicesForCheckout(ref.watch(focusedCheckoutIdProvider))
@@ -87,12 +84,14 @@ class TerminalScreen extends ConsumerWidget {
               sessionId: activeSession.id,
               title: 'Chat stopped',
               buttonLabel: 'Restart',
+              buttonIcon: CarbonIcons.restart,
               pendingLabel: 'Restarting…',
             )
           : _StoppedSessionEmptyState(
               sessionId: activeSession.id,
               title: 'Session stopped',
               buttonLabel: 'Start',
+              buttonIcon: CarbonIcons.play,
               pendingLabel: 'Starting…',
             );
     }
@@ -130,19 +129,22 @@ class TerminalScreen extends ConsumerWidget {
         // it would re-pull every checkout's tree to fix one workspace's
         // missing tabs. No in-flight label — the re-ask clears the verdict
         // synchronously, so this arm is gone before one could paint.
-        return AbEmptyState.error(
-          title: "couldn't reach the agent",
-          action: AbButton(
-            label: 'Retry',
-            onTap: () => detached(
-              'TerminalScreen',
-              'retry checkout attach failed',
-              terminalService.retryCheckoutAttach,
+        return _PaneSurface(
+          child: CarbonEmptyState(
+            error: true,
+            heading: "couldn't reach the agent",
+            action: CarbonButton(
+              label: 'Retry',
+              onPressed: () => detached(
+                'TerminalScreen',
+                'retry checkout attach failed',
+                terminalService.retryCheckoutAttach,
+              ),
             ),
           ),
         );
       }
-      return const AbLoading(message: 'waiting for agent...');
+      return const _PaneWait(message: 'waiting for agent...');
     }
 
     return ClipRect(
@@ -156,6 +158,41 @@ class TerminalScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// A Carbon piece's own backdrop. Carbon is scoped around each non-terminal
+/// state rather than around [TerminalScreen]'s whole output, so the live
+/// terminal (and the Antgrid chrome around it) never inherits a CarbonTheme.
+class _PaneSurface extends StatelessWidget {
+  const _PaneSurface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => AbCarbonScope(
+    child: Builder(
+      builder: (context) => ColoredBox(
+        color: CarbonTheme.of(context).colors.background,
+        child: child,
+      ),
+    ),
+  );
+}
+
+/// A wait with nothing to show yet, centred in the pane.
+class _PaneWait extends StatelessWidget {
+  const _PaneWait({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => _PaneSurface(
+    child: SizedBox.expand(
+      child: Center(
+        child: CarbonLoading(size: CarbonLoadingSize.small, message: message),
+      ),
+    ),
+  );
 }
 
 /// Copy for the pre-session-list wait, keyed off the checkout-wide verdict
@@ -185,6 +222,11 @@ class _StoppedSessionEmptyState extends ConsumerStatefulWidget {
   final String title;
   final String buttonLabel;
 
+  /// Gives the button an icon so that busy swaps only the glyph for the spinner: a
+  /// text-only Carbon button hides its label while busy, and the label is what
+  /// says the press was heard.
+  final CarbonIcons buttonIcon;
+
   /// Label while the start is in flight — the press can wait out a project
   /// warm-up plus a bridge round trip, so the button has to say it is working.
   final String pendingLabel;
@@ -193,6 +235,7 @@ class _StoppedSessionEmptyState extends ConsumerStatefulWidget {
     required this.sessionId,
     required this.title,
     required this.buttonLabel,
+    required this.buttonIcon,
     required this.pendingLabel,
   });
 
@@ -287,27 +330,23 @@ class _StoppedSessionEmptyStateState
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: context.antgrid.bgDeepest,
-      child: AbEmptyState(
-        title: widget.title,
-        action: AbButton(
+    return _PaneSurface(
+      child: CarbonEmptyState(
+        icon: CarbonIcons.terminal,
+        heading: widget.title,
+        action: CarbonButton(
           label: _starting ? widget.pendingLabel : widget.buttonLabel,
-          // The dot is what separates "busy" from "broken": `onTap: null` also
-          // buys AbButton's dimmed disabled state, and dimming alone on a button
-          // the user just pressed reads as a control that died under the press.
-          // It pulses by scale, so it stays legible at that opacity.
-          leading: _starting ? const AbLoadingDot(size: 8) : null,
-          // Inert while in flight, matching SessionModeControl: a second press
-          // would queue a second `session:start` behind the first. No tooltip or
-          // reason — the user just pressed it.
-          onTap: _starting
-              ? null
-              // `onTap` is a VoidCallback, so nothing awaits the start —
-              // detached rather than an `async` closure whose rejection would
-              // land on the top-level handler as a fatal.
-              : () =>
-                    detached('TerminalScreen', 'session start failed', _start),
+          icon: CarbonIcon(widget.buttonIcon),
+          // Busy rather than disabled: a disabled button dims, and dimming on a
+          // button the user just pressed reads as a control that died under the
+          // press. Busy also swallows taps; `_starting` still latches the
+          // handler for a keyboard activation racing the first frame.
+          busy: _starting,
+          // `onPressed` is a VoidCallback, so nothing awaits the start —
+          // detached rather than an `async` closure whose rejection would
+          // land on the top-level handler as a fatal.
+          onPressed: () =>
+              detached('TerminalScreen', 'session start failed', _start),
         ),
       ),
     );
@@ -325,31 +364,30 @@ class _NoSessionEmptyState extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return ColoredBox(
-      color: context.antgrid.bgDeepest,
-      child: AbEmptyState(
-        title: 'No active session',
-        action: AbButton(
+    return _PaneSurface(
+      child: CarbonEmptyState(
+        icon: CarbonIcons.terminal,
+        heading: 'No active session',
+        action: CarbonButton(
           label: 'New session',
-          onTap: () => enterNewSession(ref.container),
+          icon: const CarbonIcon(CarbonIcons.add),
+          onPressed: () => enterNewSession(ref.container),
         ),
       ),
     );
   }
 }
-
 /// Rendered inside the terminal pane while an isolated session's agent is
 /// QUEUED behind its checkout's `worktree.setup` run.
 ///
-/// The pane IS the transcript here rather than the banner's one-line tail: for
-/// the whole run the setup PTY is the only live output the session has, and the
-/// state this replaced left it collapsed behind a chevron above an empty pane
-/// that called the session stopped.
+/// Deliberately calm: the run's progress, step list, log and cancel all live in
+/// the setup strip floating above this pane (`SessionSetupBanner`), so what is
+/// left to say here is when the agent starts and the one way to hurry it.
 ///
-/// Both verbs it offers end the wait, and they are not the same answer: `skip`
-/// releases the agent and lets the run finish anyway ("the deps are cached"),
-/// `cancel` kills the run first. The bridge has accepted `cancel` since the
-/// verb shipped; this is the first surface to offer it.
+/// The verb releases the agent and lets the run finish anyway ("the deps are
+/// cached"); it does not stop the run. It shares the banner's one-in-flight
+/// guard, since this and the strip's cancel are alternatives for a run only one
+/// of them can end.
 class _ProvisioningSessionState extends ConsumerStatefulWidget {
   const _ProvisioningSessionState({super.key, required this.sessionId});
 
@@ -362,19 +400,26 @@ class _ProvisioningSessionState extends ConsumerStatefulWidget {
 
 class _ProvisioningSessionStateState
     extends ConsumerState<_ProvisioningSessionState> {
-  /// The verb in flight, or null. Held as the verb rather than a bool so the
-  /// pending dot lands on the control the user actually pressed — and shared
-  /// across both, since they are alternatives and a second press would race the
-  /// first for a run only one of them can end.
-  SessionSetupAction? _acting;
+  /// Whether THIS pane's verb is in flight, so the busy spinner lands on the
+  /// control the user pressed rather than on a press made elsewhere.
+  bool _starting = false;
 
-  Future<void> _act(SessionSetupAction verb) async {
-    if (_acting != null) return;
-    setState(() => _acting = verb);
+  Future<void> _start() async {
+    final container = ref.container;
+    final ui = container.read(sessionSetupBannerUiProvider.notifier);
+    if (_starting ||
+        container
+            .read(sessionSetupBannerUiProvider)
+            .actingVerbs
+            .containsKey(widget.sessionId)) {
+      return;
+    }
+    const verb = SessionSetupAction.skip;
+    setState(() => _starting = true);
+    ui.setActing(widget.sessionId, verb);
     // Captured before the first await: a settling run rebuilds this pane away
     // — the agent spawns, the session flips `running` — and a `ref` read after
     // that throws.
-    final container = ref.container;
     final entryId = container.read(selectedRegistrationIdProvider);
     try {
       if (entryId == null) {
@@ -409,108 +454,68 @@ class _ProvisioningSessionStateState
         '${sessionSetupFailureCopy(verb)} — ${result.error}',
       );
     } finally {
-      // The success path usually never reaches this: releasing the agent
-      // spawns the PTY, which flips `running` and renders the terminal over
-      // this widget.
-      if (mounted) setState(() => _acting = null);
+      // The success path usually never reaches the setState: releasing the
+      // agent spawns the PTY, which flips `running` and renders the terminal
+      // over this widget.
+      ui.setActing(widget.sessionId, null);
+      if (mounted) setState(() => _starting = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.antgrid;
-    final setup = ref.watch(sessionSetupProvider(widget.sessionId));
-    final terminalId = setup?.terminalId;
-    final terminalService = serviceWhenReady(ref, terminalServiceProvider);
-    final tabs =
-        ref.watch(terminalStateProvider).value?.tabs ??
-        const <String, TerminalTab>{};
-    final tab = terminalId == null ? null : tabs[terminalId];
-    return ColoredBox(
-      color: colors.bgDeepest,
-      child: Column(
-        children: [
-          // Above the transcript, not below it: the ledger is orientation the
-          // user reads once, and the log is the thing that keeps moving.
-          if (setup != null) SetupStepLedger(setup: setup),
-          Expanded(
-            child: tab == null || terminalService == null
-                // Not a dead end: the run has yet to report the PTY it spawned,
-                // or a reconnect has yet to recover the transcript. The wait
-                // itself is the same either way, so the copy states it rather
-                // than reporting the missing log.
-                ? const AbEmptyState(
-                    title: 'Preparing workspace…',
-                    subtitle: 'The agent starts when provisioning finishes.',
-                  )
-                : TerminalViewWrapper(
-                    key: ValueKey(tab.terminalId),
-                    tab: tab,
-                    terminalService: terminalService,
-                  ),
+    final otherVerbActing =
+        !_starting &&
+        ref.watch(
+          sessionSetupBannerUiProvider.select(
+            (s) => s.actingVerbs.containsKey(widget.sessionId),
           ),
-          _buildActions(colors),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActions(AbColors colors) {
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.bgElevated,
-        border: Border(top: BorderSide(color: colors.borderSubtle)),
-      ),
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space12,
-        vertical: AbTokens.space8,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'Waiting for workspace setup',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: colors.textMuted,
+        );
+    return _PaneSurface(
+      child: Builder(
+        builder: (context) {
+          final t = CarbonTheme.of(context);
+          return SizedBox.expand(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'The agent starts when setup ends',
+                      textAlign: TextAlign.center,
+                      style: t.typography.body.copyWith(
+                        color: t.colors.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: CarbonSpacing.spacing05),
+                    CarbonButton(
+                      label: 'Start now',
+                      kind: CarbonButtonKind.tertiary,
+                      icon: const CarbonIcon(CarbonIcons.play),
+                      // Busy rather than disabled: a disabled button dims, and
+                      // dimming on a control the user just pressed reads as one
+                      // that died under the press.
+                      busy: _starting,
+                      // `onPressed` is a VoidCallback, so nothing awaits this —
+                      // detached rather than an `async` closure whose rejection
+                      // would reach PlatformDispatcher.onError as a fatal.
+                      onPressed: otherVerbActing
+                          ? null
+                          : () => detached(
+                              'TerminalScreen',
+                              'session:setup ${SessionSetupAction.skip.wire} failed',
+                              _start,
+                            ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          _action(SessionSetupAction.cancel, 'Cancel setup'),
-          const SizedBox(width: AbTokens.space8),
-          _action(
-            SessionSetupAction.skip,
-            'Start agent now',
-            variant: AbButtonVariant.primary,
-          ),
-        ],
+          );
+        },
       ),
-    );
-  }
-
-  Widget _action(
-    SessionSetupAction verb,
-    String label, {
-    AbButtonVariant variant = AbButtonVariant.normal,
-  }) {
-    final acting = _acting;
-    return AbButton(
-      label: label,
-      variant: variant,
-      // The dot is what separates "busy" from "broken": `onTap: null` also buys
-      // AbButton's dimmed disabled state, and dimming alone on a control the
-      // user just pressed reads as one that died under the press.
-      leading: acting == verb ? const AbLoadingDot(size: 8) : null,
-      onTap: acting != null
-          // `onTap` is a VoidCallback, so nothing awaits this — detached rather
-          // than an `async` closure whose rejection would reach
-          // PlatformDispatcher.onError as a fatal.
-          ? null
-          : () => detached(
-              'TerminalScreen',
-              'session:setup ${verb.wire} failed',
-              () => _act(verb),
-            ),
     );
   }
 }

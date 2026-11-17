@@ -239,6 +239,67 @@ void main() {
     });
   });
 
+  group('startedWithoutMemory', () {
+    Map<String, dynamic> base() => {
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': true,
+    };
+
+    test('is false when the bridge says nothing', () {
+      expect(SessionEntry.fromJson(base()).startedWithoutMemory, isFalse);
+    });
+
+    test('parses true and ignores anything but true', () {
+      expect(
+        SessionEntry.fromJson({
+          ...base(),
+          'startedWithoutMemory': true,
+        }).startedWithoutMemory,
+        isTrue,
+      );
+      expect(
+        SessionEntry.fromJson({
+          ...base(),
+          'startedWithoutMemory': 'yes',
+        }).startedWithoutMemory,
+        isFalse,
+      );
+    });
+
+    test('round-trips true and is omitted when false', () {
+      final flagged = SessionEntry.fromJson({
+        ...base(),
+        'startedWithoutMemory': true,
+      });
+      expect(flagged.toJson()['startedWithoutMemory'], isTrue);
+      expect(SessionEntry.fromJson(flagged.toJson()), flagged);
+      expect(
+        SessionEntry.fromJson(
+          base(),
+        ).toJson().containsKey('startedWithoutMemory'),
+        isFalse,
+      );
+    });
+
+    test('copyWith flips only the flag', () {
+      final entry = SessionEntry.fromJson(base());
+      final flagged = entry.copyWith(startedWithoutMemory: true);
+      expect(flagged.startedWithoutMemory, isTrue);
+      expect(flagged.copyWith(startedWithoutMemory: false), entry);
+    });
+
+    test('two entries differing only in the flag are not equal', () {
+      final plain = SessionEntry.fromJson(base());
+      final flagged = plain.copyWith(startedWithoutMemory: true);
+      expect(flagged, isNot(plain));
+      expect(flagged.hashCode, isNot(plain.hashCode));
+    });
+  });
+
   group('setup', () {
     Map<String, dynamic> base() => {
       'id': 'a',

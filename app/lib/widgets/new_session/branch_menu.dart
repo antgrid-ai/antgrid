@@ -1,27 +1,58 @@
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_menu.dart';
-import '../../design/widgets/ab_text_field.dart';
 import '../../models/git_branch.dart';
 import '../../providers/new_session_picker.dart';
-import 'environment_menu.dart';
 import '../ab_status_helpers.dart' show caughtErrorCopy;
 
-class BranchChip extends ConsumerWidget {
+/// A combo box has no intrinsic width, so the chip picks one: wide enough for
+/// a typical branch name, never wider than the slot it is given.
+const double _fieldWidth = CarbonSpacing.spacing13 + CarbonSpacing.spacing09;
+
+/// Branch picker for the New Session composer: a searchable combo box over the
+/// selected project's branches.
+class BranchChip extends ConsumerStatefulWidget {
   const BranchChip({super.key, this.enabled = true});
 
   /// See [EnvironmentChip.enabled] — the composer owns the frozen state. This
-  /// is not the same as the local `disabled` below, which only reflects a
-  /// branch catalog the chip has nothing to open a panel over.
+  /// is not the same as the `catalogUsable` check below, which only reflects a
+  /// branch catalog there is nothing to choose from.
   final bool enabled;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<BranchChip> createState() => _BranchChipState();
+}
+
+class _BranchChipState extends ConsumerState<BranchChip> {
+  final FocusNode _focus = FocusNode();
+  bool _hadFocus = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(_onFocus);
+  }
+
+  @override
+  void dispose() {
+    _focus.removeListener(_onFocus);
+    _focus.dispose();
+    super.dispose();
+  }
+
+  // Branches change underneath the composer (checkouts, fetches), so entering
+  // the field re-reads them rather than showing what was true at mount.
+  void _onFocus() {
+    final focused = _focus.hasFocus;
+    if (focused && !_hadFocus) {
+      ref.invalidate(newSessionBranchCatalogProvider);
+    }
+    _hadFocus = focused;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final target = ref.watch(selectedTargetProjectProvider);
     if (target == null) return const SizedBox.shrink();
 
@@ -29,253 +60,97 @@ class BranchChip extends ConsumerWidget {
     final effective = ref.watch(newSessionEffectiveBranchProvider);
     final isolated = ref.watch(newSessionIsolatedProvider);
 
-    String label = 'Loading branches...';
-    bool disabled = false;
+    var placeholder = 'Loading branches...';
+    var catalogUsable = false;
+    var loading = true;
+    String? listError;
+    var options = <CarbonOption<String>>[];
+    String? value;
 
-    catalogAsync.when(
-      data: (catalog) {
-        if (catalog == null) {
-          label = 'Branches unavailable';
-          disabled = true;
-        } else if (!catalog.isRepository) {
-          label = 'No Git repository';
-          disabled = true;
-        } else if (effective != null) {
-          // Resolved centrally so the chip and the remote advisory below it can
-          // never name different branches.
-          label = isolated ? 'Base: $effective' : effective;
-        } else {
-          label = 'Detached HEAD';
+    // Error BEFORE the value: Riverpod retains the previous catalog alongside
+    // an error, and a stale list must not pass for the current one.
+    if (catalogAsync.hasError) {
+      placeholder = 'Branches unavailable';
+      loading = false;
+      catalogUsable = true;
+      listError = caughtErrorCopy(
+        catalogAsync.error!,
+        'Try again in a moment.',
+      );
+    } else if (catalogAsync.hasValue) {
+      loading = false;
+      final catalog = catalogAsync.value;
+      if (catalog == null) {
+        placeholder = 'Branches unavailable';
+      } else if (!catalog.isRepository) {
+        placeholder = 'No Git repository';
+      } else {
+        catalogUsable = true;
+        final current = catalog.current;
+        // Resolved centrally so the chip and the remote advisory below it can
+        // never name different branches.
+        placeholder = effective == null
+            ? 'Detached HEAD'
+            : (isolated ? 'Base: $effective' : effective);
+        if (effective != null && catalog.branches.contains(effective)) {
+          value = effective;
         }
-      },
-      error: (err, _) {
-        label = 'Branches unavailable';
-      },
-      loading: () {
-        label = 'Loading branches...';
-      },
-    );
-
-    return ComposerChip(
-      icon: AbIcons.gitBranch,
-      label: label,
-      enabled: enabled,
-      onTap: (ctx) {
-        if (disabled) return;
-        final anchor = abMenuAnchorRect(ctx);
-        if (anchor == null) return;
-        ref.invalidate(newSessionBranchCatalogProvider);
-        showAbPanel<void>(
-          context: ctx,
-          anchorRect: anchor,
-          preferred: AbMenuPlacement.above,
-          builder: (_) => const BranchPanel(),
-        );
-      },
-    );
-  }
-}
-
-class BranchPanel extends ConsumerStatefulWidget {
-  const BranchPanel({super.key});
-
-  @override
-  ConsumerState<BranchPanel> createState() => _BranchPanelState();
-}
-
-class _BranchPanelState extends ConsumerState<BranchPanel> {
-  final TextEditingController _searchController = TextEditingController();
-  final FocusNode _focusNode = FocusNode();
-  String _query = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _searchController.addListener(_onQueryChanged);
-  }
-
-  @override
-  void dispose() {
-    _searchController.removeListener(_onQueryChanged);
-    _searchController.dispose();
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  void _onQueryChanged() {
-    setState(() {
-      _query = _searchController.text;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.antgrid;
-    final target = ref.watch(selectedTargetProjectProvider);
-    if (target == null) return const PanelHint('No project selected');
-
-    final catalogAsync = ref.watch(newSessionBranchCatalogProvider);
-    final selection = ref.watch(newSessionBranchSelectionProvider);
-
-    return catalogAsync.when(
-      data: (catalog) {
-        if (catalog == null) {
-          return const PanelHint(
-            'Branches unavailable. Bridge update required.',
-          );
-        }
-        if (!catalog.isRepository) {
-          return const PanelHint('No Git repository in this folder');
-        }
-
-        final currentBranch = catalog.current;
-        final explicitBranch =
-            (selection != null &&
-                selection.targetId == target.id &&
-                catalog.branches.contains(selection.branch))
-            ? selection.branch
-            : null;
-        final activeBranch = explicitBranch ?? currentBranch;
-
-        final queryTrimmed = _query.trim().toLowerCase();
-        final filtered = catalog.branches.where((b) {
-          if (queryTrimmed.isEmpty) return true;
-          return b.toLowerCase().contains(queryTrimmed);
-        }).toList();
-
-        // Sort: current branch first, remainder case-insensitively with exact tie-breaker
-        filtered.sort((a, b) {
-          if (a == currentBranch) return -1;
-          if (b == currentBranch) return 1;
-          final cmp = a.toLowerCase().compareTo(b.toLowerCase());
-          if (cmp != 0) return cmp;
-          return a.compareTo(b);
-        });
-
-        return SizedBox(
-          width: 280,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(AbTokens.space8),
-                child: AbTextField(
-                  controller: _searchController,
-                  focusNode: _focusNode,
-                  autofocus: true,
-                  hintText: 'Search branches…',
-                  prefixIcon: AbIcons.search,
-                ),
-              ),
-              Divider(height: 1, color: p.borderDefault),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 240),
-                child: filtered.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.all(AbTokens.space12),
-                        child: PanelHint('No matching branches'),
-                      )
-                    : ListView.builder(
-                        shrinkWrap: true,
-                        itemCount: filtered.length,
-                        itemBuilder: (ctx, index) {
-                          final branch = filtered[index];
-                          final isSelected = branch == activeBranch;
-                          final isCurrent = branch == currentBranch;
-
-                          return PanelRow(
-                            icon: AbIcons.gitBranch,
-                            label: branch,
-                            selected: isSelected,
-                            trailing: isCurrent
-                                ? Container(
-                                    alignment: Alignment.center,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: AbTokens.space6,
-                                      vertical: 3,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: p.bgSurface,
-                                      borderRadius: AbTokens.borderRadius3,
-                                    ),
-                                    child: Text(
-                                      'current',
-                                      style: AbTokens.sansStyle(
-                                        fontSize: AbTokens.fontXs,
-                                        height: 1.0,
-                                        color: p.textMuted,
-                                      ),
-                                    ),
-                                  )
-                                : null,
-                            onTap: () {
-                              ref
-                                  .read(
-                                    newSessionBranchSelectionProvider.notifier,
-                                  )
-                                  .set(
-                                    NewSessionBranchSelection(
-                                      targetId: target.id,
-                                      branch: branch,
-                                    ),
-                                  );
-                              Navigator.of(context).pop();
-                            },
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        );
-      },
-      error: (err, _) {
-        return SizedBox(
-          width: 280,
-          child: Padding(
-            padding: const EdgeInsets.all(AbTokens.space12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Branches unavailable',
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontMd,
-                    color: p.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: AbTokens.space4),
-                Text(
-                  caughtErrorCopy(err, 'Try again in a moment.'),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: p.textMuted,
-                  ),
-                ),
-                const SizedBox(height: AbTokens.space8),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: AbButton(
-                    label: 'Retry',
-                    compact: true,
-                    onTap: () {
-                      ref.invalidate(newSessionBranchCatalogProvider);
-                    },
-                  ),
-                ),
-              ],
+        // Current branch first, the rest case-insensitively with an exact
+        // tie-breaker.
+        final sorted = [...catalog.branches]
+          ..sort((a, b) {
+            if (a == current) return -1;
+            if (b == current) return 1;
+            final cmp = a.toLowerCase().compareTo(b.toLowerCase());
+            return cmp != 0 ? cmp : a.compareTo(b);
+          });
+        options = [
+          for (final b in sorted)
+            CarbonOption(
+              value: b,
+              label: isolated ? 'Base: $b' : b,
+              description: b == current ? 'Current' : null,
             ),
-          ),
-        );
-      },
-      loading: () {
-        return const SizedBox(
-          width: 280,
-          child: Padding(
-            padding: EdgeInsets.all(AbTokens.space12),
-            child: PanelHint('Loading branches…'),
+        ];
+      }
+    }
+
+    void pick(String branch) =>
+        ref
+            .read(newSessionBranchSelectionProvider.notifier)
+            .set(
+              NewSessionBranchSelection(targetId: target.id, branch: branch),
+            );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth < _fieldWidth
+                  ? constraints.maxWidth
+                  : _fieldWidth
+            : _fieldWidth;
+        return Align(
+          alignment: AlignmentDirectional.centerStart,
+          widthFactor: 1,
+          child: SizedBox(
+            width: width,
+            child: CarbonComboBox<String>(
+              options: options,
+              value: value,
+              onChanged: widget.enabled && catalogUsable ? pick : null,
+              focusNode: _focus,
+              placeholder: placeholder,
+              semanticLabel: 'Branch',
+              loading: loading,
+              listErrorText: listError,
+              emptyText: 'No matching branches',
+              // The prefix is context, not part of the name: typing "main"
+              // must still find "Base: main".
+              filter: (o, q) => o.value.toLowerCase().contains(q.toLowerCase()),
+              listMinWidth: 288,
+              listMaxWidth: 480,
+              preferAbove: true,
+            ),
           ),
         );
       },

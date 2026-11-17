@@ -15,16 +15,15 @@
 // POPUP's mechanics, not the platform default — and the touch group at the
 // bottom exercises the unpinned (touch) default deliberately, to confirm
 // there is no platform-specific path left to regress.
-import 'package:antgrid/design/widgets/ab_diff_stat.dart';
-import 'package:antgrid/design/widgets/ab_icon.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
-import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
+import 'package:antgrid/widgets/carbon_diff_stat.dart';
 import 'package:antgrid/widgets/workspace_menu_button.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -72,42 +71,17 @@ Future<ProviderContainer> _pump(
   return container;
 }
 
-AbIconButton _button(WidgetTester tester) =>
-    tester.widget<AbIconButton>(find.byKey(WorkspaceMenuButton.buttonKey));
+CarbonButton _button(WidgetTester tester) =>
+    tester.widget<CarbonButton>(find.byKey(WorkspaceMenuButton.buttonKey));
 
-/// Parks a mouse pointer over the rail and waits out its hover-intent delay,
-/// which is what brings it forward from its resting, receded look. Nothing
-/// about the rail's LAYOUT depends on this — every label is on screen either
-/// way — so only the tests that assert its weight need it.
-Future<void> _hoverRail(WidgetTester tester) async {
-  final pointer = await tester.createGesture(kind: PointerDeviceKind.mouse);
-  await pointer.addPointer(location: Offset.zero);
-  addTearDown(pointer.removePointer);
-  await pointer.moveTo(tester.getCenter(find.byType(WorkspaceMenuPanel)));
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 150));
-  await tester.pumpAndSettle();
-}
-
-/// How far the rail has receded: 1 at rest, 0 once it has come forward.
-double _quiet(WidgetTester tester) => tester
-    .widget<AbPopupSurface>(
-      find.descendant(
-        of: find.byType(WorkspaceMenuPanel),
-        matching: find.byType(AbPopupSurface),
-      ),
+/// One row's rendered height, found by its label.
+double _rowHeight(WidgetTester tester, String label) => tester
+    .getSize(
+      find
+          .ancestor(of: find.text(label), matching: find.byType(CarbonSideNavLink))
+          .first,
     )
-    .quiet;
-
-/// Where a view's glyph sits on screen.
-Rect _iconRect(WidgetTester tester, WorkspaceView view) => tester.getRect(
-  find
-      .descendant(
-        of: find.byType(WorkspaceMenuPanel),
-        matching: find.byType(AbIcon),
-      )
-      .at(WorkspaceView.values.indexOf(view)),
-);
+    .height;
 
 /// A no-op `reveal`-carrying control, so every test below only has to name
 /// the field it actually cares about.
@@ -173,42 +147,44 @@ void main() {
       });
     });
 
-    // The resting state, and the reason the rail may sit pinned over a
-    // transcript at all: receded to a translucent, flat surface — but with
-    // every label still on it, which is the whole job.
-    testWidgets('rests receded and comes forward under the pointer', (
+    // Pinned over the transcript, so the panel must hold its own surface and
+    // border.
+    testWidgets('is a bordered layer surface in its own Carbon scope', (
       tester,
     ) async {
       await runDesktop(tester, () async {
-        final container = await _pump(tester, control: _control());
+        await _pump(tester, control: _control());
 
-        expect(_quiet(tester), 1);
-        for (final view in container.read(visibleWorkspaceViewsProvider)) {
-          expect(find.text(view.label), findsOneWidget, reason: view.label);
-        }
-
-        await _hoverRail(tester);
-        expect(_quiet(tester), 0);
+        expect(
+          find.descendant(
+            of: find.byType(WorkspaceMenuPanel),
+            matching: find.byType(AbCarbonScope),
+          ),
+          findsOneWidget,
+        );
+        final surface = tester.widget<DecoratedBox>(
+          find
+              .descendant(
+                of: find.byType(WorkspaceMenuPanel),
+                matching: find.byType(DecoratedBox),
+              )
+              .first,
+        );
+        final decoration = surface.decoration as BoxDecoration;
+        final theme = CarbonTheme.of(
+          tester.element(find.byType(CarbonSideNavLink).first),
+        );
+        expect(decoration.color, theme.colors.layer01);
+        expect(decoration.border, isNotNull);
       });
     });
 
-    // Coming forward is a change of weight, never of size or shape. An earlier
-    // version furled to an icon column, which moved every row under the
-    // pointer and hid the labels until one was asked for.
-    testWidgets('coming forward moves nothing', (tester) async {
+    // Side-nav rows: 32 tall on a pointer.
+    testWidgets('rows are compact on a pointer', (tester) async {
       await runDesktop(tester, () async {
-        final container = await _pump(tester, control: _control());
+        await _pump(tester, control: _control());
 
-        final resting = tester.getRect(find.byType(WorkspaceMenuPanel));
-        final views = container.read(visibleWorkspaceViewsProvider);
-        final rows = {for (final view in views) view: _iconRect(tester, view)};
-
-        await _hoverRail(tester);
-
-        expect(tester.getRect(find.byType(WorkspaceMenuPanel)), resting);
-        for (final view in views) {
-          expect(_iconRect(tester, view), rows[view], reason: view.label);
-        }
+        expect(_rowHeight(tester, 'Git'), 32);
       });
     });
 
@@ -224,7 +200,7 @@ void main() {
 
         final panel = tester.getRect(find.byType(WorkspaceMenuPanel));
         final longest = tester.getRect(find.text('Terminals'));
-        expect(panel.right - longest.right, lessThan(20));
+        expect(panel.right - longest.right, lessThan(24));
       });
     });
 
@@ -323,27 +299,43 @@ void main() {
 
     // Asserted through the row's semantics rather than its widget, because
     // that is the half a screen reader gets: the row excludes its own subtree,
-    // so the label and the selected state are stated on the wrapper or they
-    // are stated nowhere.
+    // so the label and the selected state are stated on the row or nowhere.
     testWidgets('marks the view already on screen', (tester) async {
       await runDesktop(tester, () async {
-        await _pump(tester, control: _control(active: WorkspaceView.preview));
+        final handle = tester.ensureSemantics();
+        try {
+          await _pump(tester, control: _control(active: WorkspaceView.preview));
 
-        expect(
-          find.byWidgetPredicate(
-            (w) => w is Semantics && (w.properties.selected ?? false),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byWidgetPredicate(
-            (w) =>
-                w is Semantics &&
-                (w.properties.selected ?? false) &&
-                w.properties.label == 'Preview',
-          ),
-          findsOneWidget,
-        );
+          expect(
+            tester.getSemantics(find.text('Preview')),
+            isSemantics(label: 'Preview', isSelected: true, hasTapAction: true),
+          );
+          expect(
+            tester.getSemantics(find.text('Git')),
+            isSemantics(label: 'Git', isSelected: false, hasTapAction: true),
+          );
+        } finally {
+          handle.dispose();
+        }
+      });
+    });
+
+    // The bare figure would announce as a stray digit after the name.
+    testWidgets("speaks a row's count as part of its name", (tester) async {
+      await runDesktop(tester, () async {
+        final handle = tester.ensureSemantics();
+        try {
+          await _pump(
+            tester,
+            control: _control(),
+            badges: const {WorkspaceView.handler: 2},
+          );
+
+          expect(find.bySemanticsLabel('Handler, 2'), findsOneWidget);
+          expect(find.bySemanticsLabel('2'), findsNothing);
+        } finally {
+          handle.dispose();
+        }
       });
     });
 
@@ -381,63 +373,29 @@ void main() {
         );
 
         expect(find.text('+2,728'), findsOneWidget);
-        expect(find.text('-494'), findsOneWidget);
+        expect(find.text('${CarbonDiffStat.minus}494'), findsOneWidget);
         expect(find.text('3'), findsNothing);
         // Every other view keeps its plain count.
         expect(find.text('2'), findsOneWidget);
       });
     });
 
-    // Both figures sit in the same trailing column, so they have to read as
-    // the same rank of thing. AbDiffStat's own default is set for the dense
-    // per-file badge in the changed-file tree and is a size smaller.
-    testWidgets('the Git +/- is the same size as a plain count', (
-      tester,
-    ) async {
+    // The +/- is the Git row's whole answer, so the row's name carries it for
+    // assistive tech instead of leaving it to read as punctuation.
+    testWidgets('the Git row speaks its +/- in its name', (tester) async {
       await runDesktop(tester, () async {
-        await _pump(
-          tester,
-          control: _control(),
-          badges: const {WorkspaceView.handler: 2},
-          gitTotals: (additions: 4, deletions: 3),
-        );
+        final handle = tester.ensureSemantics();
+        try {
+          await _pump(
+            tester,
+            control: _control(),
+            gitTotals: (additions: 4, deletions: 3),
+          );
 
-        double sizeOf(String text) =>
-            tester.widget<Text>(find.text(text)).style!.fontSize!;
-        expect(sizeOf('+4'), sizeOf('2'));
-      });
-    });
-
-    // A receded rail dims its labels by taking the muted foreground, which a
-    // green `+4` and a bordered badge cannot do — left alone they end up the
-    // loudest thing on a surface nobody has reached for.
-    testWidgets('the counts recede with the rail and come back with it', (
-      tester,
-    ) async {
-      await runDesktop(tester, () async {
-        await _pump(
-          tester,
-          control: _control(),
-          gitTotals: (additions: 4, deletions: 3),
-        );
-
-        double figureOpacity() => tester
-            .widget<Opacity>(
-              find
-                  .ancestor(
-                    of: find.byType(AbDiffStat),
-                    matching: find.byType(Opacity),
-                  )
-                  .first,
-            )
-            .opacity;
-
-        expect(figureOpacity(), lessThan(1));
-        // ...and never to nothing: it is the one fact worth reading at rest.
-        expect(figureOpacity(), greaterThan(0.4));
-
-        await _hoverRail(tester);
-        expect(figureOpacity(), 1);
+          expect(find.bySemanticsLabel('Git, 4 added, 3 removed'), findsOneWidget);
+        } finally {
+          handle.dispose();
+        }
       });
     });
 
@@ -538,17 +496,12 @@ void main() {
       },
     );
 
-    // Receding is a trade: the rail hands the transcript back some of its
-    // weight and takes a hover to get it again. A touch platform has no hover
-    // to pay with, so it is never charged — the rail arrives forward and
-    // stays there.
-    testWidgets('never recedes where there is no hover to undo it', (
-      tester,
-    ) async {
+    // Touch density lifts every row to a finger-sized target.
+    testWidgets('rows are finger-sized on touch', (tester) async {
       await runTouch(tester, () async {
         await _pump(tester, control: _control());
 
-        expect(_quiet(tester), 0);
+        expect(_rowHeight(tester, 'Git'), 44);
       });
     });
 
@@ -567,5 +520,33 @@ void main() {
         expect(_button(tester).selected, isFalse);
       });
     });
+  });
+
+  // The trigger is Carbon chrome like the rail it opens, and scopes itself so
+  // a mount outside the agent bar still finds a Carbon theme.
+  group('trigger', () {
+    for (final platform in [TargetPlatform.windows, TargetPlatform.android]) {
+      testWidgets('is a square Carbon icon button under its own scope '
+          '(${platform.name})', (tester) async {
+        try {
+          debugDefaultTargetPlatformOverride = platform;
+          await _pump(tester, control: _control());
+
+          final button = find.byKey(WorkspaceMenuButton.buttonKey);
+          expect(tester.widget(button), isA<CarbonButton>());
+          expect(find.byType(AbIconButton), findsNothing);
+          final size = tester.getSize(button);
+          expect(size.width, size.height);
+          expect(size.height, greaterThanOrEqualTo(32));
+          expect(
+            find.ancestor(of: button, matching: find.byType(AbCarbonScope)),
+            findsOneWidget,
+          );
+          await tester.pumpWidget(const SizedBox());
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+    }
   });
 }

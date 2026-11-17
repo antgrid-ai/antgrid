@@ -12,7 +12,10 @@ import 'package:antgrid/providers/session_workspace_state.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/widgets/terminal_list_view.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -94,6 +97,15 @@ Future<FakeAgentTransport> _pumpPanel(
 List<Map<String, dynamic>> _sent(FakeAgentTransport t, String type) =>
     t.sent.where((m) => m['type'] == type).toList();
 
+/// The close glyph on each tab, in tab order. The glyph is not its own
+/// semantics node (a tab bar may hold only tabs), so it is found by icon.
+Finder _closeGlyphs() => find.byWidgetPredicate(
+  (w) => w is CarbonIcon && w.icon == CarbonIcons.close,
+);
+
+Finder _scrollButton(CarbonIcons glyph) =>
+    find.byWidgetPredicate((w) => w is CarbonIcon && w.icon == glyph);
+
 /// A start the fake bridge never answers arms the service's start deadline;
 /// run it out so the test ends with no timer pending.
 Future<void> _outlastStartDeadline(WidgetTester tester) =>
@@ -135,7 +147,7 @@ void main() {
   testWidgets('a pill’s close kills that terminal', (tester) async {
     final transport = await _pumpPanel(tester);
 
-    await tester.tap(find.byTooltip('Kill terminal').last);
+    await tester.tap(_closeGlyphs().last);
     await tester.pump();
 
     expect(_sent(transport, 'terminal:stop').single['terminalId'], 'terminal-2');
@@ -194,6 +206,82 @@ void main() {
     expect(find.textContaining('running'), findsNothing);
   });
 
+  testWidgets('a tab is spoken with its run state, and closing it is a '
+      'Kill action', (tester) async {
+    final handle = tester.ensureSemantics();
+    await _pumpPanel(tester);
+
+    final one = tester.getSemantics(find.text('Terminal 1')).getSemanticsData();
+    expect(one.label, 'Terminal 1, running');
+    final two = tester.getSemantics(find.text('Terminal 2')).getSemanticsData();
+    final labels = [
+      for (final id in two.customSemanticsActionIds ?? const <int>[])
+        CustomSemanticsAction.getAction(id)!.label,
+    ];
+    expect(labels, contains('Kill Terminal 2, running'));
+    handle.dispose();
+  });
+
+  testWidgets('New stops at ten terminals and says why', (tester) async {
+    final transport = await _pumpPanel(tester, terminals: 10);
+
+    await tester.tap(find.text('New'));
+    await tester.pump();
+
+    expect(_sent(transport, 'terminal:start'), isEmpty);
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is CarbonTooltip && w.message == 'Max terminals reached',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a tab tap hands the keyboard to the terminal it opened', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, terminals: 3);
+
+    await tester.tap(find.text('Terminal 3'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('terminal-3')), findsOneWidget);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'TerminalLiveView');
+  });
+
+  testWidgets('pressing the open tab again hands the keyboard back to it', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, terminals: 3);
+
+    await tester.tap(find.text('Terminal 1'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('terminal-1')), findsOneWidget);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'TerminalLiveView');
+  });
+
+  testWidgets('Kill hands the keyboard to the neighbour terminal', (
+    tester,
+  ) async {
+    await _pumpPanel(tester, terminals: 3);
+
+    await tester.tap(find.text('Terminal 3'));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.text('Kill'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('terminal-2')), findsOneWidget);
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'TerminalLiveView');
+  });
+
   group('a strip with more terminals than fit', () {
     double stripOffset(WidgetTester tester) => tester
         .state<ScrollableState>(
@@ -207,23 +295,41 @@ void main() {
         .position
         .pixels;
 
-    testWidgets('desktop pages it with chevrons that show only where there '
-        'is more', (tester) async {
+    testWidgets('desktop pages it with scroll buttons that show only where '
+        'there is more', (tester) async {
       await _pumpPanel(tester, terminals: 8, width: 420);
+      await tester.pumpAndSettle();
       // The open terminal is the first, so nothing lies to its left yet.
-      expect(find.byTooltip('Scroll terminals left'), findsNothing);
-      expect(find.byTooltip('Scroll terminals right'), findsOneWidget);
+      expect(_scrollButton(CarbonIcons.chevronLeft), findsNothing);
+      expect(_scrollButton(CarbonIcons.chevronRight), findsOneWidget);
 
-      await tester.tap(find.byTooltip('Scroll terminals right'));
+      await tester.tap(_scrollButton(CarbonIcons.chevronRight));
       await tester.pumpAndSettle();
 
       expect(stripOffset(tester), greaterThan(0));
-      expect(find.byTooltip('Scroll terminals left'), findsOneWidget);
+      expect(_scrollButton(CarbonIcons.chevronLeft), findsOneWidget);
     }, variant: const TargetPlatformVariant({TargetPlatform.windows}));
 
-    testWidgets('touch swipes it, with no chevrons in the way', (tester) async {
+    testWidgets('a vertical mouse wheel scrolls the strip sideways', (
+      tester,
+    ) async {
+      await _pumpPanel(tester, terminals: 8, width: 420);
+      await tester.pumpAndSettle();
+
+      final pointer = TestPointer(1, PointerDeviceKind.mouse)
+        ..hover(tester.getCenter(find.text('Terminal 1')));
+      await tester.sendEventToBinding(pointer.scroll(const Offset(0, 120)));
+      await tester.pump();
+
+      expect(stripOffset(tester), greaterThan(0));
+    }, variant: const TargetPlatformVariant({TargetPlatform.windows}));
+
+    testWidgets('touch shows the same scroll buttons and still swipes', (
+      tester,
+    ) async {
       await _pumpPanel(tester, terminals: 8, width: 360);
-      expect(find.byTooltip('Scroll terminals right'), findsNothing);
+      await tester.pumpAndSettle();
+      expect(_scrollButton(CarbonIcons.chevronRight), findsOneWidget);
 
       await tester.drag(find.text('Terminal 1'), const Offset(-200, 0));
       await tester.pumpAndSettle();
@@ -237,7 +343,12 @@ void main() {
       await _pumpPanel(tester, terminals: 8, width: 420);
 
       await tester.tap(find.text('New'));
-      await tester.pumpAndSettle();
+      // Not pumpAndSettle: the starting tab animates until the start
+      // deadline drops it, so settling would outlast the tab itself. The
+      // reveal starts after the first frame and its ticker starts the next.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 500));
 
       final strip = tester.getRect(
         find

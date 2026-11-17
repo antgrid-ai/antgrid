@@ -1,19 +1,11 @@
-import 'dart:async';
-import 'dart:ui' show lerpDouble;
-
-import 'package:flutter/services.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_diff_stat.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_menu.dart';
+import '../design/ab_carbon.dart';
 import '../providers/visible_surface.dart';
-import '../utils/platform_utils.dart';
+import 'carbon_diff_stat.dart';
 import 'workspace_tab_bar.dart';
 
 /// The agent bar's way into the workspace views: a rail naming those on offer,
@@ -42,7 +34,7 @@ import 'workspace_tab_bar.dart';
 /// that shuts it BY HAND. That is why it cannot be a [showAbPanel] route: a
 /// [PopupRoute] both closes on the first outside click and swallows that click
 /// on the way. The trade is that a pinned popup is invisible in the icon's
-/// resting look, so the icon latches on ([AbIconButton.selected]) for as long
+/// resting look, so the icon latches on ([CarbonButton.selected]) for as long
 /// as the rail is up.
 ///
 /// The shell keeps it down for as long as the context pane is on screen, since
@@ -106,11 +98,11 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
       controller: _portal,
       // Deliberately no dismiss barrier: a click outside the panel must reach
       // whatever it landed on, unchanged. The Align is what keeps that true —
-      // the overlay hands its child the whole screen, and the popup surface's
-      // Material paints a shape, whose CustomPaint hit-tests as OPAQUE over
-      // every pixel it is given. Screen-sized, it would silently swallow every
-      // click in the window while the menu was up. Align loosens the
-      // constraints so the surface is only as big as the rail.
+      // the overlay hands its child the whole screen, and the panel's filled
+      // box hit-tests as OPAQUE over every pixel it is given. Screen-sized, it
+      // would silently swallow every click in the window while the menu was
+      // up. Align loosens the constraints so the surface is only as big as the
+      // rail.
       overlayChildBuilder: (_) => Align(
         alignment: Alignment.topLeft,
         child: CompositedTransformFollower(
@@ -120,182 +112,143 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
           // the panel can grow and stay inside the window.
           targetAnchor: Alignment.bottomRight,
           followerAnchor: Alignment.topRight,
-          offset: const Offset(0, AbTokens.space4),
+          offset: const Offset(0, CarbonSpacing.spacing02),
           child: const WorkspaceMenuPanel(),
         ),
       ),
       child: CompositedTransformTarget(
         link: _link,
-        child: AbIconButton(
-          key: WorkspaceMenuButton.buttonKey,
-          icon: AbIcons.workspace,
-          selected: open,
-          tooltip: 'Workspace',
-          onTap: () => ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+        // Scoped here as well as by the bar: the button is a public widget and
+        // a mount outside the bar must still find a Carbon theme.
+        child: AbCarbonScope(
+          child: CarbonTooltip(
+            message: 'Workspace',
+            excludeFromSemantics: true,
+            alignment: CarbonTooltipAlignment.end,
+            child: CarbonButton.iconOnly(
+              key: WorkspaceMenuButton.buttonKey,
+              icon: const CarbonIcon(CarbonIcons.workspace),
+              semanticLabel: 'Workspace',
+              selected: open,
+              onPressed: () =>
+                  ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-/// How far a row's trailing figure is let down while the rail is receded.
-/// Still legible, no longer the brightest thing on a surface the reader has
-/// not reached for.
-const double _restingFigure = 0.6;
-
-/// How long the pointer has to stay before the rail comes forward. A cursor
-/// crossing the top-right corner on its way to the agent bar is not a request
-/// to read anything, and without this the rail flares at every pass.
-const _hoverIntent = Duration(milliseconds: 90);
-
-/// The workspace rail: one row per [WorkspaceView], badged and marked to match
+/// The workspace rail: one row per [WorkspaceView], counted and marked to match
 /// the tab strip. Live (a Consumer) so a commit landing or an escalation
 /// arriving updates the counts while it is up.
 ///
-/// **It rests receded and comes forward under the pointer.** Pinned over the
-/// agent's transcript, a popup at full strength the whole time is a claim on
-/// attention it has not earned: at rest it sits translucent over a blur, flat,
-/// divided by an ordinary border ([AbPopupSurface.quiet]), with its labels at
-/// the muted foreground. Hover or keyboard focus restores the full popup.
-///
-/// **Only its weight changes, never its size.** A version that furled to an
-/// icon column and charged a hover for the labels was built and taken back
-/// out: the rail's one job is to say what the workspace holds while the pane
-/// is closed, and a rail that has to be reached for before it will answer has
-/// stopped doing it.
+/// A Carbon side-nav column on its own `layer01` surface, bordered and shadowed
+/// so it reads over the transcript; the view on screen carries the selected
+/// fill and start bar.
 ///
 /// Picking a view opens the context pane, which is what takes the rail away —
 /// the pane's own tab strip carries on from there (see
 /// `WorkspaceShellState._syncMenuToContextPane`).
-class WorkspaceMenuPanel extends ConsumerStatefulWidget {
+class WorkspaceMenuPanel extends ConsumerWidget {
   const WorkspaceMenuPanel({super.key});
 
   @override
-  ConsumerState<WorkspaceMenuPanel> createState() => _WorkspaceMenuPanelState();
-}
-
-class _WorkspaceMenuPanelState extends ConsumerState<WorkspaceMenuPanel>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: AbTokens.motionDefault,
-    // A touch platform has no hover to bring a receded rail back, so it never
-    // recedes: the resting state is only earned where the pointer that undoes
-    // it exists. Starts forward there and stays that way.
-    value: _recedes ? 0 : 1,
-  );
-  late final CurvedAnimation _lift = CurvedAnimation(
-    parent: _controller,
-    curve: Curves.easeOut,
-    reverseCurve: Curves.easeIn,
-  );
-  Timer? _intent;
-  bool _hovering = false;
-  bool _hasFocus = false;
-
-  bool get _recedes => !isMobilePlatform;
-
-  @override
-  void dispose() {
-    _intent?.cancel();
-    _lift.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _setHovering(bool hovering) {
-    if (_hovering == hovering) return;
-    _hovering = hovering;
-    _applyLift(immediate: false);
-  }
-
-  void _setFocused(bool hasFocus) {
-    if (_hasFocus == hasFocus) return;
-    _hasFocus = hasFocus;
-    // Keyboard focus skips [_hoverIntent]: Tab landing on a row is already a
-    // deliberate arrival, and a row that stayed receded after taking focus is
-    // a row the user cannot see they have selected.
-    _applyLift(immediate: hasFocus);
-  }
-
-  /// The one place hover and keyboard focus meet: the rail stays forward while
-  /// EITHER holds and recedes only once neither does. Wired straight to the
-  /// controller instead, a pointer leaving dimmed a row that still had the
-  /// keyboard, and tabbing out dimmed the rail under a stationary cursor.
-  void _applyLift({required bool immediate}) {
-    if (!_recedes) return;
-    _intent?.cancel();
-    if (!_hovering && !_hasFocus) {
-      _controller.reverse();
-      return;
-    }
-    // [_hoverIntent] gates the FIRST approach only, so it is armed just from a
-    // fully receded rail. Any value above 0 means the rail is already partway
-    // forward — approaching, arrived, or withdrawing — and re-arming there
-    // would let a pointer that clipped the rail's edge on its way to a row
-    // carry on dimming for another 90ms before it turned around, which reads
-    // as a dip rather than as hesitation.
-    if (immediate || _controller.value > 0) {
-      _controller.forward();
-    } else {
-      _intent = Timer(_hoverIntent, _controller.forward);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Read before the guard below: `_controller` is a `late final`, so a panel
-    // that only ever built with a null control would otherwise run the
-    // initializer inside `dispose()` — creating a Ticker against a defunct
-    // element.
-    _controller.duration = MediaQuery.disableAnimationsOf(context)
-        ? Duration.zero
-        : AbTokens.motionDefault;
-
+  Widget build(BuildContext context, WidgetRef ref) {
     final control = ref.watch(workspaceMenuControlProvider);
     final badges = ref.watch(workspaceBadgesProvider);
     final gitStat = ref.watch(gitDiffTotalsProvider);
     final views = ref.watch(visibleWorkspaceViewsProvider);
-    if (control == null) return const SizedBox.shrink();
 
-    return MouseRegion(
-      onEnter: (_) => _setHovering(true),
-      onExit: (_) => _setHovering(false),
-      child: Focus(
-        canRequestFocus: false,
-        skipTraversal: true,
-        // Reports the whole subtree, so this is every row's focus at once.
-        onFocusChange: _setFocused,
-        child: AnimatedBuilder(
-          animation: _lift,
-          builder: (context, _) {
-            final t = _lift.value;
-            return AbPopupSurface(
-              quiet: 1 - t,
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) {
+          if (control == null) return const SizedBox.shrink();
+          final theme = CarbonTheme.of(context);
+          return Semantics(
+            role: SemanticsRole.navigation,
+            container: true,
+            explicitChildNodes: true,
+            label: 'Workspace views',
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: theme.colors.layer01,
+                border: Border.all(color: theme.borderSubtle(1)),
+                boxShadow: [
+                  BoxShadow(
+                    color: theme.colors.shadow,
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
               // Shrink-wrapped rather than laid out at a fixed width, so the
               // rail ends where its longest label does. A fixed width has to
               // be sized for the widest row the rail can ever hold — the Git
               // row's whole-worktree `+N -M` — which leaves it two thirds
               // empty every other time.
               child: IntrinsicWidth(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final view in views)
-                      _RailRow(
-                        view: view,
-                        selected: view == control.active,
-                        badge: badges[view],
-                        gitStat: gitStat,
-                        lift: t,
-                        onTap: () => control.reveal(view),
-                      ),
-                  ],
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: CarbonSpacing.spacing02,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final view in views)
+                        _RailRow(
+                          view: view,
+                          selected: view == control.active,
+                          count: badges[view] ?? 0,
+                          gitStat: gitStat,
+                          onTap: () => control.reveal(view),
+                        ),
+                    ],
+                  ),
                 ),
               ),
-            );
-          },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The count pill, drawn from the tag's gray tokens rather than a CarbonTag:
+/// the rail is intrinsically sized and CarbonTag's truncation tooltip is a
+/// LayoutBuilder, which cannot report an intrinsic width.
+class _RailCount extends StatelessWidget {
+  const _RailCount({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = CarbonTheme.of(context);
+    final palette = theme.colors.tagGray;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: palette.background,
+        borderRadius: BorderRadius.all(CarbonShape.pill),
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: CarbonTagSize.small.height),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: CarbonSpacing.spacing03,
+          ),
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              workspaceViewCountText(count),
+              style: theme.typography.label.copyWith(color: palette.foreground),
+              maxLines: 1,
+              softWrap: false,
+            ),
+          ),
         ),
       ),
     );
@@ -303,13 +256,12 @@ class _WorkspaceMenuPanelState extends ConsumerState<WorkspaceMenuPanel>
 }
 
 /// One view's row.
-class _RailRow extends StatefulWidget {
+class _RailRow extends StatelessWidget {
   const _RailRow({
     required this.view,
     required this.selected,
-    required this.badge,
+    required this.count,
     required this.gitStat,
-    required this.lift,
     required this.onTap,
   });
 
@@ -317,160 +269,43 @@ class _RailRow extends StatefulWidget {
 
   /// Whether this is the view on screen — not the row under the pointer.
   final bool selected;
-  final int? badge;
+  final int count;
   final GitDiffTotals gitStat;
-
-  /// 0 while the rail is receded, 1 once it has come forward.
-  final double lift;
   final VoidCallback onTap;
 
   @override
-  State<_RailRow> createState() => _RailRowState();
-}
-
-class _RailRowState extends State<_RailRow> {
-  bool _hover = false;
-  bool _focused = false;
-
-  /// The row's trailing figure, and the same fact in words — resolved together
-  /// so what a screen reader is told can never drift from what is drawn.
-  ///
-  /// The Git row trades its file count for the worktree's +/-: how much changed
-  /// is what the row is read for, and one trailing figure is all it has room
-  /// for. The tab strip deliberately keeps its plain count — several tabs on one
-  /// scrolling row have no space for a figure this wide.
-  ///
-  /// Sized up from [AbDiffStat]'s own default, which is set for the dense
-  /// per-file badge in the changed-file tree. Here it shares a column with
-  /// [WorkspaceViewBadge] and has to read as the same rank of figure, not as a
-  /// footnote wedged in beside the Git label.
-  ({Widget figure, String spoken})? _resolveTrailing() {
-    final stat = widget.gitStat;
-    if (widget.view == WorkspaceView.git &&
-        (stat.additions > 0 || stat.deletions > 0)) {
-      return (
-        figure: AbDiffStat(
-          additions: stat.additions,
-          deletions: stat.deletions,
-          fontSize: AbTokens.fontXs,
-        ),
-        spoken: AbDiffStat.describe(stat.additions, stat.deletions),
-      );
-    }
-    final badge = widget.badge;
-    if (badge == null) return null;
-    return (
-      figure: WorkspaceViewBadge(count: badge, active: widget.selected),
-      spoken: '$badge',
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
-    // Treat keyboard focus the same as pointer hover for the highlight — one
-    // "row under the user" state for either input mode, matching `PanelRow`.
-    final under = _hover || _focused;
-    final trailing = _resolveTrailing();
-    // A receded rail is glanced past, not read: its labels sit at the muted
-    // foreground and come up to their own colour along with the surface behind
-    // them. The selected row's accent is exempt — which view is on screen is
-    // the one thing worth answering without being reached for.
-    Color forward(Color arrived) =>
-        Color.lerp(p.textMuted, arrived, widget.lift)!;
-
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowHoverHighlight: (v) {
-        if (_hover != v) setState(() => _hover = v);
-      },
-      onShowFocusHighlight: (v) {
-        if (_focused != v) setState(() => _focused = v);
-      },
-      shortcuts: const {
-        SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
-        SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
-        SingleActivator(LogicalKeyboardKey.numpadEnter): ActivateIntent(),
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        // Trailing figures draw bare, which announce as a stray digit (or, for
-        // the Git row's `+N -M`, as punctuation) after the view's name; folding
-        // them into the label is what makes them read as this row's own count —
-        // the same treatment, for the same reason, as the tab strip's `_TabItem`.
-        child: Semantics(
-          button: true,
-          selected: widget.selected,
-          label: trailing == null
-              ? widget.view.label
-              : '${widget.view.label}, ${trailing.spoken}',
-          excludeSemantics: true,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AbTokens.space8,
-              vertical: AbTokens.space6,
+    // The Git row trades its file count for the worktree's +/-: how much
+    // changed is what the row is read for, and one trailing figure is all it
+    // has room for. The tab strip deliberately keeps its plain count — several
+    // tabs on one scrolling row have no space for a figure this wide.
+    final showStat =
+        view == WorkspaceView.git &&
+        (gitStat.additions > 0 || gitStat.deletions > 0);
+    // The figures draw bare, which announce as a stray digit or as
+    // punctuation after the view's name; folding them into the row's label is
+    // what makes them read as this row's own count.
+    final spoken = showStat
+        ? '${view.label}, '
+              '${CarbonDiffStat.describe(gitStat.additions, gitStat.deletions)}'
+        : workspaceViewSemanticLabel(view, count);
+    return CarbonSideNavLink(
+      label: spoken,
+      content: Text(view.label),
+      icon: view.carbonIcon,
+      current: selected,
+      onPressed: onTap,
+      trailing: [
+        if (showStat)
+          ExcludeSemantics(
+            child: CarbonDiffStat(
+              additions: gitStat.additions,
+              deletions: gitStat.deletions,
             ),
-            decoration: BoxDecoration(
-              // The view on screen keeps its own mark under hover: the rail is
-              // read for which view is up at least as often as it is clicked.
-              color: widget.selected
-                  ? p.bgSelected
-                  : (under ? p.bgHover : null),
-              borderRadius: AbTokens.borderRadius3,
-            ),
-            child: Row(
-              children: [
-                AbIcon(
-                  widget.view.icon,
-                  size: AbTokens.iconButtonGlyph,
-                  color: widget.selected
-                      ? p.accent
-                      : forward(under ? p.textPrimary : p.textSecondary),
-                ),
-                const SizedBox(width: AbTokens.space8),
-                Expanded(
-                  child: Text(
-                    widget.view.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontSm,
-                      color: forward(
-                        under || widget.selected
-                            ? p.textPrimary
-                            : p.textSecondary,
-                      ),
-                    ),
-                  ),
-                ),
-                if (trailing != null) ...[
-                  const SizedBox(width: AbTokens.space12),
-                  // The figures carry their own colour — the badge's border,
-                  // the diffstat's green and red — so they cannot recede by
-                  // taking the muted foreground the way the labels do, and a
-                  // receded rail would otherwise have its loudest element be
-                  // the one thing nobody is looking at. Never to nothing: how
-                  // much the worktree has moved is the one fact worth reading
-                  // off a rail at rest.
-                  Opacity(
-                    opacity: lerpDouble(_restingFigure, 1, widget.lift)!,
-                    child: trailing.figure,
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
+          )
+        else if (count > 0)
+          ExcludeSemantics(child: _RailCount(count: count)),
+      ],
     );
   }
 }

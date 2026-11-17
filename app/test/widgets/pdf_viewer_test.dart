@@ -1,12 +1,17 @@
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/pdf_viewer.dart';
 
+Widget _scope(BuildContext context, Widget? child) =>
+    AbCarbonScope(child: child!);
+
 void main() {
   testWidgets('shows fallback on bad base64', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
+          builder: _scope,
         home: Scaffold(
           body: FilePdfViewer(
             content: const FileContent(

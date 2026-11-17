@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/recent_session_row.dart';
@@ -124,7 +125,10 @@ void main() {
       machineCapabilityCardProvider('mbp').overrideWith((_) async => null),
       machineCapabilityCardProvider('stu').overrideWith((_) async => null),
     ],
-    child: MaterialApp(theme: buildAbTheme(), home: Scaffold(body: child)),
+    child: MaterialApp(
+      theme: buildAbTheme(),
+      home: AbCarbonScope(child: Scaffold(body: child)),
+    ),
   );
 
   testWidgets('home leads with what needs you, then the merged projects', (
@@ -135,11 +139,11 @@ void main() {
     // settles; one frame past the first build is all it needs.
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.text('NEEDS YOU'), findsOneWidget);
+    expect(find.text('Needs you · 1'), findsOneWidget);
     expect(find.text('Session ask'), findsOneWidget);
     expect(find.text('mbp · antgrid'), findsOneWidget);
     expect(find.text('Open and respond'), findsOneWidget);
-    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(find.text('Projects'), findsOneWidget);
     expect(find.text('antgrid'), findsOneWidget);
     expect(find.text('1 live'), findsOneWidget);
 

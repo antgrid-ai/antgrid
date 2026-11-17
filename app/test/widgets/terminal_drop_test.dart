@@ -90,6 +90,8 @@ class _Harness {
   final List<String> errors = [];
 
   late final TerminalAttachmentUploader uploader = TerminalAttachmentUploader(
+    board: TerminalAttachBoard(),
+    boardKey: () => 't',
     resolveUpload: () => runner,
     insert: inserted.add,
     onError: errors.add,

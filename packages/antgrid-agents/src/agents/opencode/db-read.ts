@@ -2,6 +2,7 @@
 import { Database } from "bun:sqlite";
 import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import { hasOpencodeV2Store, readOpencodeV2Messages } from "./v2-store";
 
 // Rows fetched per read. Must stay comfortably wider than DECIDE_MAX_MSGS
 // (handler/context.ts): most assistant rows are tool-only and
@@ -37,6 +38,16 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
   try {
     db = new Database(dbPath ?? resolveOpencodeDbPath(), { readonly: true });
     db.exec("PRAGMA busy_timeout = 0");
+    if (hasOpencodeV2Store(db)) {
+      const messages = readOpencodeV2Messages(db, sessionId, ROW_CAP);
+      const lastCompaction = messages.findLastIndex((message) => message.type === "compaction" && message.status === "completed");
+      return messages.slice(Math.max(0, lastCompaction)).flatMap((message) => {
+        if (message.type === "user") return [message.text];
+        if (message.type === "compaction" && message.status === "completed") return [message.summary];
+        if (message.type === "assistant") return [message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")];
+        return [];
+      }).map((text) => text.trim()).filter(Boolean).slice(-n);
+    }
     const rows = db.query(
       "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT ?",
     ).all(sessionId, ROW_CAP) as Array<{ id: string; data: string }>;

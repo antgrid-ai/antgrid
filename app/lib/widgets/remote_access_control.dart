@@ -1,11 +1,10 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
+import '../design/ab_carbon.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_toast.dart';
-import '../design/widgets/ab_state_chip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
 import '../providers/remote_access.dart';
@@ -45,40 +44,47 @@ class RemoteAccessControl extends ConsumerWidget {
     final policy = async.value;
     final enabled = policy?.enabled == true;
 
-    final chip = AbStateChip(
-      key: const Key('remote-access-chip'),
-      icon: AbIcons.radioTower,
-      // No value yet — first load, or an error that never resolved to one. The
-      // chip stays visible and still opens the panel: with the control gone the
-      // user has no affordance and no retry surface on a persistent host error,
-      // and a chip that looks decided while knowing nothing is worse than one
-      // that admits it doesn't know yet.
-      label: policy == null
-          ? 'Remote'
-          : enabled
-          ? 'Remote on'
-          : 'Remote off',
-      tone: enabled ? context.antgrid.statusRunning : null,
-      active: enabled,
-      tooltip: policy == null
-          ? 'Remote access — checking this machine…'
-          : enabled
-          ? 'Any device signed in to your account can drive this machine'
-          : 'This machine is not reachable from your other devices',
-      onTap: (chipContext) {
-        final anchor = abMenuAnchorRect(chipContext);
-        if (anchor == null) return;
-        showAbPanel<void>(
-          context: chipContext,
-          anchorRect: anchor,
-          width: 320,
-          builder: (_) => const RemoteAccessPanel(),
-        );
-      },
+    final tooltip = policy == null
+        ? 'Remote access — checking this machine…'
+        : enabled
+        ? 'Any device signed in to your account can drive this machine'
+        : 'This machine is not reachable from your other devices';
+    final chip = CarbonTooltip(
+      message: tooltip,
+      // The tag opens a panel, so the popup anchors to the tag's own box.
+      child: Builder(
+        builder: (tagContext) => CarbonTag(
+          key: const Key('remote-access-chip'),
+          icon: const CarbonIcon(CarbonIcons.cellTower),
+          // No value yet — first load, or an error that never resolved to one.
+          // The chip stays visible and still opens the panel: with the control
+          // gone the user has no affordance and no retry surface on a
+          // persistent host error, and a chip that looks decided while knowing
+          // nothing is worse than one that admits it doesn't know yet.
+          label: policy == null
+              ? 'Remote'
+              : enabled
+              ? 'Remote on'
+              : 'Remote off',
+          color: enabled ? CarbonTagColor.green : CarbonTagColor.gray,
+          onPressed: () {
+            final anchor = abMenuAnchorRect(tagContext);
+            if (anchor == null) return;
+            showAbPanel<void>(
+              context: tagContext,
+              anchorRect: anchor,
+              width: 320,
+              builder: (_) => const RemoteAccessPanel(),
+            );
+          },
+        ),
+      ),
     );
 
     // Dimming a control that reports state reads as "unavailable"; a flip in
     // flight is the opposite of unavailable, so it pulses instead.
-    return async.isLoading ? PulsingOpacity(child: chip) : chip;
+    return AbCarbonScope(
+      child: async.isLoading ? PulsingOpacity(child: chip) : chip,
+    );
   }
 }

@@ -95,6 +95,8 @@ abstract final class AbIcons {
   static const menu = Codicon.menu;
   static const more = Codicon.kebab_vertical;
   static const list = Codicon.list_unordered;
+  // Memory's mark: what agents learned.
+  static const lightbulb = Codicon.lightbulb;
   // A list with a tick struck through its first row. [list] is four bullets and
   // four bars, which at chrome sizes is the hamburger `menu` glyph with dots —
   // it says "a list exists", where a queue that reports what is done and what

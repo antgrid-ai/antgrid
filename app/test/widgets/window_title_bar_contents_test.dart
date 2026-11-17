@@ -13,8 +13,10 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_mode_control.dart';
+import 'package:antgrid/widgets/session_breadcrumb.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -303,6 +305,45 @@ void main() {
       }
     },
   );
+
+  // CarbonTag asserts under an IntrinsicWidth/IntrinsicHeight, and the bar
+  // measures its trailing cluster after layout instead, so the chip slot must
+  // lay out as a Carbon island at every width the bar mounts at.
+  for (final width in [kMediumBreakpoint, 1400.0]) {
+    testWidgets('the chip slot lays out Carbon tags at width $width', (
+      tester,
+    ) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await pumpAt(tester, width);
+        await tester.pump();
+
+        expect(tester.takeException(), isNull);
+        final slot = find.byKey(WindowTitleBarContents.chipSlotKey);
+        final chip = find.descendant(
+          of: slot,
+          matching: find.byKey(const Key('remote-access-chip')),
+        );
+        expect(chip, findsOneWidget);
+        expect(tester.widget(chip), isA<CarbonTag>());
+        expect(
+          find.ancestor(
+            of: chip,
+            matching: find.byWidgetPredicate(
+              (w) => w is IntrinsicWidth || w is IntrinsicHeight,
+            ),
+          ),
+          findsNothing,
+        );
+        expect(
+          tester.getRect(chip).right,
+          lessThanOrEqualTo(tester.getRect(slot).right),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  }
 
   // Separate test, not a second pump — Riverpod forbids changing a live
   // scope's override COUNT.

@@ -1,3 +1,4 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show remoteCommandOutcomeUnknownMessage;
@@ -6,6 +7,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_toast.dart';
 import '../services/sessions_service.dart';
 import 'ab_status_helpers.dart' show sessionRefusalCopy;
+import 'carbon_confirm.dart';
 
 /// Performs one delete attempt. Raises [SessionOperationException] for a typed
 /// refusal — that refusal is the confirm ladder's input, not a failure to
@@ -17,6 +19,146 @@ typedef SessionDeleter =
 /// app neither claims failure nor repeats the mutation; it reports uncertainty
 /// and waits for a fresh user action.
 enum SessionDeleteResult { deleted, cancelled, failed, outcomeUnknown }
+
+/// The confirmation dialogs the delete ladder asks, so a surface chooses its
+/// own design system without forking the ladder's copy or branching.
+abstract class SessionDeleteDialogs {
+  const SessionDeleteDialogs();
+
+  /// A yes/no question whose yes is "Delete".
+  Future<bool> confirm(
+    BuildContext context, {
+    required String title,
+    required String body,
+  });
+
+  /// A destructive question with an optional unchecked checkbox. The option is
+  /// false whenever the user cancelled or none was offered.
+  Future<({bool confirmed, bool optionSelected})> confirmWithOption(
+    BuildContext context, {
+    required String title,
+    required String body,
+    required String confirmLabel,
+    String? optionLabel,
+  });
+}
+
+class _AbSessionDeleteDialogs extends SessionDeleteDialogs {
+  const _AbSessionDeleteDialogs();
+
+  @override
+  Future<bool> confirm(
+    BuildContext context, {
+    required String title,
+    required String body,
+  }) => AbConfirmDialog.show(
+    context: context,
+    title: title,
+    body: body,
+    confirmLabel: 'Delete',
+    destructive: true,
+  );
+
+  @override
+  Future<({bool confirmed, bool optionSelected})> confirmWithOption(
+    BuildContext context, {
+    required String title,
+    required String body,
+    required String confirmLabel,
+    String? optionLabel,
+  }) => AbConfirmDialog.showWithOption(
+    context: context,
+    title: title,
+    body: body,
+    confirmLabel: confirmLabel,
+    destructive: true,
+    optionLabel: optionLabel,
+  );
+}
+
+class _CarbonSessionDeleteDialogs extends SessionDeleteDialogs {
+  const _CarbonSessionDeleteDialogs();
+
+  @override
+  Future<bool> confirm(
+    BuildContext context, {
+    required String title,
+    required String body,
+  }) => showCarbonConfirm(
+    context,
+    title: title,
+    body: body,
+    confirmLabel: 'Delete',
+    danger: true,
+  );
+
+  @override
+  Future<({bool confirmed, bool optionSelected})> confirmWithOption(
+    BuildContext context, {
+    required String title,
+    required String body,
+    required String confirmLabel,
+    String? optionLabel,
+  }) async {
+    // Outside the builder: the modal route rebuilds it on any size, inset or
+    // theme change, and a choice held inside would silently reset.
+    var optionSelected = false;
+    final result = await showCarbonModal<({bool confirmed, bool optionSelected})>(
+      context,
+      builder: (modalContext) {
+        // The whole modal rebuilds with the checkbox: its actions sit outside
+        // the body, and the primary one has to pop the current choice.
+        return StatefulBuilder(
+          builder: (context, setState) {
+            final t = CarbonTheme.of(context);
+            void answer(bool confirmed) => Navigator.of(modalContext).pop((
+              confirmed: confirmed,
+              optionSelected: confirmed && optionSelected,
+            ));
+            return CarbonModal.confirmation(
+              title: title,
+              body: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    body,
+                    style: t.typography.body.copyWith(
+                      color: t.colors.textPrimary,
+                    ),
+                  ),
+                  if (optionLabel != null) ...[
+                    const SizedBox(height: CarbonSpacing.spacing05),
+                    CarbonCheckbox(
+                      labelText: optionLabel,
+                      value: optionSelected,
+                      onChanged: (v) =>
+                          setState(() => optionSelected = v ?? false),
+                    ),
+                  ],
+                ],
+              ),
+              danger: true,
+              secondary: CarbonModalAction(
+                label: 'Cancel',
+                onPressed: () => answer(false),
+              ),
+              primary: CarbonModalAction(
+                label: confirmLabel,
+                onPressed: () => answer(true),
+              ),
+            );
+          },
+        );
+      },
+    );
+    return result ?? (confirmed: false, optionSelected: false);
+  }
+}
+
+const SessionDeleteDialogs abSessionDeleteDialogs = _AbSessionDeleteDialogs();
+const SessionDeleteDialogs carbonSessionDeleteDialogs =
+    _CarbonSessionDeleteDialogs();
 
 /// The delete confirmation ladder, shared by every surface that deletes a
 /// session (the drawer kebab, the Recent list) so the same session can never be
@@ -37,6 +179,9 @@ enum SessionDeleteResult { deleted, cancelled, failed, outcomeUnknown }
 /// when that attempt settles. An outcome-unknown request must require a fresh
 /// user action rather than remaining armed as though execution were confirmed.
 ///
+/// [dialogs] picks the design system the questions are asked in; the ladder's
+/// copy and branching are the same for every surface.
+///
 /// [context] governs the DIALOGS and TOASTS only, never the outcome. Once the
 /// user has confirmed, the delete runs and its result is reported whether or not
 /// the calling row survived the await — a row rebuilt away mid-dialog is the
@@ -50,6 +195,7 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   required SessionDeleter delete,
   bool sharedWorkspace = false,
   void Function(bool inFlight)? onInFlight,
+  SessionDeleteDialogs dialogs = abSessionDeleteDialogs,
 }) async {
   final (String title, String consequence) = switch (checkoutKind) {
     'main' => ('Delete session?', sharedBody),
@@ -75,12 +221,10 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
     _ => ('Delete isolated session?', sharedBody),
   };
 
-  final confirmed = await AbConfirmDialog.show(
-    context: context,
+  final confirmed = await dialogs.confirm(
+    context,
     title: title,
     body: '$consequence This cannot be undone.',
-    confirmLabel: 'Delete',
-    destructive: true,
   );
   if (!confirmed) return SessionDeleteResult.cancelled;
 
@@ -123,8 +267,8 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   // Branch deletion is offered only for unpushed commits, because that is the
   // only case where keeping the branch actually preserves something. It is
   // always a separate, unchecked choice — never folded into "force".
-  final choice = await AbConfirmDialog.showWithOption(
-    context: context,
+  final choice = await dialogs.confirmWithOption(
+    context,
     // Says "isolated session", not "worktree": the badge, the composer chip and
     // the error copy all refuse to name the mechanism, and the unknown-kind arm
     // above routes non-worktree kinds through this same dialog.
@@ -135,7 +279,6 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
         ? 'This isolated session\'s branch has commits that exist nowhere else. Deleting removes its working directory; the branch is kept unless you also delete it.'
         : 'This isolated session has uncommitted changes in its working directory. Force deletion discards them. Its branch is preserved.',
     confirmLabel: 'Force delete',
-    destructive: true,
     optionLabel: unpushed ? 'Also delete the branch and its commits' : null,
   );
   if (!choice.confirmed) return SessionDeleteResult.cancelled;

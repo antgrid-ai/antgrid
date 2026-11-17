@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' show ImageFilter, lerpDouble;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -136,6 +135,13 @@ class AbMenu extends StatelessWidget {
     // First non-divider item gets `autofocus: true` so keyboard users
     // land on an interactive row immediately when the menu opens.
     var didAutofocus = false;
+    // A tick marks the picked row in a choice menu; without the gutter the
+    // other labels sit left of it and read as a different list.
+    final iconGutter = items.any(
+      (e) =>
+          (e is AbMenuItem && e.icon != null) ||
+          (e is AbMenuSubmenu && e.icon != null),
+    );
     // `width` is the intended/target width — under the route's loose
     // viewport constraints the menu lays out exactly `width` wide, but
     // on narrow displays (split-screen, foldables) it shrinks to fit
@@ -204,6 +210,7 @@ class AbMenu extends StatelessWidget {
                             open: _openSubmenu,
                             expanded: identical(entry, _activeSubmenu),
                             autofocus: autofocus,
+                            iconGutter: iconGutter,
                           );
                         },
                       )
@@ -219,6 +226,7 @@ class AbMenu extends StatelessWidget {
                             key: entry.key,
                             item: entry,
                             autofocus: autofocus,
+                            iconGutter: iconGutter,
                           );
                         },
                       ),
@@ -359,57 +367,29 @@ class AbLiveMenuRow extends StatelessWidget {
   }
 }
 
-/// How far a fully receded popup lets its ground through — see
-/// [AbPopupSurface.quiet]. Kept above the point where the transcript underneath
-/// starts competing with the popup's own labels for the eye.
-const double _quietSurfaceAlpha = 0.84;
-
-/// Blur applied behind a fully receded popup. Its job is to turn the text below
-/// into ground rather than a second layer of figure; without it a translucent
-/// popup over a live transcript is unreadable in both directions.
-const double _quietBlurSigma = 10;
-
-/// Antgrid `--elev-overlay`'s shadow colour. Named so the fade below scales the
-/// alpha this already carries rather than restating it — a second literal there
-/// silently shifts the shadow of every popup in the app the first time the two
-/// disagree.
+/// Antgrid `--elev-overlay`'s shadow colour.
 const Color _popupShadowColor = Color(0xB3000000);
 
 /// Shared popup chrome for [AbMenu] and [showAbPanel]: raised surface,
 /// strong border, contracted overlay shadow — one popup look across
 /// menus and live-widget panels.
-///
-/// [quiet] recedes that chrome for a popup the user has not reached for yet;
-/// 0 is the full popup and every caller but the workspace rail passes it.
-BoxDecoration _popupDecoration(AbColors p, {double quiet = 0}) {
+BoxDecoration _popupDecoration(AbColors p) {
   return BoxDecoration(
-    color: p.bgRaised.withValues(
-      alpha: lerpDouble(1, _quietSurfaceAlpha, quiet),
-    ),
+    color: p.bgRaised,
     borderRadius: AbTokens.borderRadius8,
-    // A receded popup drops to the ordinary 1px separator the rest of the app
-    // divides with, which is what stops it reading as a raised thing at rest.
-    border: Border.all(
-      color: Color.lerp(p.borderStrong, p.borderDefault, quiet)!,
-    ),
+    border: Border.all(color: p.borderStrong),
     // Antgrid `--elev-overlay`: a deep, contracted drop shadow
     // (negative spread = inset corners, lifted center) plus the
     // 1px borderStrong ring above. Without the negative spread the
     // shadow bleeds wide and reads "Material card" instead of "popup".
-    // Dropped outright once fully receded rather than faded to transparent: a
-    // transparent BoxShadow still costs its blur pass every frame.
-    boxShadow: quiet >= 1
-        ? null
-        : [
-            BoxShadow(
-              color: _popupShadowColor.withValues(
-                alpha: _popupShadowColor.a * (1 - quiet),
-              ),
-              blurRadius: 48,
-              spreadRadius: -12,
-              offset: const Offset(0, 24),
-            ),
-          ],
+    boxShadow: const [
+      BoxShadow(
+        color: _popupShadowColor,
+        blurRadius: 48,
+        spreadRadius: -12,
+        offset: Offset(0, 24),
+      ),
+    ],
   );
 }
 
@@ -420,70 +400,20 @@ BoxDecoration _popupDecoration(AbColors p, {double quiet = 0}) {
 /// menu you pick from and wrong for one the user pins open; those mount this in
 /// an [OverlayPortal] instead and still read as the same popup.
 class AbPopupSurface extends StatelessWidget {
-  const AbPopupSurface({
-    super.key,
-    required this.child,
-    this.width = 280,
-    this.quiet = 0,
-  });
+  const AbPopupSurface({super.key, required this.child, this.width = 280});
 
   final Widget child;
   final double width;
-
-  /// How far the popup has receded from the reader, 0 (full popup: opaque,
-  /// strong border, lifted) to 1 (translucent over a blur, plain border, flat),
-  /// and any point between for an animated approach or withdrawal.
-  ///
-  /// For a PINNED popup only — one that stays up under content the user is
-  /// reading, where sitting at full strength the whole time would be a claim on
-  /// attention it hasn't earned. A popup that opens on demand is already the
-  /// thing being looked at and leaves this at 0. See `workspace_menu_button.dart`.
-  final double quiet;
 
   @override
   Widget build(BuildContext context) {
     return Material(
       type: MaterialType.transparency,
-      // The blur is a SIBLING painted behind the surface, never a wrapper
-      // around it, for two reasons a wrapper gets wrong. Its clip would eat the
-      // drop shadow, which `_popupDecoration` paints entirely outside the
-      // popup's own rect — invisible for every quiet above 0, then snapping in
-      // whole at 0. And a wrapper that comes and goes as quiet crosses 0
-      // changes the tree's SHAPE mid-animation: `Widget.canUpdate` fails at
-      // that slot, so everything below — row state, focus nodes, icons — is
-      // discarded and re-inflated on the last frame of every reveal.
-      //
-      // `Clip.none` because the shadow is exactly the overflow a Stack would
-      // otherwise be entitled to clip.
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          if (quiet > 0)
-            Positioned.fill(
-              // The blur is what buys the translucency: see [_quietBlurSigma].
-              // Clipped to the popup's own radius, or it blurs a rectangle out
-              // past the corners.
-              child: ClipRRect(
-                borderRadius: AbTokens.borderRadius8,
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(
-                    sigmaX: _quietBlurSigma * quiet,
-                    sigmaY: _quietBlurSigma * quiet,
-                  ),
-                  child: const SizedBox.expand(),
-                ),
-              ),
-            ),
-          Container(
-            // Keyed so the surface — and every State beneath it — keeps its
-            // identity as the blur appears and disappears beside it.
-            key: const ValueKey('ab-popup-surface'),
-            constraints: BoxConstraints(maxWidth: width, minWidth: 0),
-            padding: const EdgeInsets.all(5),
-            decoration: _popupDecoration(context.antgrid, quiet: quiet),
-            child: child,
-          ),
-        ],
+      child: Container(
+        constraints: BoxConstraints(maxWidth: width, minWidth: 0),
+        padding: const EdgeInsets.all(5),
+        decoration: _popupDecoration(context.antgrid),
+        child: child,
       ),
     );
   }
@@ -922,6 +852,7 @@ class _SubmenuTile extends StatefulWidget {
     required this.expanded,
     required this.autofocus,
     this.focusNode,
+    this.iconGutter = false,
   });
 
   final AbMenuSubmenu entry;
@@ -929,6 +860,7 @@ class _SubmenuTile extends StatefulWidget {
   final bool expanded;
   final bool autofocus;
   final FocusNode? focusNode;
+  final bool iconGutter;
 
   @override
   State<_SubmenuTile> createState() => _SubmenuTileState();
@@ -975,6 +907,7 @@ class _SubmenuTileState extends State<_SubmenuTile> {
               icon: widget.entry.icon,
               onTap: () => _open(true),
             ),
+            iconGutter: widget.iconGutter,
             trailing: AbIcon(
               AbIcons.chevronRight,
               size: _menuRowIconSize,
@@ -1367,11 +1300,15 @@ class _MenuItemTile extends StatefulWidget {
     this.autofocus = false,
     this.focusNode,
     this.trailing,
+    this.iconGutter = false,
   });
   final AbMenuItem item;
   final bool autofocus;
   final FocusNode? focusNode;
   final Widget? trailing;
+
+  /// Holds an iconless row's label in line with siblings that have an icon.
+  final bool iconGutter;
 
   @override
   State<_MenuItemTile> createState() => _MenuItemTileState();
@@ -1456,7 +1393,9 @@ class _MenuItemTileState extends State<_MenuItemTile> {
                 Padding(
                   padding: const EdgeInsets.only(right: _menuRowIconGap),
                   child: AbIcon(i.icon!, size: _menuRowIconSize, color: iconFg),
-                ),
+                )
+              else if (widget.iconGutter)
+                const SizedBox(width: _menuRowIconSize + _menuRowIconGap),
               Expanded(
                 child: Text(
                   i.label,

@@ -265,8 +265,8 @@ extension AbThemePresetUI on AbThemePreset {
   /// ships as [kDefaultPalette], so it reads as "Default" rather than the
   /// internal preset name.
   String get label => switch (this) {
-    AbThemePreset.zinc => 'DEFAULT',
-    _ => name.toUpperCase(),
+    AbThemePreset.zinc => 'Default',
+    _ => '${name[0].toUpperCase()}${name.substring(1)}',
   };
 }
 

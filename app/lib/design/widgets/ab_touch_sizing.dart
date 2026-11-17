@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../../constants/breakpoints.dart';
@@ -9,7 +11,7 @@ import '../ab_tokens.dart';
 /// apply.
 ///
 /// Phones only. A tablet is a mobile platform but renders the desktop layout,
-/// whose dense toolbars a 48px floor would blow apart; the shortest side keeps
+/// whose dense toolbars a 44px floor would blow apart; the shortest side keeps
 /// a landscape phone in and a portrait tablet out.
 ///
 /// The widget itself is the opt-out: wrap fixed-height chrome (a toolbar whose
@@ -27,6 +29,19 @@ class AbTouchSizing extends InheritedWidget {
     final size = MediaQuery.maybeSizeOf(context);
     if (size == null || size.shortestSide >= kCompactBreakpoint) return 0;
     return AbTokens.touchControlMin;
+  }
+
+  /// Height of a single-line text field whose resting height is [base]: on
+  /// phones at least the touch extent, and tall enough for one line of the
+  /// field's body text at the user's text scale, which a fixed box clips from
+  /// about 1.5x. Desktop keeps [base].
+  static double fieldHeight(BuildContext context, double base) {
+    final extent = extentOf(context);
+    if (extent == 0) return base;
+    final line =
+        MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) * 1.5 +
+        AbTokens.space4;
+    return math.max(base, math.max(extent, line));
   }
 
   @override

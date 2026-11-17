@@ -1,7 +1,6 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
 import '../models/file_tree_models.dart';
 import 'viewer_header.dart';
 import 'viewer_support.dart';
@@ -15,39 +14,37 @@ class ImageViewer extends StatelessWidget {
 
   const ImageViewer({super.key, required this.content, this.onClose});
 
+  static const _failure = ViewerErrorNotice(
+    message: "Couldn't render this image",
+  );
+
   @override
   Widget build(BuildContext context) {
-    final c = context.antgrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         buildViewerHeader(content: content, onClose: onClose),
         Expanded(
-          child: Container(
-            color: c.bgDeepest,
-            padding: const EdgeInsets.all(AbTokens.space4),
-            child: DecodedBytesBuilder(
-              content: content,
-              builder: (context, bytes) => bytes == null
-                  ? _failure(c)
-                  : ZoomableImage(
-                      child: Image.memory(
-                        bytes,
-                        fit: BoxFit.contain,
-                        errorBuilder: (context, _, stackTrace) => _failure(c),
+          child: ColoredBox(
+            color: CarbonTheme.of(context).colors.background,
+            child: Padding(
+              padding: const EdgeInsets.all(CarbonSpacing.spacing02),
+              child: DecodedBytesBuilder(
+                content: content,
+                builder: (context, bytes) => bytes == null
+                    ? _failure
+                    : ZoomableImage(
+                        child: Image.memory(
+                          bytes,
+                          fit: BoxFit.contain,
+                          errorBuilder: (context, _, stackTrace) => _failure,
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
         ),
       ],
     );
   }
-
-  Widget _failure(AbColors c) => Center(
-    child: Text(
-      "Couldn't render this image",
-      style: AbTokens.sansStyle(color: c.textMuted),
-    ),
-  );
 }

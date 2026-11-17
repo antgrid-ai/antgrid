@@ -13,9 +13,10 @@ import '../helpers/prefs_test_mock.dart';
 
 const _probeKey = Key('probe');
 
-/// Minimal stand-in for AbApp's MaterialApp builder wiring: same settings →
-/// chosen palette → [effectivePaletteFor] (via platformBrightnessOf) →
-/// Theme swap + [systemBarStyleFor] chain, without the auth/update subtree.
+/// Minimal stand-in for AbApp's theme wiring: settings → chosen palette →
+/// [effectivePaletteFor] under each brightness → ThemeMode.system, with
+/// [systemBarStyleFor] read off the resolved theme, without the auth/update
+/// subtree.
 class _Harness extends ConsumerWidget {
   const _Harness();
 
@@ -28,24 +29,22 @@ class _Harness extends ConsumerWidget {
       customPrimary: settings.customPrimary,
       customAccent: settings.customAccent,
     );
-    final theme = buildAbTheme(palette);
+    ThemeData themeUnder(Brightness b) => buildAbTheme(
+      effectivePaletteFor(
+        settings: settings,
+        chosen: palette,
+        platformBrightness: b,
+      ),
+    );
     return MaterialApp(
-      theme: theme,
-      darkTheme: theme,
-      builder: (context, child) {
-        final effectivePalette = effectivePaletteFor(
-          settings: settings,
-          chosen: palette,
-          platformBrightness: MediaQuery.platformBrightnessOf(context),
-        );
-        final effectiveTheme = identical(effectivePalette, palette)
-            ? theme
-            : buildAbTheme(effectivePalette);
-        return AnnotatedRegion<SystemUiOverlayStyle>(
-          value: systemBarStyleFor(effectivePalette),
-          child: Theme(data: effectiveTheme, child: child!),
-        );
-      },
+      theme: themeUnder(Brightness.light),
+      darkTheme: themeUnder(Brightness.dark),
+      themeMode: ThemeMode.system,
+      themeAnimationStyle: AnimationStyle.noAnimation,
+      builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
+        value: systemBarStyleFor(context.antgrid),
+        child: child!,
+      ),
       home: const SizedBox.shrink(key: _probeKey),
     );
   }
@@ -62,7 +61,7 @@ void main() {
       for (final brightness in Brightness.values) {
         expect(
           effectivePaletteFor(
-            settings: zinc,
+            settings: zinc.copyWith(followSystemBrightness: false),
             chosen: zincPalette,
             platformBrightness: brightness,
           ),
@@ -74,7 +73,7 @@ void main() {
     test('on + OS light -> the light preset palette', () {
       expect(
         effectivePaletteFor(
-          settings: zinc.copyWith(followSystemBrightness: true),
+          settings: zinc,
           chosen: zincPalette,
           platformBrightness: Brightness.light,
         ),
@@ -85,7 +84,7 @@ void main() {
     test('on + OS dark -> the chosen preset palette', () {
       expect(
         effectivePaletteFor(
-          settings: zinc.copyWith(followSystemBrightness: true),
+          settings: zinc,
           chosen: zincPalette,
           platformBrightness: Brightness.dark,
         ),
@@ -96,7 +95,7 @@ void main() {
     test('on + OS dark with light chosen -> default dark palette', () {
       expect(
         effectivePaletteFor(
-          settings: light.copyWith(followSystemBrightness: true),
+          settings: light,
           chosen: lightPalette,
           platformBrightness: Brightness.dark,
         ),
@@ -124,23 +123,34 @@ void main() {
 
     AbColors effective() =>
         Theme.of(tester.element(find.byKey(_probeKey))).extension<AbColors>()!;
+    Brightness barIcons() => tester
+        .widget<AnnotatedRegion<SystemUiOverlayStyle>>(
+          find.byType(AnnotatedRegion<SystemUiOverlayStyle>),
+        )
+        .value
+        .statusBarIconBrightness!;
 
     final zinc = kPresets[AbThemePreset.zinc]!;
     final light = kPresets[AbThemePreset.light]!;
 
-    // Follow off (default): chosen preset (zinc) under either OS brightness.
+    // Fresh install follows the OS: dark renders the chosen preset (zinc).
     expect(effective().bgDeepest, zinc.bgDeepest);
+    expect(barIcons(), Brightness.light);
+
+    // OS flips light: the light preset takes over, bar icons included.
     tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
     await tester.pump();
-    expect(effective().bgDeepest, zinc.bgDeepest);
-
-    // Follow on + OS light: the light preset takes over.
-    await service.setFollowSystemBrightness(true);
-    await tester.pump();
     expect(effective().bgDeepest, light.bgDeepest);
+    expect(barIcons(), Brightness.dark);
 
     // OS flips dark: back to the chosen (zinc) preset.
     tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    await tester.pump();
+    expect(effective().bgDeepest, zinc.bgDeepest);
+
+    // Opting out pins the chosen preset under either OS brightness.
+    await service.setFollowSystemBrightness(false);
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
     await tester.pump();
     expect(effective().bgDeepest, zinc.bgDeepest);
   });

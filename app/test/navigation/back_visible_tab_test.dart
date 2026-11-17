@@ -63,6 +63,8 @@ void main() {
   ) async {
     await pumpExplorer(tester, WorkspaceView.files);
     session.fileService.selectFile('lib/main.dart');
+    // Deliver the async state stream before rebuilding the back handler.
+    await tester.idle();
     await tester.pump();
 
     expect(resolveBackIntent(c), isTrue);

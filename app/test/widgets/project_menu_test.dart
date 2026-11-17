@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_work_status.dart';
 import 'package:antgrid/models/recent_session_row.dart';
@@ -70,7 +71,11 @@ Widget _host({
     child: MaterialApp(
       theme: buildAbTheme(),
       home: Scaffold(
-        body: Center(child: ProjectChip(onOpenFolder: onOpenFolder ?? () {})),
+        body: Center(
+          child: AbCarbonScope(
+            child: ProjectChip(onOpenFolder: onOpenFolder ?? () {}),
+          ),
+        ),
       ),
     ),
   );
@@ -112,7 +117,7 @@ void main() {
     final c = _container(tester);
     expect(c.read(selectedTargetProjectProvider)?.id, 'stu.p2');
     expect(c.read(selectedSourceIdProvider), 'machine:stu');
-    // The panel closes on a pick.
+    // The menu closes on a pick.
     expect(find.text('notes'), findsNothing);
   });
 
@@ -128,7 +133,7 @@ void main() {
     expect(_container(tester).read(selectedTargetProjectProvider), isNull);
   });
 
-  testWidgets('Open folder… invokes the callback and closes the panel', (
+  testWidgets('Open folder… invokes the callback and closes the menu', (
     tester,
   ) async {
     var opened = 0;

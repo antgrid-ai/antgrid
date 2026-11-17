@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { test, expect, afterEach } from "bun:test";
+import { BUS_BOX_MAX_CHARS, BUS_MAX_TTL_MS } from "antgrid-wire";
 import {
   startServer,
   defaultConfig,
@@ -41,10 +42,10 @@ test("over-bound text frame closes the socket", async () => {
   const { ws } = await connectHello(relay, { deviceId: "oversized-agent" });
   const closed = waitForClose(ws);
 
-  // One byte past MAX_CONTROL_FRAME_BYTES (server.ts `maxPayloadLength`).
+  // One byte past RELAY_MAX_CONTROL_FRAME_BYTES (server.ts `maxPayloadLength`).
   // Bun/uWebSockets enforces that cap by dropping the connection without a
   // close frame, so the client observes 1006, not 1009.
-  const oversized = "x".repeat(64 * 1024 + 1);
+  const oversized = "x".repeat(128 * 1024 + 1);
   ws.send(oversized);
 
   expect(await closed).toBe(1006);
@@ -106,4 +107,24 @@ test("unknown control messages remain recoverable INVALID_MESSAGE errors", async
     retryable: false,
   });
   expect(ws.readyState).toBe(WebSocket.OPEN);
+});
+
+test("a maximal bus:send is accepted under the control frame cap", async () => {
+  relay = startServer(defaultConfig);
+  const { ws } = await connectHello(relay, { deviceId: "bus-max-agent" });
+  const result = waitForMessage(ws);
+  const to = crypto.randomUUID();
+  const id = crypto.randomUUID();
+
+  const frame = JSON.stringify({
+    type: "bus:send",
+    id,
+    to,
+    blob: { epk: "A".repeat(43) + "=", box: "A".repeat(BUS_BOX_MAX_CHARS) },
+    ttlMs: BUS_MAX_TTL_MS,
+  });
+  expect(frame.length).toBeLessThan(128 * 1024 - 4096);
+  ws.send(frame);
+
+  expect(await result).toEqual({ type: "bus:receipt", id, to, state: "queued" });
 });

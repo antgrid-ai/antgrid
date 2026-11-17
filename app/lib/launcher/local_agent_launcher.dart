@@ -310,11 +310,6 @@ class LocalAgentLauncher {
         token: connect.token,
         appPid: pid,
         netTap: localNetTapFor(projectId),
-        // Unconditional: a LocalTransport only exists on a machine running a
-        // bridge, and this app is that bridge's loopback owner — the sole
-        // carrier for session-bus frames addressed to another machine (the
-        // bridge hands them to the owner only when it claims this).
-        sessionBusCarrier: true,
         // The host directory is the one place app and bridge are known to
         // share a filesystem view: the bridge publishes host.json there for
         // this app to read.

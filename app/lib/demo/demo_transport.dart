@@ -351,6 +351,7 @@ class DemoTransport extends BufferedAgentTransport {
       case 'session:archive':
       case 'session:unarchive':
       case 'session:set-mode':
+      case 'session:restart':
         return <Map<String, Object?>>[_sessionResult(requestId, ok: false)];
 
       case 'file:read':

@@ -24,6 +24,22 @@ interface SidecarSource {
   size: number;
 }
 
+/**
+ * Copilot rotates a large log (measured on 1.0.107): the old `events.jsonl`
+ * becomes `events.<N>.jsonl`, and the new head opens with a
+ * `session.journal_link` record, then `checkpoint: true` records replaying the
+ * whole conversation (every prompt, reply, tool call and compaction since
+ * `session.start`), then new history. The head alone is therefore the complete
+ * transcript with no record repeated; the numbered segments add only usage,
+ * system-prompt and model-call records. Version 1 is the only layout measured,
+ * and a later one may not replay in full, so it is refused rather than read as
+ * a partial transcript.
+ */
+function opensSession(record: { type?: unknown; data?: { sessionId?: unknown; version?: unknown } }, id: string): boolean {
+  if (record.data?.sessionId !== id) return false;
+  return record.type === "session.start" || (record.type === "session.journal_link" && record.data.version === 1);
+}
+
 async function startsWithSession(path: string, id: string): Promise<boolean> {
   try {
     const handle = await open(path, "r");
@@ -31,8 +47,7 @@ async function startsWithSession(path: string, id: string): Promise<boolean> {
       const buffer = Buffer.alloc(FIRST_LINE_BYTES);
       const { bytesRead } = await handle.read(buffer, 0, FIRST_LINE_BYTES, 0);
       const line = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0] ?? "";
-      const record = JSON.parse(line) as { type?: unknown; data?: { sessionId?: unknown } };
-      return record.type === "session.start" && record.data?.sessionId === id;
+      return opensSession(JSON.parse(line), id);
     } finally {
       await handle.close();
     }

@@ -4,15 +4,6 @@ import '../demo_cron.dart';
 import '../demo_identity.dart';
 import 'demo_workspace_fixtures.dart';
 
-const String kDemoSchedulerMachineName = 'Sample machine';
-
-/// Display names for the sample's agents. Kept out of the persisted agent
-/// catalog on purpose: the sample must leave nothing on disk.
-const Map<String, String> kDemoSchedulerAgentLabels = <String, String>{
-  'claude-code': 'Claude Code',
-  'codex': 'Codex',
-};
-
 const String kDemoScheduleNightlyId = 'demo-schedule-nightly',
     kDemoScheduleNightlyName = 'Nightly test run';
 const String kDemoScheduleSmokeId = 'demo-schedule-smoke',

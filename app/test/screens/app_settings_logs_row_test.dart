@@ -36,10 +36,10 @@ void main() {
       tester,
     ) async {
       await _pumpSignedIn(tester);
-      expect(find.text('SHARE LOGS'), findsNothing);
-      expect(find.text('HELP'), findsNothing);
+      expect(find.text('Share logs'), findsNothing);
+      expect(find.text('Help'), findsNothing);
       expect(find.text('Chat with support'), findsNothing);
-      expect(find.text('OPEN LOG FOLDER'), findsNothing);
+      expect(find.text('Open log folder'), findsNothing);
     }, variant: TargetPlatformVariant.only(platform));
   }
 
@@ -47,8 +47,8 @@ void main() {
     tester,
   ) async {
     await _pumpSignedIn(tester);
-    expect(find.text('OPEN LOG FOLDER'), findsNothing);
-    expect(find.text('HELP'), findsNothing);
-    expect(find.text('SHARE LOGS'), findsNothing);
+    expect(find.text('Open log folder'), findsNothing);
+    expect(find.text('Help'), findsNothing);
+    expect(find.text('Share logs'), findsNothing);
   }, variant: TargetPlatformVariant.desktop());
 }

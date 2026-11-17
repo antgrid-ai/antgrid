@@ -31,9 +31,11 @@ Uri navLocationToUri(NavLocation loc) {
         WorkbenchSurface.appSettings => 'settings',
         WorkbenchSurface.remoteDevices => 'devices',
         WorkbenchSurface.scheduler => 'scheduler',
+        WorkbenchSurface.memory => 'memory',
         // workspace/newSession with no project is not a meaningful deep link;
         // encode defensively as settings-less root.
-        _ => 'workspace',
+        WorkbenchSurface.workspace || WorkbenchSurface.newSession =>
+          'workspace',
       };
       // The one query param that survives a project-less location: a section
       // names a block of the settings screen, which is right here, unlike
@@ -167,6 +169,8 @@ NavLocation? navLocationFromUri(Uri uri) {
   switch (segs.first) {
     case 'scheduler':
       return const NavLocation(surface: WorkbenchSurface.scheduler);
+    case 'memory':
+      return const NavLocation(surface: WorkbenchSurface.memory);
     case 'settings':
       return NavLocation(
         target: null,

@@ -23,9 +23,9 @@ class ProjectStatus {
   final List<ServiceStatus> services;
   final AgentHello? agentHello;
 
-  /// The hosting machine's RAM from its latest `machine:stats`. Live only:
-  /// left out of [toJson], since a figure restored from the status cache would
-  /// describe a machine that may have moved on long since.
+  /// The hosting machine's RAM and CPU from its latest `machine:stats`. Live
+  /// only: left out of [toJson], since a figure restored from the status cache
+  /// would describe a machine that may have moved on long since.
   final DeviceStats? machineStats;
   final DateTime? lastUpdatedAt;
 
@@ -164,7 +164,7 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
 
   /// The session went down: the last `machine:stats` no longer describes a
   /// machine anyone can see, and nothing else would retract it until the next
-  /// handshake.
+  /// request is answered.
   void clearMachineStats() {
     if (_disposed || value.machineStats == null) return;
     value = value.copyWith(clearMachineStats: true);

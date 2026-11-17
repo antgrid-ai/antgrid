@@ -10,6 +10,7 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/git_panel.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -42,8 +43,6 @@ void main() {
   Future<void> pump(
     WidgetTester tester, {
     Map<String, dynamic>? sync,
-    // Wide enough to stay off the header's stacked layout, so the actions sit
-    // on one row where the tooltips are reachable.
     double width = 900,
   }) async {
     useInMemoryPrefs();
@@ -123,6 +122,18 @@ void main() {
     await tester.pump();
   }
 
+  /// The tooltip wrapping a Pull or Push button, which is what carries the
+  /// count wording ("Push 2 commits") the button label abbreviates.
+  Finder tip(String message) => find.byWidgetPredicate(
+    (w) => w is CarbonTooltip && w.message == message,
+    description: 'CarbonTooltip "$message"',
+  );
+
+  Finder action(String label) => find.byWidgetPredicate(
+    (w) => w is CarbonButton && (w.semanticLabel ?? w.label) == label,
+    description: 'CarbonButton "$label"',
+  );
+
   Map<String, dynamic>? sentOfType(String type) {
     for (final m in transport.sent.reversed) {
       if (m['type'] == type) return m;
@@ -145,13 +156,13 @@ void main() {
     tester,
   ) async {
     await pump(tester, sync: syncState(hasRemote: false, hasUpstream: false));
-    expect(find.byTooltip('Push'), findsNothing);
-    expect(find.byTooltip('Pull'), findsNothing);
+    expect(tip('Push'), findsNothing);
+    expect(tip('Pull'), findsNothing);
   });
 
   testWidgets('Push sends git:sync and names the op', (tester) async {
     await pump(tester, sync: syncState(ahead: 2));
-    await tester.tap(find.byTooltip('Push 2 commits'));
+    await tester.tap(tip('Push 2 commits'));
     await tester.pump();
     expect(sentOfType('git:sync')?['op'], 'push');
     await finishSync(tester);
@@ -159,25 +170,26 @@ void main() {
 
   testWidgets('Pull sends git:sync and names the op', (tester) async {
     await pump(tester, sync: syncState(behind: 1));
-    await tester.tap(find.byTooltip('Pull 1 commit'));
+    await tester.tap(tip('Pull 1 commit'));
     await tester.pump();
     expect(sentOfType('git:sync')?['op'], 'pull');
     await finishSync(tester, op: 'pull');
   });
 
-  testWidgets('both stay mounted but dead on a branch level with its upstream', (
-    tester,
-  ) async {
-    await pump(tester, sync: syncState());
-    // Mounted: a control that vanishes at zero moves its neighbour under a
-    // finger already travelling toward it.
-    expect(find.byTooltip('Push'), findsOneWidget);
-    expect(find.byTooltip('Pull'), findsOneWidget);
-    await tester.tap(find.byTooltip('Push'), warnIfMissed: false);
-    await tester.tap(find.byTooltip('Pull'), warnIfMissed: false);
-    await tester.pump();
-    expect(sentOfType('git:sync'), isNull);
-  });
+  testWidgets(
+    'both stay mounted but dead on a branch level with its upstream',
+    (tester) async {
+      await pump(tester, sync: syncState());
+      // Mounted: a control that vanishes at zero moves its neighbour under a
+      // finger already travelling toward it.
+      expect(tip('Push'), findsOneWidget);
+      expect(tip('Pull'), findsOneWidget);
+      await tester.tap(tip('Push'), warnIfMissed: false);
+      await tester.tap(tip('Pull'), warnIfMissed: false);
+      await tester.pump();
+      expect(sentOfType('git:sync'), isNull);
+    },
+  );
 
   testWidgets('a branch with no upstream offers Publish instead of Push', (
     tester,
@@ -185,8 +197,8 @@ void main() {
     await pump(tester, sync: syncState(hasUpstream: false));
     expect(find.text('Publish Branch'), findsOneWidget);
     // Push and Pull measure against an upstream that does not exist.
-    expect(find.byTooltip('Push'), findsNothing);
-    expect(find.byTooltip('Pull'), findsNothing);
+    expect(tip('Push'), findsNothing);
+    expect(tip('Pull'), findsNothing);
 
     await tester.tap(find.text('Publish Branch'));
     await tester.pump();
@@ -198,13 +210,13 @@ void main() {
     tester,
   ) async {
     await pump(tester, sync: syncState(ahead: 1, behind: 1));
-    await tester.tap(find.byTooltip('Push 1 commit'));
+    await tester.tap(tip('Push 1 commit'));
     await tester.pump();
     expect(transport.sent.where((m) => m['type'] == 'git:sync').length, 1);
 
     // Both are disabled together: they mutate the same branch, and a pull
     // racing a push is a state neither result can describe.
-    await tester.tap(find.byTooltip('Pull 1 commit'), warnIfMissed: false);
+    await tester.tap(tip('Pull 1 commit'), warnIfMissed: false);
     await tester.pump();
     expect(transport.sent.where((m) => m['type'] == 'git:sync').length, 1);
     await finishSync(tester);
@@ -212,7 +224,7 @@ void main() {
 
   testWidgets('a failure leaves a strip offering the agent', (tester) async {
     await pump(tester, sync: syncState(ahead: 2, behind: 3));
-    await tester.tap(find.byTooltip('Push 2 commits'));
+    await tester.tap(tip('Push 2 commits'));
     await tester.pump();
 
     transport.emit('git:sync-result', {
@@ -227,12 +239,13 @@ void main() {
       'command': 'git push',
       'stderr': '! [rejected] main -> main (non-fast-forward)',
     });
+    await tester.idle();
     await tester.pump();
 
     expect(find.textContaining('Push failed'), findsOneWidget);
     expect(find.text('Ask agent to fix'), findsOneWidget);
     // The buttons come back — the failure ended the op.
-    await tester.tap(find.byTooltip('Push 2 commits'));
+    await tester.tap(tip('Push 2 commits'));
     await tester.pump();
     expect(transport.sent.where((m) => m['type'] == 'git:sync').length, 2);
     await finishSync(tester);
@@ -242,7 +255,7 @@ void main() {
     tester,
   ) async {
     await pump(tester, sync: syncState(ahead: 1));
-    await tester.tap(find.byTooltip('Push 1 commit'));
+    await tester.tap(tip('Push 1 commit'));
     await tester.pump();
 
     transport.emit('git:sync-result', {
@@ -253,6 +266,7 @@ void main() {
       'error': 'HEAD is detached — check out a branch first',
       'failureKind': 'detached',
     });
+    await tester.idle();
     await tester.pump();
     // Settled by the frame above — the result IS what ends the op.
 
@@ -267,7 +281,7 @@ void main() {
   ) async {
     await pump(tester, sync: syncState(behind: 1));
     for (final kind in ['dirty-tree', 'detached']) {
-      await tester.tap(find.byTooltip('Pull 1 commit'));
+      await tester.tap(tip('Pull 1 commit'));
       await tester.pump();
       transport.emit('git:sync-result', {
         'projectId': 'p',
@@ -277,10 +291,11 @@ void main() {
         'error': 'refused',
         'failureKind': kind,
       });
+      await tester.idle();
       await tester.pump();
       expect(find.textContaining('Pull failed'), findsOneWidget, reason: kind);
 
-      await tester.tap(find.byTooltip('Dismiss'));
+      await tester.tap(action('Dismiss'));
       await tester.pump();
       expect(find.textContaining('Pull failed'), findsNothing, reason: kind);
     }
@@ -290,7 +305,7 @@ void main() {
     tester,
   ) async {
     await pump(tester, sync: syncState(ahead: 2));
-    await tester.tap(find.byTooltip('Push 2 commits'));
+    await tester.tap(tip('Push 2 commits'));
     await tester.pump();
     transport.emit('git:sync-result', {
       'projectId': 'p',
@@ -300,11 +315,12 @@ void main() {
       'error': 'rejected',
       'failureKind': 'rejected',
     });
+    await tester.idle();
     await tester.pump();
     expect(find.text('Ask agent to fix'), findsOneWidget);
 
     // A later success must not leave the previous failure's offer standing.
-    await tester.tap(find.byTooltip('Push 2 commits'));
+    await tester.tap(tip('Push 2 commits'));
     await tester.pump();
     transport.emit('git:sync-result', {
       'projectId': 'p',
@@ -314,10 +330,11 @@ void main() {
       'summary': 'Pushed main to origin/main',
     });
     transport.emit('git:sync-state', syncState());
+    await tester.idle();
     await tester.pump();
 
     expect(find.text('Ask agent to fix'), findsNothing);
-    expect(find.byTooltip('Push'), findsOneWidget);
+    expect(tip('Push'), findsOneWidget);
   });
 
   testWidgets('a clean tree keeps the remote action without Commit', (
@@ -327,8 +344,8 @@ void main() {
     // to stay reachable.
     await pump(tester, sync: syncState(ahead: 2, behind: 1));
     expect(find.text('Commit'), findsNothing);
-    expect(find.byTooltip('Push 2 commits'), findsOneWidget);
-    expect(find.byTooltip('Pull 1 commit'), findsOneWidget);
+    expect(tip('Push 2 commits'), findsOneWidget);
+    expect(tip('Pull 1 commit'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

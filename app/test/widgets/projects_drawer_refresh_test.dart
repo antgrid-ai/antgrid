@@ -8,6 +8,7 @@
 // the button needs to invalidate.
 import 'dart:async';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +19,11 @@ import 'package:antgrid/widgets/projects_drawer.dart';
 
 import '../helpers/test_store_overrides.dart';
 import '../helpers/prefs_test_mock.dart';
+
+// Carbon icon-only buttons carry their label as semantics, not a Tooltip.
+final _refreshButton = find.byWidgetPredicate(
+  (w) => w is CarbonButton && w.semanticLabel == 'Refresh',
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -53,7 +59,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(fetches, 1);
 
-    await tester.tap(find.byTooltip('Refresh'));
+    await tester.tap(_refreshButton);
     await tester.pumpAndSettle();
     expect(fetches, 2);
   });
@@ -86,7 +92,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(RefreshProgressIndicator), findsNothing);
 
-    await tester.tap(find.byTooltip('Refresh'));
+    await tester.tap(_refreshButton);
     // Not pumpAndSettle: the indicator animates in before `onRefresh` fires,
     // and the fetch it starts is held open below — settling would hang.
     await tester.pump();

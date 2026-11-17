@@ -6,10 +6,6 @@ import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/demo_scheduler.dart';
 import 'package:antgrid/demo/fixtures/demo_scheduler_fixtures.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_inline_banner.dart';
-import 'package:antgrid/design/widgets/ab_prompt_field.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/navigation/nav_location.dart';
 import 'package:antgrid/providers/demo_mode.dart';
@@ -19,6 +15,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_lanes.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -52,18 +49,40 @@ Future<void> pumpFor(WidgetTester tester, Duration total, Duration step) async {
 }
 
 Finder field(String hint) =>
-    find.byWidgetPredicate((w) => w is AbTextField && w.hintText == hint);
+    find.byWidgetPredicate(
+      (w) => w is CarbonTextInput && w.placeholder == hint,
+    );
 
-/// AbSegmented upper-cases its labels.
-Finder seg(String label) => find.text(label.toUpperCase());
+/// An option of the screen's Schedules / Runs switcher.
+Finder seg(String label) => find.descendant(
+  of: find.byType(CarbonContentSwitcher<bool>),
+  matching: find.text(label),
+);
+
+/// The header's New schedule control: icon-only on a phone-width pane, a
+/// labelled button beside the title on a wide one.
+Finder newSchedule() => find.byWidgetPredicate(
+  (w) =>
+      w is CarbonButton &&
+      (w.semanticLabel == 'New schedule' || w.label == 'New schedule'),
+);
 
 Finder inScreen(Finder f) =>
     find.descendant(of: find.byType(SchedulerScreen), matching: f);
 
-/// DemoFrame's strip is itself an AbInlineBanner, so every "nothing red"
-/// check is scoped to the Scheduler.
+/// DemoFrame's strip is itself a banner, so every "nothing red" check is
+/// scoped to the Scheduler, whose own banners and editor errors are Carbon
+/// notifications.
 void expectNothingRed() {
-  expect(inScreen(find.byType(AbInlineBanner)), findsNothing);
+  expect(
+    inScreen(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonNotification && w.kind == CarbonNotificationKind.error,
+      ),
+    ),
+    findsNothing,
+  );
   expect(inScreen(find.text(kDemoRefusalText)), findsNothing);
   expect(inScreen(find.textContaining("didn't work")), findsNothing);
   expect(inScreen(find.text('Machine unavailable')), findsNothing);
@@ -110,7 +129,9 @@ void iosTest(
 }
 
 Future<void> openRowMenu(WidgetTester tester, String name) async {
-  final trigger = find.byTooltip('Actions for $name');
+  final trigger = find.byWidgetPredicate(
+    (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Actions for $name',
+  );
   await tester.ensureVisible(trigger);
   await tester.pump();
   await tester.tap(trigger);
@@ -143,18 +164,22 @@ void main() {
   ) async {
     await openScheduler(tester);
 
-    await tester.tap(find.byTooltip('New schedule'));
+    await tester.tap(newSchedule());
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Review open PRs');
     await tester.enterText(
-      find.byType(AbPromptField),
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonTextInput &&
+            w.variant == CarbonTextInputVariant.multiline,
+      ),
       'Review the open pull requests and summarise what needs attention.',
     );
     await tester.pump(const Duration(milliseconds: 400));
     await settle(tester);
 
-    final create = find.widgetWithText(AbButton, 'Create schedule');
-    expect(tester.widget<AbButton>(create).onTap, isNotNull);
+    final create = find.widgetWithText(CarbonButton, 'Create schedule');
+    expect(tester.widget<CarbonButton>(create).onPressed, isNotNull);
     await tester.ensureVisible(create);
     await tester.pump();
     await tester.tap(create);
@@ -163,7 +188,7 @@ void main() {
     // The editor's own name field also matches the text, so prove it closed.
     expect(create, findsNothing);
     expect(find.text('Review open PRs'), findsWidgets);
-    expect(inScreen(find.byType(AbInlineBanner)), findsNothing);
+    expectNothingRed();
   });
 
   iosTest('Run now adds a run that starts, then completes', (tester) async {
@@ -184,7 +209,7 @@ void main() {
     );
 
     expect(find.text('Completed'), findsWidgets);
-    expect(inScreen(find.byType(AbInlineBanner)), findsNothing);
+    expectNothingRed();
   });
 
   iosTest('Open session reaches the session transcript', (tester) async {
@@ -243,16 +268,20 @@ void main() {
   iosTest('leaving the sample drops what was made in it', (tester) async {
     final container = await openScheduler(tester);
 
-    await tester.tap(find.byTooltip('New schedule'));
+    await tester.tap(newSchedule());
     await settle(tester);
     await tester.enterText(field('Schedule name'), 'Throwaway schedule');
     await tester.enterText(
-      find.byType(AbPromptField),
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonTextInput &&
+            w.variant == CarbonTextInputVariant.multiline,
+      ),
       'Look around and report back.',
     );
     await tester.pump(const Duration(milliseconds: 400));
     await settle(tester);
-    final create = find.widgetWithText(AbButton, 'Create schedule');
+    final create = find.widgetWithText(CarbonButton, 'Create schedule');
     await tester.ensureVisible(create);
     await tester.pump();
     await tester.tap(create);

@@ -8,7 +8,6 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
@@ -26,7 +25,9 @@ import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../machine_scope_menu.dart' show machineActivityLine;
-import '../project_sidebar.dart' show SidebarSectionLabel;
+import '../sidebar_section_label.dart';
+
+export 'connected_machine_button.dart';
 
 /// The phone's canvas until it is connected: pick a machine, watch it
 /// connect, or learn why it did not.
@@ -55,7 +56,9 @@ class MobileConnectScreen extends ConsumerWidget {
   }
 }
 
-String _machineName(WidgetRef ref, String id) =>
+/// What to call machine [id] on the phone: the directory's name, else the
+/// inventory's, else a stand-in.
+String mobileMachineName(WidgetRef ref, String id) =>
     ref
         .watch(machineDirectoryProvider)
         .firstWhereOrNull((m) => m.id == id)
@@ -417,7 +420,7 @@ class _MobileConnectingState extends ConsumerState<MobileConnecting> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    final name = _machineName(ref, widget.machineId);
+    final name = mobileMachineName(ref, widget.machineId);
     // Known to this phone already counts: a machine picked from the list was
     // found before the tap, and a restored one may beat the inventory read.
     final found =
@@ -533,15 +536,19 @@ class _Step extends StatelessWidget {
               child: Center(child: glyph),
             ),
             const SizedBox(width: AbTokens.space10),
-            Text(
-              label,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontMd,
-                color: switch (state) {
-                  _StepState.done => p.textSecondary,
-                  _StepState.active => p.textPrimary,
-                  _StepState.pending => p.textMuted,
-                },
+            // Flexible: a step names the machine, and a long name on a narrow
+            // phone must wrap rather than run off the screen.
+            Flexible(
+              child: Text(
+                label,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontMd,
+                  color: switch (state) {
+                    _StepState.done => p.textSecondary,
+                    _StepState.active => p.textPrimary,
+                    _StepState.pending => p.textMuted,
+                  },
+                ),
               ),
             ),
           ],
@@ -579,7 +586,7 @@ class MobileConnectFailed extends ConsumerWidget {
         const SizedBox(height: AbTokens.space14),
         _Title(
           lead: 'Couldn’t connect to ',
-          name: _machineName(ref, machineId),
+          name: mobileMachineName(ref, machineId),
         ),
         const SizedBox(height: AbTokens.space10),
         Text(
@@ -668,70 +675,6 @@ class _Title extends StatelessWidget {
           ],
         ),
         textAlign: TextAlign.center,
-      ),
-    );
-  }
-}
-
-/// The connected machine, heading the phone's home. Opens
-/// [SwitchMachineSheet].
-class ConnectedMachineButton extends ConsumerWidget {
-  const ConnectedMachineButton({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final p = context.antgrid;
-    final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
-    if (id == null) return const SizedBox.shrink();
-    final machine = ref
-        .watch(machineDirectoryProvider)
-        .firstWhereOrNull((m) => m.id == id);
-    final name = _machineName(ref, id);
-    final activity = machine == null
-        ? null
-        : machineActivityLine(
-            machine,
-            ref.watch(recentSessionsProvider),
-            ref.watch(recentSessionStatusesProvider),
-          );
-    final line = 'Connected · ${activity ?? 'idle'}';
-    return Semantics(
-      button: true,
-      label: 'Connected to $name, ${activity ?? 'idle'}. Switch machine',
-      excludeSemantics: true,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border.all(color: p.borderDefault),
-          borderRadius: AbTokens.borderRadius5,
-        ),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: AbTokens.tapTargetMin),
-          child: AbListRow(
-            leading: const AbStatusDot(
-              tone: AbStatusTone.success,
-              size: AbDotSize.md,
-            ),
-            title: Text(
-              name,
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontMd,
-                color: p.textPrimary,
-              ),
-            ),
-            subtitle: Text(line),
-            trailing: AbIcon(
-              AbIcons.chevronDown,
-              size: AbTokens.fontSm,
-              color: p.textMuted,
-            ),
-            density: AbRowDensity.sm,
-            horizontalPadding: AbTokens.space10,
-            onTap: () => showAbAdaptiveSheet<void>(
-              context,
-              child: const SwitchMachineSheet(),
-            ),
-          ),
-        ),
       ),
     );
   }

@@ -1,13 +1,12 @@
 import 'dart:convert';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../design/ab_icons.dart';
-import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_toast.dart';
 import '../models/file_tree_models.dart';
 import '../util/ab_log.dart';
@@ -29,7 +28,7 @@ Uint8List? fileContentBytes(FileContent content) {
       (content.utf8Valid == null && raw.contains('\uFFFD'))) {
     return null;
   }
-  final bytes = Uint8List.fromList(utf8.encode(raw));
+  final bytes = utf8.encode(raw);
   return bytes.length == content.size ? bytes : null;
 }
 
@@ -68,14 +67,32 @@ Future<void> downloadFileContent(
   }
   final bytes = _bytesOrExplain(context, content);
   if (bytes == null) return;
-  final name = viewerBasename(content.path);
+  return downloadFileBytes(
+    context,
+    name: viewerBasename(content.path),
+    mimeType: content.mimeType,
+    bytes: bytes,
+  );
+}
+
+/// [downloadFileContent] for bytes the caller already holds, so a large
+/// generated file never has to round-trip through a String.
+Future<void> downloadFileBytes(
+  BuildContext context, {
+  required String name,
+  required Uint8List bytes,
+  String? mimeType,
+}) async {
+  if (_isNative(TargetPlatform.iOS)) {
+    return _shareBytes(context, name: name, bytes: bytes, mimeType: mimeType);
+  }
   try {
     if (_isNative(TargetPlatform.android)) {
       final saved = await _androidSave.invokeMethod<bool>('save', {
         'name': name,
         // A text file has no MIME type from the bridge, and naming one here
         // would let the picker append its extension: README.md.txt.
-        'mimeType': content.mimeType ?? 'application/octet-stream',
+        'mimeType': mimeType ?? 'application/octet-stream',
         'bytes': bytes,
       });
       if (saved == true && context.mounted) showAbToast(context, 'Saved $name');
@@ -86,7 +103,7 @@ Future<void> downloadFileContent(
     await XFile.fromData(
       bytes,
       name: name,
-      mimeType: content.mimeType,
+      mimeType: mimeType,
     ).saveTo(location.path);
     if (context.mounted) showAbToast(context, 'Saved $name');
   } catch (e) {
@@ -100,12 +117,30 @@ Future<void> downloadFileContent(
 Future<void> shareFileContent(BuildContext context, FileContent content) async {
   final bytes = _bytesOrExplain(context, content);
   if (bytes == null) return;
-  final name = viewerBasename(content.path);
+  return _shareBytes(
+    context,
+    name: viewerBasename(content.path),
+    bytes: bytes,
+    mimeType: content.mimeType,
+  );
+}
+
+/// Replaces the share sheet under test: `SharePlus.instance` binds its platform
+/// once per isolate, and the channel path writes a temp file through path_provider.
+@visibleForTesting
+Future<ShareResult> Function(ShareParams params)? debugShareOverride;
+
+Future<void> _shareBytes(
+  BuildContext context, {
+  required String name,
+  required Uint8List bytes,
+  String? mimeType,
+}) async {
   final box = context.findRenderObject() as RenderBox?;
   try {
-    await SharePlus.instance.share(
+    await (debugShareOverride ?? SharePlus.instance.share)(
       ShareParams(
-        files: [XFile.fromData(bytes, name: name, mimeType: content.mimeType)],
+        files: [XFile.fromData(bytes, name: name, mimeType: mimeType)],
         fileNameOverrides: [name],
         // Anchors the iPad popover; phones ignore it.
         sharePositionOrigin: box != null && box.hasSize
@@ -130,11 +165,11 @@ class FileDownloadButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (content.content == null) return const SizedBox.shrink();
-    final download = AbIconButton(
+    final download = ViewerIconButton(
       key: const Key('file-download'),
-      icon: AbIcons.download,
-      tooltip: 'Download',
-      onTap: () => detached(
+      icon: CarbonIcons.download,
+      label: 'Download',
+      onPressed: () => detached(
         'FileDownload',
         'download',
         () => downloadFileContent(context, content),
@@ -143,12 +178,13 @@ class FileDownloadButton extends StatelessWidget {
     if (!_isNative(TargetPlatform.android)) return download;
     return Row(
       mainAxisSize: MainAxisSize.min,
+      spacing: CarbonSpacing.spacing02,
       children: [
-        AbIconButton(
+        ViewerIconButton(
           key: const Key('file-share'),
-          icon: AbIcons.share,
-          tooltip: 'Share',
-          onTap: () => detached(
+          icon: CarbonIcons.share,
+          label: 'Share',
+          onPressed: () => detached(
             'FileDownload',
             'share',
             () => shareFileContent(context, content),

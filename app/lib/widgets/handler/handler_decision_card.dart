@@ -1,9 +1,6 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
 import '../../models/handler_state.dart';
 import 'handler_ask_footer.dart';
 import 'handler_layout.dart';
@@ -117,7 +114,11 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
+    final colors = theme.colors;
+    final helper = theme.typography.helper.copyWith(
+      color: colors.textSecondary,
+    );
     final e = widget.escalation;
     final choices = e.choices ?? const <HandlerEscalationChoice>[];
     // Both halves of the ask test, together, at the one place that draws
@@ -128,22 +129,8 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
         ? (e.askOptions ?? const <HandlerAskOption>[])
         : const <HandlerAskOption>[];
     final answering = _pending != null;
-    // Full-bleed band, not a floating card: the horizontal margin it used to
-    // carry stacked on top of the row gutter, so a card and the free-text
-    // escalation directly beneath it in the same section could never share a
-    // left edge. The `bgSurface` fill still marks it as the actionable block.
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: handlerGutter,
-        vertical: AbTokens.space12,
-      ),
-      decoration: BoxDecoration(
-        color: p.bgSurface,
-        border: Border(
-          top: BorderSide(color: p.borderDefault),
-          bottom: BorderSide(color: p.borderDefault),
-        ),
-      ),
+    const gap = SizedBox(height: CarbonSpacing.spacing03);
+    return HandlerBand(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -151,18 +138,21 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               HandlerRail(
-                icon: e.floorRule != null ? AbIcons.shield : null,
-                color: p.warning,
+                icon: e.floorRule != null ? CarbonIcons.security : null,
+                color: colors.supportWarning,
               ),
-              const SizedBox(width: AbTokens.space8),
+              const SizedBox(width: CarbonSpacing.spacing03),
               Expanded(
                 child: Text(
                   e.question,
-                  style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
+                  style: theme.typography.body.copyWith(
+                    color: colors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               if (widget.trailing != null) ...[
-                const SizedBox(width: AbTokens.space8),
+                const SizedBox(width: CarbonSpacing.spacing03),
                 widget.trailing!,
               ],
             ],
@@ -172,17 +162,13 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
           Padding(
             padding: const EdgeInsets.only(left: handlerRailInset),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (e.floorRule != null) ...[
-                  const SizedBox(height: AbTokens.space2),
+                  const SizedBox(height: CarbonSpacing.spacing01),
                   Text(
                     'Safety floor: ${e.floorRule}',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      fontWeight: FontWeight.w600,
-                      color: p.warning,
-                    ),
+                    style: helper.copyWith(fontWeight: FontWeight.w600),
                   ),
                 ],
                 // Justification for reading afterward, not input to the
@@ -190,19 +176,15 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                 // `reason` is the only place a stopped session explains
                 // itself.
                 if (e.reasoning.trim().isNotEmpty) ...[
-                  const SizedBox(height: AbTokens.space2),
+                  const SizedBox(height: CarbonSpacing.spacing01),
                   HandlerWhyDisclosure(escalation: e),
                 ],
-                if (e.nonBlocking)
-                  Text(
-                    handlerAskLatencyNote,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: p.textMuted,
-                    ),
-                  ),
+                if (e.nonBlocking) ...[
+                  const SizedBox(height: CarbonSpacing.spacing01),
+                  Text(handlerAskLatencyNote, style: helper),
+                ],
                 for (final c in choices) ...[
-                  const SizedBox(height: AbTokens.space8),
+                  gap,
                   _ChoiceRow(
                     choice: c,
                     pending: _pending == c.choiceId,
@@ -212,7 +194,7 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                   ),
                 ],
                 for (final o in askOptions) ...[
-                  const SizedBox(height: AbTokens.space8),
+                  gap,
                   _AskOptionRow(
                     option: o,
                     pending: _pending == o.choiceId,
@@ -221,14 +203,16 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                         : () => _tap(o.choiceId, widget.onAskOption),
                   ),
                 ],
-                if (widget.footer != null) ...[
-                  const SizedBox(height: AbTokens.space8),
-                  widget.footer!,
-                ],
-                const SizedBox(height: AbTokens.space8),
-                AbButton(
-                  label: handlerCustomReplyLabel,
-                  onTap: widget.onCustomReply,
+                if (widget.footer != null) ...[gap, widget.footer!],
+                gap,
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: CarbonButton(
+                    label: handlerCustomReplyLabel,
+                    kind: CarbonButtonKind.ghost,
+                    size: CarbonButtonSize.small,
+                    onPressed: widget.onCustomReply,
+                  ),
                 ),
               ],
             ),
@@ -252,38 +236,37 @@ class _ChoiceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        AbButton(
+        // Full width and unclamped: the judge's own words replace a fixed
+        // literal here and may run long enough to want more than one line.
+        CarbonButton(
           label: pending ? handlerChoiceSendingLabel : choice.label,
-          // Needs a bounded width, which a Column gives and a Row does not —
-          // the judge's own words replace a fixed literal here and may run
-          // long enough to want more than one line.
-          wrapLabel: true,
-          onTap: onTap,
+          kind: CarbonButtonKind.tertiary,
+          expand: true,
+          busy: pending,
+          onPressed: onTap,
         ),
         if (choice.cost != null) ...[
-          const SizedBox(height: AbTokens.space2),
+          const SizedBox(height: CarbonSpacing.spacing01),
           Text(
             choice.cost!,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: p.textMuted,
+            style: theme.typography.helper.copyWith(
+              color: theme.colors.textSecondary,
             ),
           ),
         ],
-        const SizedBox(height: AbTokens.space2),
+        const SizedBox(height: CarbonSpacing.spacing01),
         Text(
           choice.text,
-          // Mono, and still deliberately unbounded: this is verbatim what
+          // Code face, and still deliberately unbounded: this is verbatim what
           // lands in the session. The label names it; it does not replace it,
           // and a one-tap the user cannot read is one they cannot refuse.
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            color: p.textMuted,
+          style: theme.typography.code.copyWith(
+            color: theme.colors.textSecondary,
           ),
         ),
       ],
@@ -299,8 +282,8 @@ class _ChoiceRow extends StatelessWidget {
 /// answer and runs to a sentence, so it takes the full width and the cost —
 /// the thing the user weighs it against — sits directly under it.
 ///
-/// The cost is sans, never mono: nothing on this row reaches a session, and the
-/// mono face on this screen is what says a string is verbatim wire data.
+/// The cost is sans, never code: nothing on this row reaches a session, and the
+/// code face on this screen is what says a string is verbatim wire data.
 class _AskOptionRow extends StatelessWidget {
   const _AskOptionRow({
     required this.option,
@@ -314,31 +297,29 @@ class _AskOptionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
+    final theme = CarbonTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        AbButton(
+        CarbonButton(
           label: pending ? handlerChoiceSendingLabel : option.label,
           // The judge's own pick takes the card's primary treatment. Safe here
           // and not on a quick choice for the reason the class doc gives: a tap
           // sends the agent nothing, so an emphasis that turns out to be wrong
           // costs the user a sentence in a prompt, not a command in a shell.
-          variant: option.recommended
-              ? AbButtonVariant.primary
-              : AbButtonVariant.normal,
-          // A whole answer, not a verb — see [AbButton.wrapLabel]. The Column
-          // above is what bounds it.
-          wrapLabel: true,
-          onTap: onTap,
+          kind: option.recommended
+              ? CarbonButtonKind.primary
+              : CarbonButtonKind.tertiary,
+          expand: true,
+          busy: pending,
+          onPressed: onTap,
         ),
-        const SizedBox(height: AbTokens.space2),
+        const SizedBox(height: CarbonSpacing.spacing01),
         Text(
           option.cost,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXs,
-            color: p.textMuted,
+          style: theme.typography.helper.copyWith(
+            color: theme.colors.textSecondary,
           ),
         ),
       ],

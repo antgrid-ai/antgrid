@@ -1,5 +1,6 @@
 import { JsonRpcEndpoint } from "./jsonrpc-stdio";
 import { resolveToolLaunchPath } from "../launch-path";
+import { raceTimeout } from "../race-timeout";
 import {
   killChildTree,
   processGroupSpawn,
@@ -22,28 +23,6 @@ const CODEX_EOF_GRACE_MS = 2_000;
 
 /** Ceiling on waiting out the reap after the tree kill — see the kill impl. */
 const CODEX_REAP_CEILING_MS = 5_000;
-
-/**
- * `true` when `p` settles within `ms`, `false` once the budget is spent.
- *
- * `Bun.sleep` cannot be cancelled, and both races here are normally won by the
- * process exiting — so the loser's timer would go on holding the event loop
- * open for the rest of its budget, which a shutdown then spends waiting on a
- * codex that has already gone.
- */
-async function raceTimeout(p: Promise<unknown>, ms: number): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      p.then(() => true),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 export interface SpawnedCodex {
   endpoint: JsonRpcEndpoint;

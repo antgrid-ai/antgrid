@@ -98,16 +98,38 @@ production preference before those gates pass.
 
 ### The session bus
 
-Agent-to-agent frames (`session-bus:*`) never cross machines by themselves. The
-sending bridge hands every outbound bus frame to its loopback owner socket and
-nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
-`capabilities.sessionBusCarrier` on its hello: the initiating machine's desktop
-app is the only carrier, and it forwards the frame verbatim onto the target
-machine's own relay connection. The receiving bridge answers on the one app
-session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
-broadcast, so the traffic is invisible to the human's phone by design. There is
-no separate spec document: the host-side invariants are in `bridge/AGENTS.md`,
-and the rest is documented at its definitions under `bridge/src/session-bus/`.
+Agent-to-agent frames (`session-bus:*`) cross machines only through the relay's
+queue, sealed. The sending bridge seals each frame to the recipient machine's
+bus key (published in the account's machine directory) and sends it on its
+central control socket; the relay holds the ciphertext until the recipient's
+bridge is connected, and cannot read it. The receiving bridge opens it, verifies
+who sent it, records it so a resend is idempotent, applies its own gates, and
+answers with a signed ack. Delivery is at-least-once, and an ack means the
+recipient's store has the frame, not that its agent has read it. The app is not
+on this path, and a phone never sees the traffic. There is no separate spec
+document: the host-side invariants are in `bridge/AGENTS.md`, and the rest is
+documented at its definitions under `bridge/src/session-bus/`.
+
+`antgrid_notify` is the only session-message send operation. A new exchange
+requires `to`; a reply supplies `threadId` and resolves its recipient from the
+thread. Messages enter the persistent delivery queue automatically, immediately
+when idle or at the next turn boundary. `antgrid_thread` retains exchange history
+and delivery receipts.
+
+Known stopped remote targets are started with the authenticated `session.start`
+request, without an initial prompt. Validation and pair-budget checks precede
+wake; concurrent starts for one target are coalesced, and membership, access and
+budget are checked again before each message is sent. The request retains its
+remote-access, agent-reach, orchestrator, project-catalog and session-eligibility
+checks, timeout and retries. Unknown liveness never triggers a speculative start.
+
+The notify-only rollout removes post, reply and inbox tools/routes and the app's
+Messages surface, without compatibility aliases. Legacy post frames are rejected.
+The bus database schema bump follows the pre-release reset policy: all versioned
+bus records are cleared, including history, threads, deliveries and artifact
+records; the old mailbox table is dropped rather than migrated. Ship bridge and
+app together and restart existing agent sessions to refresh cached MCP tools and
+instructions after upgrading.
 
 ## Checkout-scoped routing
 
@@ -270,6 +292,15 @@ Terminal qualification commands live in `bridge/package.json` and `evals/package
 
 ## Shared packages (`packages/`)
 
+- **`antgrid-memory`** — MPL-2.0 Bun workspace for local memory contracts,
+  SQLite/FTS5 storage, access policy, lifecycle, bounded retrieval, and export.
+  `bridge/src/memory.ts` supplies verified local-profile/session/checkout context;
+  the package never imports bridge. Its database lives under the local profile's
+  `memory/`, outside projects and disposable checkouts. The separate
+  `memory-mcp` entry point forwards tools to the host service; app inspection
+  uses the authenticated machine payload transport (native `memory.request` RPC
+  or the local control listener).
+
 - **`antgrid-agents`** - MPL-2.0 Bun workspace for agent contracts, built-in adapters,
   shared chat runtime, and integration assets. Bridge consumes public exports;
   this package never imports bridge. Terminal preparation accepts conversation
@@ -349,7 +380,7 @@ worktree:
           CI: "1"
     timeoutMs: 600000      # the whole run, not per step (default 10 min)
     onFailure: warn        # the only value v1 accepts
-    startAgent: afterSetup # or `immediate` — default afterSetup
+    startAgent: immediate  # or `afterSetup` — default immediate
 ```
 
 - A step carries **either** `copy` **or** `run`, never both, and `name` is
@@ -370,19 +401,20 @@ worktree:
   version whose UI has an escape hatch from a session wedged behind setup. A
   failed run never blocks the agent — it leaves a persistent banner.
 - `startAgent` decides whether this session's agent WAITS for the run.
-  `afterSetup` (the default) queues the `session:start` and fires it when the
-  run settles; the entry reports `running: false` with `setup.pendingStart` for
-  the whole run, which is what the app's provisioning pane and its auto-start
-  guards read. `immediate` launches the agent alongside the first step.
-  **Nothing orders the two PTYs**: the agent can beat a `copy:` step, so a
-  project whose first step carries `.env` in should expect it to be absent for
-  the agent's first seconds — which is why the wait is the default rather than
-  something inferred from how fast a given project's steps happen to be. The
+  `immediate` (the default) launches the agent alongside the first step.
+  `afterSetup` queues the `session:start` and fires it when the run settles;
+  the entry reports `running: false` with `setup.pendingStart` for the whole
+  run, which is what the app's provisioning pane and its auto-start guards
+  read. **Nothing orders the two PTYs**: under `immediate` the agent can beat a
+  `copy:` step, so a project whose first step carries `.env` in should expect
+  it to be absent for the agent's first seconds, and a project whose agent must
+  not see a half-built tree sets `afterSetup`. The
   `services:` deferral is a SEPARATE axis and is not lifted by `immediate`:
   `bun run dev` against an unprovisioned `node_modules` fails with nobody
-  watching, unlike an agent. Per-run, the banner's `Start agent now` releases a
-  waiting agent by hand (the `skip` verb), so `immediate` is that choice made
-  once in config rather than a new capability.
+  watching, unlike an agent. Per-run, `Start now` (on the waiting pane, or the
+  setup strip in a chat session) releases a waiting agent by hand (the `skip`
+  verb), so `immediate` is that choice made once in config rather than a new
+  capability.
 - Like the rest of the block, `startAgent` is branch-supplied. It decides only
   whether the agent waits, never what it runs — the `agent:` block already
   supplied that, and `run:` steps are already the same trust class as

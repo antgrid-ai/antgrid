@@ -107,7 +107,6 @@ test("serializeOpencodeSession never selects credential tables and allowlists in
 
 test("opencodeFork keeps the native fork contract and declares a snapshot", () => {
   expect(opencodeFork.kind).toBe("native-fork");
-  expect(opencodeFork.nativeForkArgs("ses_x")).toEqual(["--session", "ses_x", "--fork"]);
   expect(opencodeFork.decodeLegacyArgs?.(["--session", "ses_x", "--fork"])).toBe("ses_x");
   expect(opencodeFork.snapshot).toBe(opencodeSnapshot);
 });

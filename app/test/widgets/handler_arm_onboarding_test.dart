@@ -1,9 +1,8 @@
 import 'dart:async';
 
 import 'package:antgrid/billing/pricing_visibility.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -14,21 +13,17 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/handler_discovery.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/session_opening_prompt.dart';
-import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import '../helpers/fake_project_session.dart';
-import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
-import 'package:antgrid/widgets/handler/handler_judge_chip.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -372,15 +367,6 @@ void main() {
     });
   });
 
-  group('shieldShowsLabel', () {
-    test('labels only before the first arm and never while armed', () {
-      expect(shieldShowsLabel(armedOnce: false, sessionArmed: false), isTrue);
-      expect(shieldShowsLabel(armedOnce: true, sessionArmed: false), isFalse);
-      expect(shieldShowsLabel(armedOnce: false, sessionArmed: true), isFalse);
-      expect(shieldShowsLabel(armedOnce: true, sessionArmed: true), isFalse);
-    });
-  });
-
   testWidgets('away hint renders its banner and dismiss persists the kill', (
     tester,
   ) async {
@@ -404,9 +390,14 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('ARM'), findsOneWidget);
+    expect(find.text('Arm'), findsOneWidget);
 
-    await tester.tap(find.byTooltip("Dismiss — won't show again"));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) =>
+            w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
+      ),
+    );
     await tester.pump();
     final container = ProviderScope.containerOf(
       tester.element(find.byType(HandlerAwayHint)),
@@ -425,6 +416,11 @@ void main() {
       bool armedOnce = false,
       List<Override> extraOverrides = const [],
     }) async {
+      // The sheet scrolls, but these tests tap its commit button where it is,
+      // and Apple-scale text makes the sheet taller than the default 600px.
+      tester.view.physicalSize = const Size(800, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
       useInMemoryPrefs();
       final store = await FirstRunStore.open();
       if (armedOnce) {
@@ -465,8 +461,12 @@ void main() {
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
             builder: _appToastHost,
+            // Under a Carbon scope, as the session kebab's scope is: the sheets
+            // are Carbon modals and take their theme from the presenting context.
             home: const Scaffold(
-              body: SizedBox.shrink(key: ValueKey('probe')),
+              body: AbCarbonScope(
+                child: SizedBox.shrink(key: ValueKey('probe')),
+              ),
             ),
           ),
         ),
@@ -505,7 +505,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
     }
 
@@ -615,7 +615,7 @@ void main() {
         isEmpty,
       );
 
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport)['armed'], true);
       await confirmArmed(tester, transport);
@@ -636,7 +636,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Proof it works'));
       await tester.pumpAndSettle();
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -673,7 +673,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Stays in scope'));
       await tester.pumpAndSettle();
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -761,6 +761,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      // The modal body scrolls under its footer; the lens sits past the fold.
+      await tester.ensureVisible(find.text('Your own'));
+      await tester.pump();
       await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -780,7 +783,7 @@ void main() {
         'not done until the tests pass\nask before the payment path',
       );
 
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -815,17 +818,20 @@ void main() {
       await tester.pumpAndSettle();
       // "Your own" reveals the panel — the free-text field is no longer always
       // on screen.
+      // The modal body scrolls under its footer; the lens sits past the fold.
+      await tester.ensureVisible(find.text('Your own'));
+      await tester.pump();
       await tester.tap(find.text('Your own'));
       await tester.pumpAndSettle();
       await tester.enterText(
-        find.byType(AbTextField),
+        find.byKey(const ValueKey('handlerOwnLensField')),
         '  watch the migrations  ',
       );
       await tester.pumpAndSettle();
       // The panel's minimum three lines push the button past the fold that
       // fit it before the redesign, so it needs a scroll into view rather
       // than a bare tap.
-      final armButton = find.widgetWithText(AbButton, 'Arm Handler');
+      final armButton = find.widgetWithText(CarbonButton, 'Arm Handler');
       await tester.ensureVisible(armButton);
       await tester.pumpAndSettle();
       await tester.tap(armButton);
@@ -876,17 +882,17 @@ void main() {
       if (kPricingSurfacesEnabled) {
         expect(find.text('Handler needs Pro'), findsOneWidget);
         expect(find.textContaining('Free plan'), findsOneWidget);
-        expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+        expect(find.widgetWithText(CarbonButton, 'See plans'), findsOneWidget);
       } else {
         expect(find.text('Handler is unavailable'), findsOneWidget);
         expect(find.textContaining('Pro'), findsNothing);
-        expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+        expect(find.widgetWithText(CarbonButton, 'See plans'), findsNothing);
       }
-      expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Arm Handler'), findsNothing);
 
       await tester.tap(
         find.widgetWithText(
-          AbButton,
+          CarbonButton,
           kPricingSurfacesEnabled ? 'Not now' : 'Close',
         ),
       );
@@ -914,10 +920,10 @@ void main() {
       // A purchase buys nothing here, and a button offering one would teach the
       // user the wrong thing about what went wrong.
       expect(find.text('Handler is unavailable'), findsOneWidget);
-      expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
-      expect(find.widgetWithText(AbButton, 'Close'), findsOneWidget);
+      expect(find.widgetWithText(CarbonButton, 'See plans'), findsNothing);
+      expect(find.widgetWithText(CarbonButton, 'Close'), findsOneWidget);
 
-      await tester.tap(find.widgetWithText(AbButton, 'Close'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Close'));
       await tester.pumpAndSettle();
       expect(
         transport.sent.where((m) => m['type'] == 'handler:configure'),
@@ -980,7 +986,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Not now'));
       await tester.pumpAndSettle();
 
       expect(
@@ -1032,7 +1038,7 @@ void main() {
         find.text('Your backlog starts with: fix the flaky login test'),
         findsOneWidget,
       );
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport)['goal'], 'fix the flaky login test');
       await confirmArmed(tester, transport);
@@ -1060,7 +1066,7 @@ void main() {
         find.textContaining('Handler watches this session while'),
         findsOneWidget,
       );
-      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport).containsKey('goal'), isFalse);
       await confirmArmed(tester, transport);
@@ -1103,7 +1109,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         // The arm went; the instruction did not go with it.
@@ -1120,7 +1126,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await confirmArmed(tester, transport);
 
@@ -1137,7 +1143,7 @@ void main() {
 
         // Arming with nothing typed is the ordinary case, and an empty
         // `handler:instruct` would spend an extraction pass on nothing.
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await confirmArmed(tester, transport);
 
@@ -1163,7 +1169,7 @@ void main() {
         );
         await openSheet(tester, container, context);
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         container
@@ -1204,7 +1210,7 @@ void main() {
         );
         await openSheet(tester, container, context);
         container.read(_armFocus.notifier).set('q');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         bool arms(FakeAgentTransport t) =>
@@ -1259,7 +1265,7 @@ void main() {
         await openSheet(tester, container, context);
 
         await tester.enterText(field, 'also update the changelog');
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
         await tester.pump(kHandlerArmConfirmWindow + const Duration(seconds: 1));
         await tester.pumpAndSettle();
@@ -1284,7 +1290,7 @@ void main() {
         );
         container.read(_armFocus.notifier).set('q');
         await openSheet(tester, container, context);
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         expect(find.text('Handler not armed'), findsOneWidget);
@@ -1311,17 +1317,12 @@ void main() {
         );
         await openSheet(tester, container, context);
 
-        await tester.tap(find.byType(HandlerJudgeChip));
+        await tester.tap(find.byType(CarbonMenuButton));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Codex'));
         await tester.pumpAndSettle();
-        // The panel stays open on a judge pick — the model is the next thing
-        // the user may want — so it has to be dismissed before the sheet's own
-        // commit is reachable.
-        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-        await tester.pumpAndSettle();
 
-        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.tap(find.widgetWithText(CarbonButton, 'Arm Handler'));
         await tester.pumpAndSettle();
 
         final configures = transport.sent
@@ -1332,43 +1333,6 @@ void main() {
 
         await confirmArmed(tester, transport);
       });
-    });
-  });
-
-  group('HandlerHeaderControl shield form', () {
-    List<Override> overrides(FirstRunStore store) => [
-      firstRunStoreProvider.overrideWithValue(store),
-      activeSessionIdProvider.overrideWith(
-        () => ValueController<String?>('t1'),
-      ),
-      activeSessionProvider.overrideWith((_) => null),
-      handlerStateProvider.overrideWith(
-        (_) => Stream.value(const HandlerState.initial()),
-      ),
-    ];
-
-    testWidgets('labeled Handler button before the first arm', (tester) async {
-      useInMemoryPrefs();
-      final store = await FirstRunStore.open();
-      await tester.pumpWidget(
-        _wrap(const HandlerHeaderControl(), overrides: overrides(store)),
-      );
-      await tester.pump();
-      expect(find.text('Handler'), findsOneWidget);
-    });
-
-    testWidgets('collapses to the bare shield once armed anywhere', (
-      tester,
-    ) async {
-      useInMemoryPrefs();
-      final store = await FirstRunStore.open();
-      await store.write(const FirstRunState(handlerArmedOnce: true));
-      await tester.pumpWidget(
-        _wrap(const HandlerHeaderControl(), overrides: overrides(store)),
-      );
-      await tester.pump();
-      expect(find.text('Handler'), findsNothing);
-      expect(find.byTooltip('Arm Handler'), findsOneWidget);
     });
   });
 }

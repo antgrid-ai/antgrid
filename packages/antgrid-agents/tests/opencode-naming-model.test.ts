@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { NamingModelProbe } from "../src/agents/types";
 import {
-  parseVerboseModels, resolveOpencodeNamingModel, smallModelFor, type OpencodeModel,
+  parseVerboseModels, resolveOpencodeNamingModel, resolveOpencodeV1FamilyNamingModel, smallModelFor, type OpencodeModel,
 } from "../src/agents/opencode/naming-model";
 import { resolveKiloNamingModel } from "../src/agents/kilo/naming-model";
 
@@ -59,17 +59,17 @@ const API_OPENAI = [
   m("openai", "gpt-5.4-nano", "gpt-nano", "2026-03-17"),
 ];
 
-describe("resolveOpencodeNamingModel", () => {
+describe("resolveOpencodeV1FamilyNamingModel (opencode 1.19.5's path, kept by Kilo)", () => {
   test("a provider with no small family leaves the call on opencode's default", async () => {
     // What opencode's own titling does here too: getSmallModel finds nothing,
     // so the title runs on the session's model.
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: {}, models: CHATGPT_OPENAI, recent: [["openai", "gpt-6.1-sol"]],
     }))).toBeUndefined();
   });
 
   test("an API-key openai provider names with its newest gpt-nano", async () => {
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: {}, models: API_OPENAI, recent: [["openai", "gpt-6.1-sol"]],
     }))).toBe("openai/gpt-5.4-nano");
   });
@@ -81,41 +81,41 @@ describe("resolveOpencodeNamingModel", () => {
       m("anthropic", "claude-haiku-5-5", "claude-haiku", "2026-08-01"),
       m("anthropic", "claude-sonnet-5", "claude-sonnet", "2026-08-01"),
     ];
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: { model: "anthropic/claude-sonnet-5" }, models, recent: [["openai", "gpt-6.1-sol"]],
     }))).toBe("anthropic/claude-haiku-5-5");
   });
 
   test("a recent model the provider no longer lists is skipped", async () => {
     const models = [...API_OPENAI, m("anthropic", "claude-haiku-5-5", "claude-haiku", "2026-08-01")];
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: {}, models, recent: [["openai", "gpt-retired"], ["anthropic", "claude-haiku-5-5"]],
     }))).toBe("anthropic/claude-haiku-5-5");
   });
 
   test("the title agent's model wins over everything", async () => {
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: { agent: { title: { model: "openai/gpt-6-luna" } }, small_model: "openai/gpt-5-nano" },
       models: API_OPENAI, recent: [["openai", "gpt-6.1-sol"]],
     }))).toBe("openai/gpt-6-luna");
   });
 
   test("small_model is used when listed, and an unlisted one stops the search", async () => {
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: { small_model: "openai/gpt-6-luna" }, models: API_OPENAI,
     }))).toBe("openai/gpt-6-luna");
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: { small_model: "openai/gpt-gone" }, models: API_OPENAI, recent: [["openai", "gpt-6.1-sol"]],
     }))).toBeUndefined();
   });
 
   test("an unreadable install resolves to no model rather than a guess", async () => {
-    expect(await resolveOpencodeNamingModel(probe({ config: undefined, models: API_OPENAI }))).toBeUndefined();
-    expect(await resolveOpencodeNamingModel(probe({ config: "not json", models: API_OPENAI }))).toBeUndefined();
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({ config: undefined, models: API_OPENAI }))).toBeUndefined();
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({ config: "not json", models: API_OPENAI }))).toBeUndefined();
     // No configured model and no model.json: opencode's last-resort ranking is
     // not reproducible from the CLI, so the call keeps opencode's own default.
-    expect(await resolveOpencodeNamingModel(probe({ config: {}, models: API_OPENAI }))).toBeUndefined();
-    expect(await resolveOpencodeNamingModel(probe({
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({ config: {}, models: API_OPENAI }))).toBeUndefined();
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({
       config: {}, models: API_OPENAI, recent: [["openai", "gpt-6.1-sol"]], paths: "home  /scratch\n",
     }))).toBeUndefined();
   });
@@ -170,7 +170,7 @@ describe("resolveKiloNamingModel", () => {
     expect(await resolveKiloNamingModel(probe({ config: {}, models: KILO_GATEWAY, recent })))
       .toBe("kilo/kilo-auto/small");
     // opencode's rules alone pick the family match, which is what Kilo's own rule overrides.
-    expect(await resolveOpencodeNamingModel(probe({ config: {}, models: KILO_GATEWAY, recent })))
+    expect(await resolveOpencodeV1FamilyNamingModel(probe({ config: {}, models: KILO_GATEWAY, recent })))
       .toBe("kilo/google/gemini-3-flash");
   });
 
@@ -201,4 +201,116 @@ test("parseVerboseModels reads every model, LF or CRLF", () => {
     expect(parsed.map((model) => model.id)).toEqual(API_OPENAI.map((model) => model.id));
     expect(parsed[3]).toEqual(API_OPENAI[3]!);
   }
+});
+
+// OpenCode 2.2.6 `opencode api --standalone <operation>` output: the request's
+// location, then `data`. Field sets as 2.2.6 prints them; the content is invented.
+const LOCATION = { directory: join("scratch", "naming") };
+
+function v2Model(providerID: string, id: string, family?: string, extra: Record<string, unknown> = {}) {
+  return {
+    id, modelID: id, providerID, type: "chat", name: id, ...(family ? { family } : {}),
+    package: "@opencode/ai/providers/openai-compatible", settings: {},
+    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    variants: [], time: { released: 0 }, cost: [], status: "active", enabled: true,
+    limit: { context: 32000, output: 2048 }, ...extra,
+  };
+}
+
+function v2Agent(id: string, model?: Record<string, string>) {
+  return { id, name: id, ...(model ? { model } : {}), request: { settings: {}, headers: {}, body: {} },
+    mode: "primary", hidden: id === "title", permissions: [] };
+}
+
+const V2_AGENTS = ["build", "plan", "general", "explore", "compaction", "title", "summary"].map((id) => v2Agent(id));
+
+function v2Probe(opts: {
+  agents?: unknown[]; defaultModel?: Record<string, unknown>; models?: unknown[]; fail?: string;
+}): NamingModelProbe & { runs: string[][] } {
+  const runs: string[][] = [];
+  const answers: Record<string, unknown> = {
+    "agent.list": { location: LOCATION, data: opts.agents ?? V2_AGENTS },
+    "model.default": opts.defaultModel && { location: LOCATION, data: opts.defaultModel },
+    "model.list": { location: LOCATION, data: opts.models ?? [] },
+  };
+  return {
+    runs,
+    async run(args) {
+      runs.push(args);
+      if (args[0] !== "api" || args[1] !== "--standalone") return undefined;
+      const answer = answers[args[2]!];
+      return args[2] === opts.fail || answer === undefined ? undefined : JSON.stringify(answer, null, 2);
+    },
+    async readText() { return undefined; },
+  };
+}
+
+const SMOKE = [
+  v2Model("smoke", "big"),
+  v2Model("smoke", "flash", "gemini-flash"),
+  v2Model("smoke", "haiku", "claude-haiku"),
+  v2Model("other", "luna", "gpt-luna"),
+];
+
+describe("resolveOpencodeNamingModel (OpenCode 2)", () => {
+  test("every probe runs on a private server, never the shared background service", async () => {
+    // A server-backed command without --standalone starts the user's background
+    // service with this probe's OPENCODE_DB=:memory:, and it stays running.
+    const probe = v2Probe({ defaultModel: SMOKE[0], models: SMOKE });
+    await resolveOpencodeNamingModel(probe);
+    expect(probe.runs.length).toBeGreaterThan(0);
+    for (const args of probe.runs) expect(args).toContain("--standalone");
+  });
+
+  test("the default model's provider names with its first small-family model", async () => {
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: SMOKE[0], models: SMOKE }))).toBe("smoke/flash");
+  });
+
+  test("families rank gpt-luna, gemini-flash-lite, gemini-flash, claude-haiku; catalog order breaks ties", async () => {
+    const models = [
+      v2Model("p", "haiku", "claude-haiku"), v2Model("p", "flash", "gemini-flash"),
+      v2Model("p", "lite-old", "gemini-flash-lite"), v2Model("p", "lite-new", "gemini-flash-lite"),
+    ];
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: v2Model("p", "main"), models }))).toBe("p/lite-old");
+    const luna = [...models, v2Model("p", "luna", "gpt-luna")];
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: v2Model("p", "main"), models: luna }))).toBe("p/luna");
+  });
+
+  test("inactive and non-text models are not small-model candidates", async () => {
+    const models = [
+      v2Model("p", "retired", "gpt-luna", { status: "deprecated" }),
+      v2Model("p", "speech", "gemini-flash", { capabilities: { tools: false, input: ["audio"], output: ["audio"] } }),
+      v2Model("p", "haiku", "claude-haiku"),
+    ];
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: v2Model("p", "main"), models }))).toBe("p/haiku");
+  });
+
+  // 2.2.6 `run --model smoke/tiny#low` ran on that variant; `#nope` failed the
+  // run with "Variant unavailable for smoke/tiny: nope".
+  test("the title agent's model wins, with its variant, when the install knows both", async () => {
+    const titled = (model: Record<string, string>) => [...V2_AGENTS.filter((agent) => agent.id !== "title"), v2Agent("title", model)];
+    const models = [...SMOKE, v2Model("other", "sol", "gpt-sol", { variants: [{ id: "low", settings: { reasoningEffort: "low" } }] })];
+    const agents = titled({ providerID: "other", id: "sol", variant: "low" });
+    expect(await resolveOpencodeNamingModel(v2Probe({ agents, defaultModel: SMOKE[0], models }))).toBe("other/sol#low");
+    expect(await resolveOpencodeNamingModel(v2Probe({ agents: titled({ providerID: "other", id: "sol" }), defaultModel: SMOKE[0], models })))
+      .toBe("other/sol");
+    expect(await resolveOpencodeNamingModel(v2Probe({
+      agents: titled({ providerID: "other", id: "sol", variant: "max" }), defaultModel: SMOKE[0], models,
+    }))).toBeUndefined();
+    const unknown = [...V2_AGENTS.filter((agent) => agent.id !== "title"), v2Agent("title", { providerID: "other", id: "gone" })];
+    expect(await resolveOpencodeNamingModel(v2Probe({ agents: unknown, defaultModel: SMOKE[0], models: SMOKE }))).toBeUndefined();
+  });
+
+  test("no small model, no title agent or an unreadable probe leaves OpenCode's default", async () => {
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: SMOKE[3], models: [SMOKE[3]!, v2Model("other", "big")] })))
+      .toBe("other/luna");
+    expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: v2Model("other", "big"), models: [v2Model("other", "big")] })))
+      .toBeUndefined();
+    expect(await resolveOpencodeNamingModel(v2Probe({
+      agents: V2_AGENTS.filter((agent) => agent.id !== "title"), defaultModel: SMOKE[0], models: SMOKE,
+    }))).toBeUndefined();
+    for (const fail of ["agent.list", "model.default", "model.list"]) {
+      expect(await resolveOpencodeNamingModel(v2Probe({ defaultModel: SMOKE[0], models: SMOKE, fail }))).toBeUndefined();
+    }
+  });
 });

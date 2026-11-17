@@ -1,5 +1,8 @@
 import { describe, it, expect } from "bun:test";
-import { TOOL_UPDATE_SPECS, updateSpecFor, fetchNpmLatest } from "../src/update/specs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TOOL_UPDATE_SPECS, updateSpecFor, fetchNpmLatest, execToolUpdate, type ToolUpdateSpec } from "../src/update/specs";
 
 // The per-tool table is the whole point of this module: a wrong subcommand
 // (opencode `upgrade` vs `update`) or npm package silently breaks that tool's
@@ -9,9 +12,13 @@ describe("TOOL_UPDATE_SPECS", () => {
     expect(TOOL_UPDATE_SPECS.codex).toMatchObject({
       npmPackage: "@openai/codex", command: "codex", updateArgs: ["update"],
     });
-    expect(TOOL_UPDATE_SPECS.opencode).toMatchObject({
-      npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"],
-    });
+    // OpenCode 2 is published as @opencode/cli; `opencode-ai` stays on 1.x.
+    expect(TOOL_UPDATE_SPECS.opencode).toMatchObject({ npmPackage: "@opencode/cli", command: "opencode" });
+    const opencode = TOOL_UPDATE_SPECS.opencode!;
+    const opencodeArgs = "updateArgs" in opencode ? opencode.updateArgs : null;
+    if (typeof opencodeArgs !== "function") throw new Error("Expected version-aware opencode updater args");
+    expect(opencodeArgs("1.19.0")).toEqual(["upgrade", "--major"]);
+    expect(opencodeArgs("2.2.6")).toEqual(["upgrade"]);
     expect(TOOL_UPDATE_SPECS["claude-code"]).toMatchObject({
       npmPackage: "@anthropic-ai/claude-code", command: "claude", updateArgs: ["update"],
     });
@@ -26,13 +33,35 @@ describe("TOOL_UPDATE_SPECS", () => {
 
 describe("updateSpecFor", () => {
   it("returns the spec for a supported tool", () => {
-    expect(updateSpecFor("opencode")).toMatchObject({ updateArgs: ["upgrade"] });
+    expect(updateSpecFor("opencode")).toMatchObject({ npmPackage: "@opencode/cli" });
     expect(updateSpecFor("claude-code")).toMatchObject({ command: "claude" });
   });
 
   it("returns null for a tool with no self-updater (fail-soft upstream)", () => {
     expect(updateSpecFor("github-copilot")).toBeNull();
     expect(updateSpecFor("nonsense")).toBeNull();
+  });
+});
+
+describe("execToolUpdate", () => {
+  it("picks version-aware updater args from the installed binary's --version", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-update-args-"));
+    try {
+      const echo = join(dir, "echo-argv.ts");
+      writeFileSync(echo, "console.log(process.argv.slice(2).join(' '));");
+      const seen: Array<string | null> = [];
+      // The bun binary stands in for the agent CLI: its `--version` is a plain
+      // semver, and `bun <script> ...` echoes the args the updater was given.
+      const spec: ToolUpdateSpec = {
+        tool: "fixture", npmPackage: "fixture", command: process.execPath,
+        updateArgs: (installed) => { seen.push(installed); return [echo, "upgrade", installed ? "--from-known" : "--from-unknown"]; },
+      };
+      const result = await execToolUpdate(spec);
+      expect(result).toEqual({ exitCode: 0, output: "upgrade --from-known" });
+      expect(seen).toEqual([Bun.version]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

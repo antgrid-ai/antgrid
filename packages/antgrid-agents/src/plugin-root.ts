@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic-file";
+import * as memoryGuidance from "../assets/memory-guidance";
 // Bun embeds text imports in compiled executables; TypeScript resolves the source module instead.
 // @ts-expect-error Bun's text loader returns source text.
 import opencode from "../assets/opencode/plugin.ts" with { type: "text" };
@@ -21,7 +22,12 @@ const assets: Record<string, string> = {
   "hooks/on-stop": onStop,
   "hooks/on-notification": onNotification,
   "hooks/_resolve-api-port.sh": resolvePort,
-  "opencode/plugin.ts": opencode,
+  "opencode/plugin.ts": opencode as unknown as string,
+  "opencode/package.json": '{"name":"@antgrid/opencode-plugin","type":"module","exports":{"./server":"./plugin.ts"}}\n',
+  // Bun cannot bundle one file with both the text and TypeScript loaders.
+  // Generated from every export, so the plugin's imports cannot outgrow it.
+  "memory-guidance.ts": `// SPDX-License-Identifier: MPL-2.0\n${Object.entries(memoryGuidance)
+    .map(([name, value]) => `export const ${name} = ${JSON.stringify(value)};\n`).join("")}`,
   "kilo/plugin.ts": kilo,
   "antigravity/post-title.js": antigravity,
   "package.json": '{"type":"module"}\n',

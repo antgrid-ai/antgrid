@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
@@ -26,26 +27,31 @@ Widget _host({List<PickerSource>? sources}) {
     overrides: [pickerSourcesProvider.overrideWithValue(sources ?? _sources)],
     child: MaterialApp(
       theme: buildAbTheme(),
-      home: const Scaffold(body: Center(child: EnvironmentChip())),
+      home: const Scaffold(
+        body: Center(child: AbCarbonScope(child: EnvironmentChip())),
+      ),
     ),
   );
 }
 
 void main() {
-  testWidgets('chip shows the visible source and panel lists grouped sources', (
+  testWidgets('chip shows the visible source and menu lists grouped sources', (
     tester,
   ) async {
     await tester.pumpWidget(_host());
     await tester.pumpAndSettle();
 
+    // Only the trigger names the source before the menu opens.
     expect(find.text('Local'), findsOneWidget);
+    expect(find.text('Machines'), findsNothing);
 
     await tester.tap(find.byType(EnvironmentChip));
     await tester.pumpAndSettle();
 
-    expect(find.text('LOCAL'), findsOneWidget);
-    expect(find.text('MACHINES'), findsOneWidget);
+    expect(find.text('Machines'), findsOneWidget);
     expect(find.text('Buildbox'), findsOneWidget);
+    // Trigger + group heading + radio row.
+    expect(find.text('Local'), findsNWidgets(3));
   });
 
   testWidgets(
@@ -65,36 +71,34 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(container.read(selectedSourceIdProvider), 'machine:M');
-      expect(find.text('MACHINES'), findsNothing);
+      expect(find.text('Machines'), findsNothing);
     },
   );
 
-  testWidgets(
-    'panel rows are keyboard-operable (Tab to focus, Enter to select)',
-    (tester) async {
-      await tester.pumpWidget(_host());
-      await tester.pumpAndSettle();
+  testWidgets('menu rows are keyboard-operable (arrow to focus, Enter)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_host());
+    await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(EnvironmentChip));
-      await tester.pumpAndSettle();
+    await tester.tap(find.byType(EnvironmentChip));
+    await tester.pumpAndSettle();
 
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(EnvironmentChip)),
-      );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(EnvironmentChip)),
+    );
 
-      // Tab focuses the first focusable panel row (the "Local" source), then
-      // Enter activates it — the regression this guards is PanelRow being a
-      // bare GestureDetector with no focus/keyboard path (mouse-only).
-      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-      await tester.pumpAndSettle();
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pumpAndSettle();
+    // The menu focuses its first row (Local) on open; one arrow reaches the
+    // machine. Choosing Buildbox rather than the default proves Enter acts on
+    // the focused row and not merely on the first one.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
 
-      expect(container.read(selectedSourceIdProvider), 'local');
-      // Activating a row closes the panel, same as a tap.
-      expect(find.text('MACHINES'), findsNothing);
-    },
-  );
+    expect(container.read(selectedSourceIdProvider), 'machine:M');
+    expect(find.text('Machines'), findsNothing);
+  });
 
   testWidgets('no machines shows a hint instead of rows', (tester) async {
     await tester.pumpWidget(
@@ -114,7 +118,7 @@ void main() {
     await tester.tap(find.byType(EnvironmentChip));
     await tester.pumpAndSettle();
 
-    expect(find.text('MACHINES'), findsOneWidget);
+    expect(find.text('Machines'), findsOneWidget);
     expect(find.text('No machines on this account'), findsOneWidget);
   });
 }

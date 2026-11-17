@@ -11,6 +11,8 @@
 // forms, and operators and redirections (`&`, `|`, `2>NUL`), which stay
 // literal text.
 
+import { resolveToolLaunchPath } from "./launch-path";
+
 /** cmd.exe expands `%ANTGRID_CMDLINE%` once and never rescans what it held. */
 export const WINDOWS_CMDLINE_ENV = "ANTGRID_CMDLINE";
 
@@ -110,4 +112,21 @@ export function splitWindowsCommandLine(line: string): string[] {
   }
   if (started) argv.push(current);
   return argv;
+}
+
+/** Starts `command` directly, or through the cmd.exe carrier when it resolves
+ * to a .cmd/.bat shim (an npm install): only cmd.exe can start one, and it would
+ * parse a joined argv as its own syntax, so a path's spaces, `&` or `%` would
+ * break the call or run a command. */
+export function toolSpawnArgs(
+  command: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+): { cmd: string[]; env: Record<string, string | undefined> } {
+  const program = resolveToolLaunchPath(command, env.PATH ?? env.Path);
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(program)) return { cmd: [program, ...args], env };
+  return {
+    cmd: [env.ComSpec ?? "cmd.exe", ...WINDOWS_CMD_CARRIER_ARGS],
+    env: { ...env, [WINDOWS_CMDLINE_ENV]: [cmdProgramToken(program), ...args.map((arg) => escapeCmdArg(arg, true))].join(" ") },
+  };
 }

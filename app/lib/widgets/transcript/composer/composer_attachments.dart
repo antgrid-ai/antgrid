@@ -6,7 +6,10 @@ import '../../../design/ab_colors.dart';
 import '../../../design/ab_icons.dart';
 import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_icon_button.dart';
+import '../../../design/widgets/ab_loading.dart';
+import '../../../design/widgets/ab_progress_rule.dart';
 import '../../../design/widgets/ab_tap_target.dart';
+import '../../attach_progress.dart';
 
 enum AttachmentStatus { uploading, done, error }
 
@@ -30,7 +33,9 @@ class ComposerAttachment {
   Uint8List? bytes;
 
   AttachmentStatus status = AttachmentStatus.uploading;
-  double progress = 0;
+
+  /// Read only while [status] is uploading.
+  late AttachProgress progress = AttachProgress.staging(fileName);
 
   /// Absolute path on the bridge machine — what the prompt text references.
   String? path;
@@ -146,6 +151,7 @@ class _AttachmentLabel extends StatelessWidget {
     final p = context.antgrid;
     final a = attachment;
     final thumbnail = a.thumbnail;
+    final uploading = a.status == AttachmentStatus.uploading;
     final label = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -164,10 +170,13 @@ class _AttachmentLabel extends StatelessWidget {
           ),
           const SizedBox(width: AbTokens.space6),
         ],
+        if (uploading) ...[
+          AbLoadingDot(size: AbTokens.dotSizeMd, color: p.accent),
+          const SizedBox(width: AbTokens.space6),
+        ],
         Text(
           switch (a.status) {
-            AttachmentStatus.uploading =>
-              '${a.fileName} ${(a.progress * 100).round()}%',
+            AttachmentStatus.uploading => a.progress.label,
             AttachmentStatus.done => a.fileName,
             AttachmentStatus.error => '${a.fileName} — failed',
           },
@@ -175,13 +184,29 @@ class _AttachmentLabel extends StatelessWidget {
             fontSize: AbTokens.fontXs,
             color: switch (a.status) {
               AttachmentStatus.error => p.error,
-              AttachmentStatus.done => p.textSecondary,
-              AttachmentStatus.uploading => p.textMuted,
+              AttachmentStatus.done ||
+              AttachmentStatus.uploading => p.textSecondary,
             },
           ),
         ),
       ],
     );
+    if (uploading) {
+      // Hung below the label rather than stacked under it: the chip keeps the
+      // height it settles at, so the Wrap does not reflow when it finishes.
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          label,
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: -AbTokens.space4,
+            child: AbProgressRule(fraction: a.progress.fraction),
+          ),
+        ],
+      );
+    }
     final onPreview = this.onPreview;
     if (onPreview == null) return label;
     return MouseRegion(

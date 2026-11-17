@@ -4,9 +4,6 @@
 // the other does not cover.
 import 'dart:async';
 
-import 'package:antgrid/design/ab_icons.dart';
-import 'package:antgrid/design/widgets/ab_icon.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -20,6 +17,7 @@ import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_escalation_row.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -89,8 +87,10 @@ HandlerState _state({
 
 /// The chevron carries no text, so the icon it draws is the only thing that
 /// identifies it — the idiom `handler_pa_bar_test` uses for the brief marker.
-Finder _chevron(String icon) =>
-    find.byWidgetPredicate((w) => w is AbIcon && w.icon == icon);
+Finder _chevron(CarbonIcons icon) => find.descendant(
+  of: find.byType(CarbonButton),
+  matching: find.byWidgetPredicate((w) => w is CarbonIcon && w.icon == icon),
+);
 
 /// Counts taps that reach the terminal underneath, so the hit-test invariant
 /// (an [Align] rather than a fill-sized barrier) is asserted rather than
@@ -218,12 +218,11 @@ Map<String, dynamic> _escalationJson({
   'kind': ?kind,
 };
 
-/// The plain-row arm of [HandlerEscalationRow], whose `onTap` is the whole
-/// difference between an interactive row and an informational one (see
-/// `AbListRow`'s own doc).
+/// The plain-row arm of [HandlerEscalationRow], whose `onPressed` is the
+/// whole difference between an interactive row and an informational one.
 final Finder _row = find.descendant(
   of: find.byType(HandlerEscalationRow),
-  matching: find.byType(AbListRow),
+  matching: find.byType(CarbonContainedListRow),
 );
 
 /// The advert crosses the transport, the router and the service before the
@@ -349,14 +348,14 @@ void main() {
       escalations: [_escalation('e1', terminalId: 't1', question: 'proceed?')],
     );
 
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
     // The question survives the collapse — the strip has to say what is
     // waiting, or the terminal it uncovered is all the user has to go on.
     expect(find.text('proceed?'), findsOneWidget);
 
-    await tester.tap(_chevron(AbIcons.chevronUp));
+    await tester.tap(_chevron(CarbonIcons.chevronUp));
     await tester.pump();
     expect(find.text('Approve'), findsOneWidget);
   });
@@ -373,7 +372,7 @@ void main() {
       escalations: [_escalation('e1', terminalId: 't1', question: 'proceed?')],
     );
 
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
 
@@ -406,7 +405,7 @@ void main() {
       ],
     );
 
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
 
@@ -456,7 +455,7 @@ void main() {
     );
 
     final terminal = tester.getRect(find.byKey(_terminal));
-    final band = tester.getRect(_chevron(AbIcons.chevronDown));
+    final band = tester.getRect(_chevron(CarbonIcons.chevronDown));
     await tester.tapAt(Offset(terminal.left + 8, band.center.dy));
     await tester.pump();
 
@@ -481,12 +480,12 @@ void main() {
       spy: spy,
     );
 
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
 
     final terminal = tester.getRect(find.byKey(_terminal));
-    final band = tester.getRect(_chevron(AbIcons.chevronUp));
+    final band = tester.getRect(_chevron(CarbonIcons.chevronUp));
     await tester.tapAt(Offset(terminal.left + 8, band.center.dy));
     await tester.pump();
 
@@ -509,7 +508,7 @@ void main() {
       escalations: [_escalation('e1', terminalId: 't1', question: 'proceed?')],
     );
 
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
 
@@ -561,7 +560,7 @@ void main() {
 
     expect(find.text('force push?'), findsOneWidget);
     expect(find.text('rename the file?'), findsNothing);
-    expect(find.text('URGENT'), findsOneWidget);
+    expect(find.text('Urgent'), findsOneWidget);
   });
 
   testWidgets('a one-tap over the terminal reaches the wire', (tester) async {
@@ -600,7 +599,7 @@ void main() {
     tester,
   ) async {
     // The control for the case below: with the service resolved, a row this
-    // surface CAN answer is interactive, so a null `onTap` there is a decision
+    // surface CAN answer is interactive, so a null `onPressed` there is a decision
     // rather than an unresolved harness.
     final t = await _pumpLive(tester);
     t.emit('handler:status', _armedStatusJson());
@@ -608,7 +607,7 @@ void main() {
     t.emit('handler:escalation', _escalationJson());
     await _pumpDelivery(tester);
 
-    expect(tester.widget<AbListRow>(_row).onTap, isNotNull);
+    expect(tester.widget<CarbonContainedListRow>(_row).onPressed, isNotNull);
   });
 
   testWidgets('an in-session prompt is informational, not a dead tap', (
@@ -618,7 +617,7 @@ void main() {
     // prompt escalate in handler/engine.ts), and this overlay is floating over
     // the very terminal drawing that prompt — so the branch
     // `answerHandlerEscalation` would take is a focus change onto the session
-    // already in focus. `AbListRow` renders a null `onTap` as an informational
+    // already in focus. `CarbonContainedListRow` renders a null `onPressed` as an informational
     // row; a non-null one would give the question hover and press feedback for
     // a tap that answers nothing.
     final t = await _pumpLive(tester);
@@ -628,7 +627,7 @@ void main() {
     await _pumpDelivery(tester);
 
     expect(find.text('bun or vitest?'), findsOneWidget);
-    expect(tester.widget<AbListRow>(_row).onTap, isNull);
+    expect(tester.widget<CarbonContainedListRow>(_row).onPressed, isNull);
   });
 
   testWidgets('on a phone the collapsed strip is exactly the reserved band', (
@@ -648,7 +647,7 @@ void main() {
         _escalation('e2', terminalId: 't1', question: 'and then?', at: 2),
       ],
     );
-    await tester.tap(_chevron(AbIcons.chevronDown));
+    await tester.tap(_chevron(CarbonIcons.chevronDown));
     await tester.pump();
 
     final strip = find

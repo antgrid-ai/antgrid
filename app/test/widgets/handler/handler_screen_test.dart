@@ -1,9 +1,5 @@
 import 'dart:async';
 
-import 'package:antgrid/design/ab_tokens.dart';
-import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_icon.dart';
-import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -19,12 +15,23 @@ import 'package:antgrid/widgets/handler/handler_blocked_action_card.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/handler/handler_screen.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/prefs_test_mock.dart';
+
+/// Section headers are pinned list headers. Addressed through the pinned sliver
+/// because the same words stand on rows ("Needs you" is also a run state, and
+/// "Undo" is also the row's tag).
+Finder sectionHeader(String label) => find.descendant(
+  of: find.byType(PinnedHeaderSliver),
+  matching: find.text(label),
+);
+
+final Finder undoTag = find.widgetWithText(CarbonTag, 'Undo');
 
 HandlerSessionState sessionState(
   String terminalId, {
@@ -596,7 +603,7 @@ void main() {
     expect(find.text('some_future_kind'), findsNothing);
     expect(find.text('what the pass was about'), findsOneWidget);
     expect(find.text('what came with it'), findsOneWidget);
-    expect(find.byType(AbListRow), findsWidgets);
+    expect(find.byType(CarbonContainedListRow), findsWidgets);
     // And the rail stays dark, which is what makes the sweep above a guard
     // rather than an assertion every row passes.
     expect(
@@ -662,7 +669,7 @@ void main() {
     await pumpDelivery(tester);
 
     expect(find.text('bun or vitest?'), findsOneWidget);
-    expect(find.text('URGENT'), findsOneWidget);
+    expect(find.text('Urgent'), findsOneWidget);
   });
 
   testWidgets('and on a decision card, from the same meta column', (
@@ -678,7 +685,7 @@ void main() {
     await pumpDelivery(tester);
 
     expect(find.byType(HandlerDecisionCard), findsOneWidget);
-    expect(find.text('URGENT'), findsOneWidget);
+    expect(find.text('Urgent'), findsOneWidget);
   });
 
   testWidgets('a normal escalation is not marked', (tester) async {
@@ -689,7 +696,7 @@ void main() {
     await pumpDelivery(tester);
 
     expect(find.text('bun or vitest?'), findsOneWidget);
-    expect(find.text('URGENT'), findsNothing);
+    expect(find.text('Urgent'), findsNothing);
   });
 
   testWidgets('a force push undo asks before it writes to the remote', (
@@ -702,7 +709,7 @@ void main() {
     expect(find.text('Force push'), findsOneWidget);
     expect(find.text('git push --force origin feat/x'), findsOneWidget);
 
-    await tester.tap(find.text('Undo'));
+    await tester.tap(undoTag);
     await tester.pumpAndSettle();
 
     // Nothing on the wire yet — the tap opened a question, not a push.
@@ -727,14 +734,14 @@ void main() {
     t.emit('handler:snapshot', snapshotJson());
     await pumpDelivery(tester);
 
-    await tester.tap(find.text('Undo'));
+    await tester.tap(undoTag);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
 
     expect(t.sent.where((m) => m['type'] == 'handler:undo'), isEmpty);
     // And the offer survives the refusal: a cancelled undo is not a spent one.
-    expect(find.text('Undo'), findsOneWidget);
+    expect(undoTag, findsOneWidget);
   });
 
   testWidgets('an undo that stays on this machine is still one tap', (
@@ -755,7 +762,7 @@ void main() {
     await pumpDelivery(tester);
 
     expect(find.text('Hard reset'), findsOneWidget);
-    await tester.tap(find.text('Undo'));
+    await tester.tap(undoTag);
     await tester.pump();
 
     expect(t.sent.where((m) => m['type'] == 'handler:undo'), hasLength(1));
@@ -772,7 +779,7 @@ void main() {
 
     // The advert is re-sent per state change, so the spent row must REPLACE the
     // live one rather than sit beside it.
-    expect(find.text('Undo'), findsNothing);
+    expect(undoTag, findsNothing);
     expect(find.text('Undone'), findsOneWidget);
 
     await tester.tap(find.text('Undone'));
@@ -1013,12 +1020,12 @@ void main() {
       );
 
       double leftOf(String text) => tester.getTopLeft(find.text(text)).dx;
-      // The session card's Armed chip carries this word too, so the activity row
-      // is addressed through the AbListRow only it is built from.
+      // The session card's Armed tag carries this word too, so the activity row
+      // is addressed through the list row only it is built from.
       double leftOfRow(String text) => tester
           .getTopLeft(
             find.descendant(
-              of: find.byType(AbListRow),
+              of: find.byType(CarbonContainedListRow),
               matching: find.text(text),
             ),
           )
@@ -1037,7 +1044,7 @@ void main() {
   );
 
   // An escalation question is the thing being decided. Clipped to one line by
-  // AbListRow's default it was a decision taken without its subject.
+  // the row's default it was a decision taken without its subject.
   testWidgets('a long escalation question wraps instead of ellipsizing', (
     tester,
   ) async {
@@ -1110,8 +1117,8 @@ void main() {
     final title = tester.getRect(find.text(long));
     final shield = tester.getRect(
       find.descendant(
-        of: find.byType(AbListRow),
-        matching: find.byType(AbIcon),
+        of: find.byType(CarbonContainedListRow),
+        matching: find.byType(CarbonIcon),
       ),
     );
     expect(shield.top, lessThan(title.center.dy));
@@ -1285,7 +1292,11 @@ void main() {
         .where((m) => m['type'] == 'handler:configure' && m['armed'] == false)
         .toList();
 
-    await tester.tap(find.text('Armed'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) => w is CarbonOverflowMenu && w.semanticLabel == 'Handler options',
+      ),
+    );
     await tester.pumpAndSettle();
     expect(disarms(), isEmpty);
 
@@ -1393,7 +1404,7 @@ void main() {
       ),
     );
     expect(find.textContaining('Not watched'), findsOneWidget);
-    expect(find.text('ESCALATE ONLY'), findsNothing);
+    expect(find.text('Escalate only'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -1413,7 +1424,7 @@ void main() {
           },
         ),
       );
-      expect(find.text('ESCALATE ONLY'), findsOneWidget);
+      expect(find.text('Escalate only'), findsOneWidget);
       expect(find.textContaining('Not watched'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
     },
@@ -1427,7 +1438,7 @@ void main() {
         stateWith(sessions: {'t1': sessionState('t1')}),
       );
       expect(find.textContaining('Not watched'), findsNothing);
-      expect(find.text('ESCALATE ONLY'), findsNothing);
+      expect(find.text('Escalate only'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
     },
   );
@@ -1524,7 +1535,7 @@ void main() {
         ),
       );
       expect(find.textContaining('Handler is off'), findsNothing);
-      expect(find.text('WRAP-UP'), findsOneWidget);
+      expect(sectionHeader('Wrap-up'), findsOneWidget);
       expect(find.text('Wrapped up'), findsOneWidget);
       expect(find.text('ship the parser'), findsOneWidget);
       // The true total rides the record, so the suffix names what the sample
@@ -1614,9 +1625,9 @@ void main() {
           sessions: {'t1': sessionState('t1')},
         ).copyWith(wrapUps: [wrapUp()], snapshots: [snapshot('s1')]),
       );
-      final sessions = tester.getTopLeft(find.text('SESSION')).dy;
-      final wrapUps = tester.getTopLeft(find.text('WRAP-UP')).dy;
-      final undo = tester.getTopLeft(find.text('UNDO')).dy;
+      final sessions = tester.getTopLeft(sectionHeader('Session')).dy;
+      final wrapUps = tester.getTopLeft(sectionHeader('Wrap-up')).dy;
+      final undo = tester.getTopLeft(sectionHeader('Undo')).dy;
       expect(sessions, lessThan(wrapUps));
       expect(wrapUps, lessThan(undo));
       debugDefaultTargetPlatformOverride = null;
@@ -1849,9 +1860,9 @@ void main() {
       expect(find.text('One config key to take out later'), findsOneWidget);
 
       final emphasised = tester
-          .widgetList<AbButton>(
+          .widgetList<CarbonButton>(
             find.byWidgetPredicate(
-              (w) => w is AbButton && w.variant == AbButtonVariant.primary,
+              (w) => w is CarbonButton && w.kind == CarbonButtonKind.primary,
             ),
           )
           .toList();
@@ -1867,7 +1878,7 @@ void main() {
       ]) {
         expect(
           tester.widget<Text>(find.text(line)).style?.fontFamily,
-          isNot(AbTokens.fontMono),
+          isNot(endsWith(CarbonTypography.monoFamily)),
         );
       }
     });
@@ -1885,7 +1896,7 @@ void main() {
 
       expect(
         tester.widget<Text>(find.text(approveText)).style?.fontFamily,
-        AbTokens.fontMono,
+        endsWith(CarbonTypography.monoFamily),
       );
     });
 
@@ -1945,7 +1956,7 @@ void main() {
       expect(find.byType(HandlerDecisionCard), findsNothing);
       expect(find.text('Ship it behind a flag'), findsNothing);
       expect(find.text(handlerAskLatencyNote), findsNothing);
-      expect(find.text('ASKED'), findsNothing);
+      expect(find.text('Asked'), findsNothing);
 
       await tester.tap(find.text('ship behind a flag?'));
       await tester.pumpAndSettle();
@@ -2011,7 +2022,7 @@ void main() {
       expect(onCard(find.textContaining('Still working on')), findsNothing);
     });
 
-    testWidgets('carries ASKED, never URGENT, and adds no second section', (
+    testWidgets('carries Asked, never Urgent, and adds no second section', (
       tester,
     ) async {
       final t = await pumpLiveHandlerScreen(tester);
@@ -2021,15 +2032,15 @@ void main() {
       );
       await pumpDelivery(tester);
 
-      expect(find.text('ASKED'), findsOneWidget);
-      expect(find.text('URGENT'), findsNothing);
+      expect(find.text('Asked'), findsOneWidget);
+      expect(find.text('Urgent'), findsNothing);
       // One pinned band over both row kinds. A section of its own with no
       // header would leave the previous band standing, and ask rows would read
-      // as unanswered NEEDS YOU escalations at the wrong scroll offset.
-      expect(find.text('NEEDS YOU'), findsOneWidget);
+      // as unanswered Needs you escalations at the wrong scroll offset.
+      expect(sectionHeader('Needs you'), findsOneWidget);
     });
 
-    testWidgets('a stopped row beside it still carries URGENT alone', (
+    testWidgets('a stopped row beside it still carries Urgent alone', (
       tester,
     ) async {
       final t = await pumpLiveHandlerScreen(tester);
@@ -2038,9 +2049,9 @@ void main() {
       t.emit('handler:escalation', escalationJson());
       await pumpDelivery(tester);
 
-      expect(find.text('URGENT'), findsOneWidget);
-      expect(find.text('ASKED'), findsOneWidget);
-      expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('Urgent'), findsOneWidget);
+      expect(find.text('Asked'), findsOneWidget);
+      expect(sectionHeader('Needs you'), findsOneWidget);
     });
 
     testWidgets('a full-sentence answer wraps inside the narrowest panel', (
@@ -2048,7 +2059,7 @@ void main() {
     ) async {
       // The wire caps an option label at 80 characters because the label IS
       // the answer, which is far past what a button-shaped Row can hold on a
-      // phone. Without [AbButton.wrapLabel] this is a painted overflow stripe
+      // phone. Without a wrapping label this is a painted overflow stripe
       // over the one control the feature exists to be tapped at 02:00.
       tester.view.physicalSize = const Size(280, 800);
       tester.view.devicePixelRatio = 1.0;
@@ -2092,11 +2103,11 @@ void main() {
       final t = await pumpLiveHandlerScreen(tester);
       t.emit('handler:status', statusJson(askAnswerPending: true));
       await pumpDelivery(tester);
-      expect(find.text('ANSWER QUEUED'), findsOneWidget);
+      expect(find.text('Answer queued'), findsOneWidget);
 
       t.emit('handler:status', statusJson());
       await pumpDelivery(tester);
-      expect(find.text('ANSWER QUEUED'), findsNothing);
+      expect(find.text('Answer queued'), findsNothing);
     });
   });
 }

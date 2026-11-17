@@ -203,7 +203,7 @@ the `LICENSE` file, which names Ben Butterworth.
 
 ### First-party packages
 
-All three shared packages are MPL-2.0. Independently distributed packages carry
+All shared packages are MPL-2.0. Independently distributed packages carry
 their own canonical `LICENSE` copy; [`LICENSING.md`](LICENSING.md) is the full map.
 
 | Package | Language | Licence | Role |
@@ -211,6 +211,7 @@ their own canonical `LICENSE` copy; [`LICENSING.md`](LICENSING.md) is the full m
 | `packages/antgrid-wire` | TypeScript | MPL-2.0 | Shared route-frame codec and relay control-envelope schemas |
 | `packages/antgrid_relay_client` | Dart | MPL-2.0 | Pure Dart relay and crypto client |
 | `packages/antgrid_eval_client` | Dart | MPL-2.0 | CLI wrapper around the above, for end-to-end evals |
+| `packages/carbon_flutter` | Dart | MPL-2.0 | Independent Flutter implementation of the Carbon Design System; bundles the IBM Plex fonts and Carbon icon artwork listed below |
 
 `antgrid_eval_client` depends on `antgrid_relay_client`, and `bridge/` and
 `relay/` depend on `antgrid-wire`. The ELv2 services may distribute the MPL
@@ -239,7 +240,24 @@ and **both must be preserved**: `OFL.txt` is declared as a Flutter asset in
 Pruning `OFL.txt` as an apparently unused asset would put the app out of
 compliance.
 
-This is the only bundled font. UI chrome uses the platform system sans-serif.
+The app's own chrome uses the platform system sans-serif.
+
+`packages/carbon_flutter/assets/fonts/` holds **IBM Plex Sans** (Light, Regular,
+Medium, SemiBold) and **IBM Plex Mono** (Regular, Medium, SemiBold), taken as TTF
+from the IBM Plex 1.1.0 GitHub releases. Any app depending on the package bundles
+them.
+
+| Field | Value |
+|---|---|
+| Family | IBM Plex Sans, IBM Plex Mono |
+| Licence | SIL Open Font License, Version 1.1 |
+| Copyright | Copyright 2017 IBM Corp. with Reserved Font Name "Plex" (`https://github.com/IBM/plex`) |
+| Licence text | `packages/carbon_flutter/assets/fonts/OFL.txt` |
+
+The same two obligations apply: `OFL.txt` is a declared asset in the package's
+`pubspec.yaml`, and `CarbonLicenses.register()` adds it to `LicenseRegistry`.
+An app that depends on the package must call `CarbonLicenses.register()` at
+startup.
 
 ### Ghostty (`libghostty-vt`) — modified
 
@@ -350,6 +368,16 @@ Collaborators, CC0 1.0). CC0 waives copyright and imposes no attribution
 requirement. It does **not** waive trademark: these are third-party company and
 product logos and remain the marks of their owners. See [`TRADEMARK.md`](TRADEMARK.md).
 
+`packages/carbon_flutter/lib/src/foundations/icons.g.dart` compiles a subset of
+**Carbon icons** (`@carbon/icons` 11.92.0, Copyright IBM Corp., Apache 2.0) to
+path data; `tool/generate_icons.cjs` regenerates it. The package's
+`lib/src/foundations/colors.g.dart` holds colour values read from
+`@carbon/themes` 11.85.0 (Copyright IBM Corp., Apache 2.0). The Apache text
+travels as `packages/carbon_flutter/assets/licenses/carbon-icons-LICENSE.txt`,
+a declared asset that `CarbonLicenses.register()` also registers, and the
+package `NOTICE` carries the attribution. "Carbon" and "IBM" are IBM's marks;
+the package is not an official or endorsed IBM framework.
+
 ### Flutter SDK and engine
 
 The Flutter SDK is a build prerequisite rather than something vendored here, but its
@@ -431,7 +459,7 @@ redistributed inside it.
 |---|---|---|---|
 | `@anthropic-ai/claude-agent-sdk` | 0.3.201 | proprietary — see above | Anthropic PBC |
 | `@inquirer/prompts` | 8.4.2 | MIT | Copyright (c) 2025 Simon Boudrias |
-| `@opencode-ai/sdk` | 1.15.10 | MIT | declared in `package.json`; the published package ships no licence file |
+| `@opencode/client` | 2.2.5 | MIT | declared in `package.json`; the published package ships no licence file |
 | `@xterm/addon-serialize` | 0.14.0 | MIT | The xterm.js authors; declared in `package.json`, the published package ships no licence file |
 | `@xterm/headless` | 6.0.0 | MIT | The xterm.js authors; declared in `package.json`, the published package ships no licence file |
 | `bun-pty` | 0.4.8 | MIT | Copyright (c) 2025 Dilip Thapa |

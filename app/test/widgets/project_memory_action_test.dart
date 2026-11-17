@@ -1,0 +1,396 @@
+// The drawer's entries to Memory: a revealed lightbulb on local and remote
+// project rows plus a Memory nav row, which the sample project keeps for its
+// own memories.
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:antgrid/connection/supervisor_state.dart';
+import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
+import 'package:antgrid/launcher/host_controller.dart';
+import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/memory.dart';
+import 'package:antgrid/models/project_catalog.dart';
+import 'package:antgrid/project/project_session_registry.dart';
+import 'package:antgrid/project/project_status.dart';
+import 'package:antgrid/widgets/memory/memory_project_button.dart';
+import 'package:antgrid/providers/account_agents.dart';
+import 'package:antgrid/providers/account_machines.dart';
+import 'package:antgrid/providers/auth.dart';
+import 'package:antgrid/providers/demo_mode.dart';
+import 'package:antgrid/providers/drawer_entries.dart';
+import 'package:antgrid/providers/host_status.dart';
+import 'package:antgrid/providers/memory.dart';
+import 'package:antgrid/providers/supervisor_status.dart';
+import 'package:antgrid/providers/control_plane.dart';
+import 'package:antgrid/providers/memory_surface.dart';
+import 'package:antgrid/providers/ui_attention_providers.dart';
+import 'package:antgrid/services/account_agents_api.dart';
+import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/projects_drawer.dart';
+
+import '../helpers/hover.dart';
+import '../helpers/prefs_test_mock.dart';
+import '../helpers/test_store_overrides.dart';
+
+const _machineUuid = 'machine-1';
+const _machineName = 'RadhaAI';
+const _localId = 'alpha-local';
+const _localName = 'Alpha local';
+const _remoteProjectId = 'gamma';
+const _remoteName = 'Gamma';
+
+/// Rows reveal their actions on hover only where there is a pointer; the test
+/// default platform is touch, which shows them permanently.
+void desktopTest(String name, Future<void> Function(WidgetTester) body) =>
+    testWidgets(name, (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await body(tester);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late TestStoreOverrides stores;
+  final targets = <MemoryTarget>[];
+
+  setUp(() async {
+    useInMemoryPrefs();
+    targets.clear();
+    stores = await buildTestStoreOverrides();
+    await stores.projectStore.upsert(
+      AbProject(
+        projectId: _localId,
+        folder: '/tmp/$_localId',
+        displayName: _localName,
+        hostDeviceUuid: _localId,
+        hostMachineName: '',
+        lastOpenedAt: DateTime(2026, 1, 1),
+      ),
+    );
+    await stores.recentAgentsStore.upsert(
+      RecentAgent(
+        agentDeviceId: _machineUuid,
+        agentLabel: 'Remote pair',
+        agentEd25519Pubkey: 'pub',
+        relayUrl: 'wss://relay.example.com',
+        pairedAt: DateTime(2026, 1, 1),
+        lastConnectedAt: DateTime(2026, 1, 2),
+        hostMachineName: _machineName,
+      ),
+    );
+    // The sidebar lists a remote machine's projects from the catalog the
+    // control-plane reaper persists, so the test persists it directly.
+    stores.cachedSessionsStore.putCatalog(_machineUuid, const [
+      CatalogProject(projectId: _remoteProjectId, label: _remoteName),
+    ]);
+  });
+  tearDown(() async => stores.close());
+
+  Map<String, dynamic> answer(Map<String, dynamic> request) =>
+      switch (request['op']) {
+        'projects' => {
+          'projects': <Object>[],
+          'memories': 0,
+          'earlier_versions': 0,
+        },
+        'list' || 'search' => {
+          'results': <Object>[],
+          'has_more': false,
+          'total': 0,
+        },
+        _ => {
+          'available': true,
+          'enabled': true,
+          'paused': false,
+          'project_paused': false,
+          'search_status': 'ready',
+          'recovery_status': 'ready',
+          'pending_operations': 0,
+        },
+      };
+
+  List<Override> overrides() => [
+    ...stores.overrides,
+    currentUserProvider.overrideWith((_) async => null),
+    // A fresh heartbeat: the default machine scope shows machines that are up.
+    accountAgentsProvider.overrideWith(
+      (_) async => [
+        InventoryAgent(
+          deviceUuid: _machineUuid,
+          displayName: _machineName,
+          platform: 'macos',
+          ed25519Pub: 'pub',
+          lastSeenAt: DateTime.now(),
+        ),
+      ],
+    ),
+    for (final id in const [_localId, _machineUuid])
+      projectStatusProvider(
+        id,
+      ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
+    hostStatusProvider.overrideWith(
+      (_) => Stream.value(const HostStatus(HostPhase.up)),
+    ),
+    supervisorStatusProvider(
+      _machineUuid,
+    ).overrideWith((_) => Stream.value(const Connected())),
+    controlPlaneStateProvider(_machineUuid).overrideWith(
+      (_) => Stream.value(
+        const ControlPlaneState(
+          projects: [
+            AdvertisedProject(
+              projectId: _remoteProjectId,
+              label: _remoteName,
+              path: '/gamma',
+              running: true,
+            ),
+          ],
+        ),
+      ),
+    ),
+    memoryDrawerSummaryProvider.overrideWith(
+      (_) async => MemoryProjects.fromJson({
+        'projects': [
+          {'project_id': _localId, 'memories': 3, 'earlier_versions': 1},
+        ],
+        'memories': 7,
+        'earlier_versions': 1,
+      }),
+    ),
+    memoryRequestProvider.overrideWith((ref, target) {
+      targets.add(target);
+      return (request) async => answer(request);
+    }),
+  ];
+
+  Future<ProviderContainer> pump(
+    WidgetTester tester, {
+    Size size = const Size(1000, 2000),
+    Widget home = const Scaffold(body: ProjectsDrawer()),
+  }) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = size;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: overrides(),
+        child: MaterialApp(home: AbCarbonScope(child: home)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(Scaffold).first),
+    );
+    return container;
+  }
+
+  Finder rowOf(String label) => find
+      .ancestor(of: find.text(label), matching: find.byType(CarbonSideNavMenu))
+      .first;
+
+  /// The icon button named [label]. Hidden actions stay mounted, so finding one
+  /// says nothing about whether the row shows it.
+  Finder button(String label) => find.byWidgetPredicate(
+    (w) => w is CarbonButton && w.semanticLabel == label,
+    description: 'icon button "$label"',
+  );
+
+  bool shown(WidgetTester tester, Finder target) => tester
+      .widget<Visibility>(
+        find
+            .ancestor(
+              of: target,
+              matching: find.byWidgetPredicate(
+                (w) => w is Visibility && w.maintainFocusability,
+              ),
+            )
+            .first,
+      )
+      .visible;
+
+  desktopTest('a local row opens the screen filtered to its project', (
+    tester,
+  ) async {
+    final container = await pump(tester);
+    expect(shown(tester, button('$_localName memories')), isFalse);
+    await hoverRow(tester, find.text(_localName));
+    final action = find.descendant(
+      of: rowOf(_localName),
+      matching: button('$_localName memories'),
+    );
+    expect(action, findsOneWidget);
+    expect(shown(tester, action), isTrue);
+    await tester.tap(action);
+    await tester.pumpAndSettle();
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    final view = container.read(memoryViewProvider);
+    expect(view.target, const MemoryTarget.machine());
+    expect(view.projectId, _localId);
+  });
+
+  desktopTest('a remote row opens its machine, by project id', (
+    tester,
+  ) async {
+    final container = await pump(tester);
+    await hoverRow(tester, find.text(_remoteName));
+    final action = find.descendant(
+      of: rowOf(_remoteName),
+      matching: button('$_remoteName memories'),
+    );
+    expect(action, findsOneWidget);
+    expect(shown(tester, action), isTrue);
+    await tester.tap(action);
+    await tester.pumpAndSettle();
+    final view = container.read(memoryViewProvider);
+    expect(view.projectId, _remoteProjectId);
+    expect(view.target, MemoryTarget.machine(machineId: _machineUuid));
+  });
+
+  desktopTest('the sample project offers its memories, without a count', (
+    tester,
+  ) async {
+    final container = await pump(tester);
+    expect(find.text('Memory'), findsOneWidget);
+    container.read(demoModeProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+    final sample = demoDrawerEntries().single.displayName;
+    expect(find.text(sample), findsOneWidget);
+    await hoverRow(tester, find.text(sample));
+    expect(find.byType(MemoryProjectButton), findsOneWidget);
+    expect(find.text('Memory'), findsOneWidget);
+    // The machine total is the real host's, not the sample's.
+    expect(find.text('7'), findsNothing);
+
+    await tester.tap(find.byType(MemoryProjectButton));
+    await tester.pumpAndSettle();
+    expect(container.read(memoryViewProvider).projectId, kDemoProjectId);
+  });
+
+  desktopTest('the Memory nav row carries the machine total', (tester) async {
+    await pump(tester);
+    expect(find.text('Memory'), findsWidgets);
+    expect(find.text('7'), findsOneWidget);
+  });
+
+  desktopTest('the lightbulb is announced once, without its count', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    try {
+      await pump(tester);
+      await hoverRow(tester, find.text(_localName));
+      expect(
+        find.bySemanticsLabel(RegExp('^$_localName memories\$')),
+        findsWidgets,
+      );
+      expect(find.bySemanticsLabel('$_localName memories (3)'), findsNothing);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  desktopTest('in a real Scaffold drawer, Memory opens and the drawer closes', (
+    tester,
+  ) async {
+    final key = GlobalKey<ScaffoldState>();
+    final container = await pump(
+      tester,
+      size: const Size(500, 900),
+      home: Scaffold(
+        key: key,
+        drawer: const Drawer(child: ProjectsDrawer()),
+        body: const SizedBox.expand(),
+      ),
+    );
+    key.currentState!.openDrawer();
+    await tester.pumpAndSettle();
+    expect(key.currentState!.isDrawerOpen, isTrue);
+    await tester.tap(find.text('Memory'));
+    await tester.pumpAndSettle();
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    expect(container.read(memoryViewProvider).target, isNull);
+    expect(key.currentState!.isDrawerOpen, isFalse);
+  });
+
+  testWidgets('on a phone the Memory row opens the selected machine '
+      'without a count or a summary request', (tester) async {
+    // A phone has no local host, so it never lists a local project, whose row
+    // would read the summary for its own count.
+    await stores.projectStore.remove(_localId);
+    final container = await pump(tester);
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+    await tester.tap(find.text('Memory'));
+    await tester.pumpAndSettle();
+    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.memory);
+    expect(container.read(memoryViewProvider).target, isNull);
+    expect(container.exists(memoryDrawerSummaryProvider), isFalse);
+  }, variant: TargetPlatformVariant({TargetPlatform.android, TargetPlatform.iOS}));
+
+  desktopTest('a remote machine pick hides the local count', (tester) async {
+    final container = await pump(tester);
+    expect(find.text('7'), findsOneWidget);
+    container.read(machinePickProvider.notifier).set(_machineUuid);
+    await tester.pumpAndSettle();
+    expect(find.text('Memory'), findsOneWidget);
+    expect(find.text('7'), findsNothing);
+  });
+
+  desktopTest('picking the local machine keeps the count', (tester) async {
+    final container = await pump(tester);
+    container.read(machinePickProvider.notifier).set(kLocalMachineKey);
+    await tester.pumpAndSettle();
+    expect(find.text('7'), findsOneWidget);
+  });
+
+  test('the drawer count never reaches the host unless it is up now', () async {
+    // The test default platform is mobile, where the count is off entirely.
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    var askedForHost = 0;
+    Future<MemoryProjects?> summaryAt(HostPhase phase) async {
+      final container = ProviderContainer(
+        overrides: [
+          hostStatusProvider.overrideWith(
+            (_) => Stream.value(HostStatus(phase)),
+          ),
+          hostControllerProvider.overrideWith((ref) {
+            askedForHost++;
+            throw StateError('the drawer count reached HostController');
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+      // Unlistened providers are paused, so a bare read never settles.
+      container.listen(hostStatusProvider, (_, _) {});
+      await container.read(hostStatusProvider.future);
+      final summary = container.listen(
+        memoryDrawerSummaryProvider.future,
+        (_, _) {},
+      );
+      return summary.read();
+    }
+
+    for (final phase in HostPhase.values.where((p) => p != HostPhase.up)) {
+      expect(await summaryAt(phase), isNull, reason: '$phase');
+    }
+    expect(askedForHost, 0);
+    // Proves the spy is wired: up is the one phase that asks.
+    expect(await summaryAt(HostPhase.up), isNull);
+    expect(askedForHost, 1);
+  });
+}

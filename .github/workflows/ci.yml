@@ -63,7 +63,7 @@ jobs:
       - name: Typecheck
         run: |
           fail=0
-          for ws in antgrid-wire antgrid-bridge antgrid-relay; do
+          for ws in antgrid-wire antgrid-agents antgrid-memory antgrid-bridge antgrid-relay; do
             echo "::group::typecheck $ws"
             bun run --filter "$ws" typecheck || fail=1
             echo "::endgroup::"
@@ -73,12 +73,38 @@ jobs:
       - name: Test
         run: |
           fail=0
-          for ws in antgrid-wire antgrid-bridge antgrid-relay; do
+          for ws in antgrid-wire antgrid-agents antgrid-memory antgrid-bridge antgrid-relay; do
             echo "::group::test $ws"
             bun run --filter "$ws" test || fail=1
             echo "::endgroup::"
           done
           exit $fail
+
+  memory-packaging:
+    name: Memory packaging (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Compile and exercise memory MCP and SQLite
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          mkdir -p .tmp/memory-qualification
+          bun build bridge/src/index.ts packages/antgrid-agents/src/agents/handoff/db-serialize-worker.ts --compile --outfile ".tmp/memory-qualification/antgrid-bridge$suffix" --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          bun build bridge/scripts/memory-mcp-smoke.ts --compile --outfile ".tmp/memory-qualification/memory-smoke$suffix"
+          ".tmp/memory-qualification/memory-smoke$suffix" "$(pwd)/.tmp/memory-qualification/antgrid-bridge$suffix"
 
   dart:
     name: Dart packages

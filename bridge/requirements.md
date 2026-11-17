@@ -32,8 +32,8 @@ The user experience is simple: install the agent, run `antgrid`, sign in to the 
 
 **Key architectural decisions:**
 - Agent makes OUTBOUND connections only — no ports opened on the dev machine
-- No SSH required — payloads travel over an authenticated Iroh connection; the central WebSocket is control-only
-- The control relay never carries or sees application payloads
+- No SSH required — payloads travel over an authenticated Iroh connection; the central WebSocket carries control frames and sealed bus blobs it cannot read
+- The control relay never carries or sees a readable application payload
 - Agent keeps AI coding tools running even if the mobile app disconnects
 - Mobile app reconnects seamlessly and catches up on missed output
 
@@ -216,7 +216,7 @@ The config parser resolves these patterns:
 **Purpose:** Keep every payload readable only by the two authorized endpoints.
 
 - Payloads travel only over native Iroh connections between the two endpoint IDs the authorization snapshot names; QUIC/TLS 1.3 is the confidentiality layer (`docs/protocol/peer-session.md`)
-- The central relay rejects application payloads outright
+- The central relay rejects any readable application payload outright
 - Push notifications are sealed separately (`push/seal.ts`), and the relay never holds their keys
 
 ### 5. Account-Trust Admission ✅

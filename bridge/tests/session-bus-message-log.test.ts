@@ -11,6 +11,8 @@ import {
   lastOutboundSummary,
   loadMessageLog,
   markDelivered,
+  markRefused,
+  markRelayed,
   saveMessageLog,
 } from "../src/session-bus/message-log";
 import { checkEnvelopeSize, envelopeBytes, stampEnvelope } from "../src/session-bus/envelope";
@@ -175,4 +177,35 @@ test("the last thing this session said on a thread is its own, and the newest of
   // A thread the ring has already trimmed, or one this session only ever
   // received on, yields nothing rather than the nearest thing to hand.
   expect(lastOutboundSummary(s, "t-gone")).toBeUndefined();
+});
+
+test("a relay receipt and a refusal stamp the outbound entry, and neither overrides a settled one", () => {
+  let s = appendLog(emptyLog(), { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
+  s = markRelayed(s, "m-1", T0 + 1);
+  expect(s.entries[0]).toMatchObject({ relayedAt: T0 + 1 });
+  expect(markRelayed(s, "m-1", T0 + 9).entries[0]!.relayedAt).toBe(T0 + 1);
+  expect(markRelayed(s, "m-gone", T0 + 9)).toBe(s);
+
+  const refused = markRefused(s, "m-1", T0 + 2, "UNKNOWN_PEER");
+  expect(refused.entries[0]).toMatchObject({ refusedAt: T0 + 2, refusedCode: "UNKNOWN_PEER" });
+  expect(markRefused(refused, "m-1", T0 + 9, "EXPIRED").entries[0]!.refusedCode).toBe("UNKNOWN_PEER");
+
+  // Delivered first: a late refusal for the same id must not take the stamp back.
+  const delivered = markDelivered(s, "m-1", T0 + 3);
+  expect(markRefused(delivered, "m-1", T0 + 4, "EXPIRED")).toBe(delivered);
+  expect(markRelayed(refused, "m-1", T0 + 9)).toBe(refused);
+});
+
+test("a stamped entry survives a reload", () => {
+  const abDir = tmpAbDir();
+  try {
+    let s = appendLog(emptyLog(), { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
+    s = markRelayed(s, "m-1", T0 + 1);
+    s = markRefused(s, "m-1", T0 + 2, "OUTBOX_FULL");
+    saveMessageLog(abDir, "p1", "s1", s);
+    const back = loadMessageLog(abDir, "p1", "s1").entries[0]!;
+    expect(back).toMatchObject({ relayedAt: T0 + 1, refusedAt: T0 + 2, refusedCode: "OUTBOX_FULL" });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
 });

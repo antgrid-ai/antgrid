@@ -1,24 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:flutter/services.dart'
+    show Clipboard, ClipboardData, TextInputAction, TextInputType;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_all/webview_all.dart';
 
 import '../analytics/events.dart';
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_progress_rule.dart';
+import '../design/ab_carbon.dart';
 import '../design/widgets/ab_toast.dart';
-import '../design/widgets/ab_toolbar.dart';
-import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
 import '../models/workspace_view.dart';
 import '../navigation/back_intent.dart';
@@ -37,25 +31,26 @@ import '../util/ssl_error_host.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/preview_tab_bar.dart';
 import '../util/ab_log.dart';
-import '../widgets/new_session/environment_menu.dart'
-    show PanelHint, PanelRow, PanelSectionHeader;
+import '../widgets/carbon_confirm.dart';
+import '../widgets/carbon_empty_state.dart';
 import '../util/image_thumbnail.dart';
 import '../widgets/auto_send_capture_dialog.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
 import '../widgets/send_to_agent_comment.dart';
-import '../design/widgets/ab_loading.dart';
 import 'preview_context_menu_script.dart';
 import 'preview_element_picker_script.dart';
 import 'preview_screenshot_script.dart';
-import '../design/widgets/ab_empty_state.dart';
 import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
 /// The browser preview screen. A URL bar at the top of the panel with
-/// refresh/external-browser/element-picker actions, a popup tab switcher
-/// ([PreviewTabsButton]) over the open ports, and one embedded webview per
-/// open port.
+/// refresh/element-picker/draw actions, a port switcher ([PreviewPortsButton])
+/// over the open ports, and one embedded webview per open port.
+///
+/// One [AbCarbonScope] at the root, never per tab: the per-tab `ValueKey`s and
+/// the tab [IndexedStack] must keep their tree positions or every webview
+/// reloads.
 class PreviewScreen extends ConsumerStatefulWidget {
   const PreviewScreen({super.key});
 
@@ -220,9 +215,20 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   late final TextEditingController _addrController;
   late final FocusNode _addrFocus;
 
-  /// Anchor for the overflow menu on both platforms — see
-  /// [_openOverflowMenu] and [_openDesktopMoreMenu].
-  final _overflowButtonKey = GlobalKey();
+  /// A fixed spot under the screen's Carbon scope. Carbon modals and menus
+  /// take their scope from the context that presents them, and this State's
+  /// own context sits above it.
+  final _scopeKey = GlobalKey();
+
+  /// The open right-click menu, so any later input over the webview can close
+  /// it: a platform view swallows the pointer, so the menu never sees an
+  /// outside tap.
+  CarbonMenuAtHandle? _contextMenu;
+
+  /// The Carbon popup registers its own pop entry on the shell route, so a
+  /// system back while the More menu is open also reaches [BackHandler]; the
+  /// screen's handler stays active and swallows it in [_backFromPreview].
+  bool _menuOpen = false;
 
   @override
   void initState() {
@@ -232,10 +238,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _siteData = ref.read(previewSiteDataProvider);
     _removeLiveOrigins = _siteData.addLiveOrigins(_liveOrigins);
     _siteData.wipes.addListener(_onSiteDataWiped);
-    // Discard unsubmitted edits on blur — restore the live URL.
-    // (Select-all-on-focus is handled by AbUrlField.)
+    // Select everything on focus; discard unsubmitted edits on blur by
+    // restoring the live URL.
     _addrFocus.addListener(() {
-      if (!_addrFocus.hasFocus) {
+      if (_addrFocus.hasFocus) {
+        _addrController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _addrController.text.length,
+        );
+      } else {
         if (_composingNewTab && mounted) {
           setState(() => _composingNewTab = false);
         }
@@ -504,6 +515,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _addrController.dispose();
     _addrFocus.dispose();
     _contextMenuFallbackTimer?.cancel();
+    _contextMenu?.close();
     _siteData.wipes.removeListener(_onSiteDataWiped);
     _removeLiveOrigins();
     for (final s in _tabStates.values) {
@@ -671,19 +683,38 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final activeId = previewStateAsync.value?.activeTabId;
     final activeCanGoBack =
         activeId != null && (_tabStates[activeId]?.canGoBack ?? false);
-    return BackHandler(
-      priority: BackPriority.previewContent,
-      active:
-          onScreen &&
-          (_drawActiveForPort != null || activeCanGoBack || activeId != null),
-      onBack: _backFromPreview,
-      child: previewStateAsync.when(
-        loading: () => const AbLoading(message: 'loading preview...'),
-        error: (error, _) => AbEmptyState.error(
-          title: "Couldn't load the preview",
-          subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
+    return AbCarbonScope(
+      child: Builder(
+        builder: (context) => ColoredBox(
+          key: _scopeKey,
+          color: CarbonTheme.of(context).colors.background,
+          child: BackHandler(
+            priority: BackPriority.previewContent,
+            active:
+                onScreen &&
+                (_menuOpen ||
+                    _drawActiveForPort != null ||
+                    activeCanGoBack ||
+                    activeId != null),
+            onBack: _backFromPreview,
+            // IndexedStack keeps this screen mounted while another workspace
+            // view is up, and an indeterminate bar or spinner would keep
+            // ticking unseen.
+            child: TickerMode(
+              enabled: onScreen,
+              child: previewStateAsync.when(
+                loading: () =>
+                    const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading preview...')),
+                error: (error, _) => CarbonEmptyState(
+                  error: true,
+                  heading: "Couldn't load the preview",
+                  body: caughtErrorCopy(error, 'Try again in a moment.'),
+                ),
+                data: (state) => _buildContent(context, state),
+              ),
+            ),
+          ),
         ),
-        data: (state) => _buildContent(state),
       ),
     );
   }
@@ -774,7 +805,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         )
         .toList();
     if (ready.isNotEmpty) {
-      final bg = context.antgrid.bgDeepest;
+      final scoped = _scopeKey.currentContext;
+      if (scoped == null || !scoped.mounted) return;
+      final bg = CarbonTheme.of(scoped).colors.background;
       setState(() {
         for (final b in ready) {
           b.state.controller = _buildController(
@@ -833,15 +866,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       showAbToast(context, kDemoRefusalText);
       return;
     }
-    final ok = await AbConfirmDialog.show(
-      context: context,
+    final scoped = _scopeKey.currentContext;
+    if (scoped == null) return;
+    final ok = await showCarbonConfirm(
+      scoped,
       title: 'Clear site data?',
       body:
           'Removes cookies, storage, caches and service workers for every page '
           'opened in Preview, across all projects and machines. You will be '
           'signed out of those pages. Open tabs reload.',
       confirmLabel: 'Clear',
-      destructive: true,
+      danger: true,
     );
     if (!ok || !mounted) return;
     final status = await _siteData.clearManually();
@@ -858,27 +893,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     );
   }
 
-  Future<void> _openDesktopMoreMenu() async {
-    final anchorContext = _overflowButtonKey.currentContext;
-    if (anchorContext == null) return;
-    final anchor = abMenuAnchorRect(anchorContext);
-    if (anchor == null) return;
-    await showAbMenu<void>(
-      context: anchorContext,
-      anchorRect: anchor,
-      entries: [
-        AbMenuItem(
-          label: 'Clear site data',
-          icon: AbIcons.trash,
-          danger: true,
-          onTap: () =>
-              detached('PreviewScreen', 'clear site data', _clearSiteData),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildContent(PreviewState state) {
+  Widget _buildContent(BuildContext context, PreviewState state) {
     // Build/update every open tab's controller — not just the active one —
     // so a backgrounded tab (auto-detected while looking elsewhere) starts
     // loading the moment it opens rather than only once first focused.
@@ -982,12 +997,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // screen from here on — like a real browser, not just once a tab is
     // open — so it's the one place to type a port whether that opens the
     // first tab, a later one, or navigates the active one.
-    return _buildPreviewView(state);
+    return _buildPreviewView(context, state);
   }
 
   /// Content below the toolbar: the open tabs' webviews, or the empty-state
   /// recent-ports quick-pick once nothing's open.
-  Widget _buildBody(PreviewState state) {
+  Widget _buildBody(BuildContext context, PreviewState state) {
     if (state.tabs.isNotEmpty) {
       final active = state.activeTab ?? state.tabs.first;
       final activeIndex = state.activeTabId == null
@@ -1003,12 +1018,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // switching tabs never disposes (and reloads) a background one — the
       // same keep-mounted technique the outer WorkspacePanel already uses
       // for its own panes.
-      return _framed(
-        Stack(
+      return Stack(
           children: [
             IndexedStack(
               index: activeIndex < 0 ? 0 : activeIndex,
-              children: [for (final tab in state.tabs) _buildTabWebView(tab)],
+              children: [
+                for (final tab in state.tabs) _buildTabWebView(context, tab),
+              ],
             ),
             // Fills exactly the webview's own box, which is what lets a
             // mark's position map onto the captured viewport with nothing
@@ -1038,7 +1054,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                 ),
               ),
           ],
-        ),
       );
     }
 
@@ -1047,50 +1062,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // detection is a text heuristic over agent/process output and can list a
     // port nothing is actually serving, so it's not worth surfacing as a
     // standalone "closed tabs" reopen list either.
-    return _framed(const PreviewEmptyState());
+    return const PreviewEmptyState();
   }
-
-  /// Insets [child] into a rounded, subtly-bordered browser-window frame —
-  /// corners genuinely rounded, including over the live webview tab.
-  ///
-  /// Deliberately no `ClipRRect` on [child] itself: the live tab is a native
-  /// WebView2 texture surface, and clipping a platform view forces Flutter to
-  /// push clip-rect updates through the platform channel on every relayout,
-  /// which is what produced a flicker (and is suspected behind a hang report)
-  /// when stacked on the reparent the panel-expand/restore toggle already
-  /// does via GlobalKey (see `workspace_shell.dart`'s
-  /// `_agentPanelKey`/`_contextPanelKey` doc). Instead, [_CornerMaskPainter]
-  /// paints the four corner wedges in the surrounding chrome color OVER the
-  /// content — a plain paint layer with its own independent size/position,
-  /// so it never touches the webview's own RenderObject or triggers a clip
-  /// update on it, whatever [child] happens to be this frame.
-  Widget _framed(Widget child) => Padding(
-    padding: const EdgeInsets.all(AbTokens.space8),
-    child: Stack(
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            border: Border.all(color: context.antgrid.borderSubtle),
-            borderRadius: BorderRadius.circular(AbTokens.radiusLg),
-          ),
-          child: child,
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: _CornerMaskPainter(
-                radius: AbTokens.radiusLg,
-                // Matches WorkspacePanel's own ColoredBox behind this route —
-                // the mask has to disappear into that, not paint a visible
-                // square of some OTHER color at each corner.
-                color: context.antgrid.bgDeep,
-              ),
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
 
   /// Closes the active tab. Returns false when there is no service or no
   /// active tab to close.
@@ -1111,6 +1084,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.preview) {
       return false;
     }
+    // The menu dismisses itself on this same back press.
+    if (_menuOpen) return true;
     // Through the overlay's own close, not straight to the flag: back is how
     // a phone user dismisses, so it has to hit the same
     // confirm-before-discarding guard the Close button does.
@@ -1460,7 +1435,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// one, and navigating the active tab are all just "type in the top bar
   /// and press Enter" (see [_handleAddressSubmit]) instead of three
   /// different surfaces (a centered form, a dialog, a field).
-  Widget _buildPreviewView(PreviewState state) {
+  Widget _buildPreviewView(BuildContext context, PreviewState state) {
     // [previewStateProvider] keeps its last value while it re-runs, so this
     // view can render one frame past a session that was invalidated (host
     // restart, LRU evict) — long enough for a raw façade read to throw during
@@ -1474,142 +1449,156 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         ? _tabStates[state.activeTabId]
         : null;
     final captureInFlight = _screenshotCapture != null;
+    final desktop = !isMobilePlatform;
+    final pickArmed =
+        _pickerActiveForPort != null && _pickerActiveForPort == activeTab?.port;
+    final drawArmed =
+        _drawActiveForPort != null && _drawActiveForPort == activeTab?.port;
 
-    // Desktop-only — a phone/tablet has no "system browser" affordance worth
-    // surfacing here. Not gated on transport.isLocal: remote-controlling
-    // another machine FROM a desktop still has a real system browser to open
-    // into, and _openInSystemBrowser already resolves the right address for
-    // that case (the local forwarder, not the address the user typed).
-    final showOpenExternal = !isMobilePlatform;
+    void reload() =>
+        _webViewDetached('reload', () => activeState?.controller?.reload());
+    final canOpenExternal = preview != null && activeTab != null;
+    void openExternal() {
+      if (preview != null && activeTab != null) {
+        _openInSystemBrowser(preview, activeTab);
+      }
+    }
+
+    // Offered on phones too because the design calls for it. On a phone the
+    // address is the app's own loopback forwarder, which may not outlive the
+    // app being backgrounded by the browser hand-off; not yet checked live on
+    // iOS or Android.
+    final overflow = <CarbonMenuEntry>[
+      if (!desktop)
+        CarbonMenuItem(
+          label: 'Close this tab',
+          icon: const CarbonIcon(CarbonIcons.close),
+          onPressed: activeTab == null
+              ? null
+              : () => preview?.closeTab(activeTab.port),
+        ),
+      CarbonMenuItem(
+        label: 'Open a port…',
+        icon: const CarbonIcon(CarbonIcons.add),
+        onPressed: preview == null ? null : _startComposingNewTab,
+      ),
+      CarbonMenuItem(
+        label: 'Open in browser',
+        icon: const CarbonIcon(CarbonIcons.launch),
+        onPressed: canOpenExternal ? openExternal : null,
+      ),
+      if (!desktop)
+        CarbonMenuCheckItem(
+          label: 'Draw on the page',
+          checked: drawArmed,
+          onChanged: activeTab == null || captureInFlight
+              ? null
+              : (_) => _toggleDraw(activeTab, activeState),
+        ),
+      const CarbonMenuDivider(),
+      CarbonMenuItem(
+        label: 'Clear site data',
+        icon: const CarbonIcon(CarbonIcons.trashCan),
+        kind: CarbonMenuItemKind.danger,
+        onPressed: () =>
+            detached('PreviewScreen', 'clear site data', _clearSiteData),
+      ),
+    ];
 
     return Column(
       children: [
-        // Every other AbToolbar in the app stacks flush against whatever's
-        // above it (see ab_toolbar.dart) — but this one sits directly under
-        // the workspace tab strip's own hairline border, and the two
-        // hairlines back to back read as a single cramped seam. A small gap
-        // just for this toolbar, not the design-system default.
-        const SizedBox(height: AbTokens.space8),
-        AbToolbar.actions(
-          // Back/Forward stay inline on every platform, always visible and
-          // DISABLED (not hidden) until the active tab can actually go that
-          // way — same reasoning as the hamburger's rows below.
-          leading: [
-            AbIconButton(
-              icon: AbIcons.chevronLeft,
-              tooltip: 'Back',
-              onTap: (activeState?.canGoBack ?? false)
-                  ? () => _webViewDetached(
-                      'back',
-                      () => activeState?.controller?.goBack(),
-                    )
-                  : null,
-            ),
-            AbIconButton(
-              icon: AbIcons.chevronRight,
-              tooltip: 'Forward',
-              onTap: (activeState?.canGoForward ?? false)
-                  ? () => activeState?.controller?.goForward()
-                  : null,
-            ),
-          ],
-          center: AbUrlField(
-            controller: _addrController,
-            focusNode: _addrFocus,
-            hint: (activeTab == null || _composingNewTab)
-                ? 'Port or link'
-                : 'URL',
-            onSubmitted: _handleAddressSubmit,
+        // On the first layer and flush with the panel's top edge: the panel
+        // is a plain rectangle, so there is no frame to inset from.
+        CarbonLayerSurface(
+          padding: const EdgeInsets.symmetric(
+            horizontal: CarbonSpacing.spacing02,
           ),
-          trailing: isMobilePlatform
-              ? [
-                  // Everything else (New/Draw & send/Tabs) lives behind this
-                  // one button on mobile — see _openOverflowMenu.
-                  AbIconButton(
-                    key: _overflowButtonKey,
-                    icon: AbIcons.menu,
-                    tooltip: 'More',
-                    onTap: () => unawaited(
-                      _openOverflowMenu(
-                        activeTab: activeTab,
-                        activeState: activeState,
-                        preview: preview,
-                      ),
-                    ),
-                  ),
-                ]
-              : [
-                  if (showOpenExternal)
-                    AbIconButton(
-                      icon: AbIcons.openExternal,
-                      tooltip: 'Open in browser',
-                      onTap: (preview == null || activeTab == null)
-                          ? null
-                          : () => _openInSystemBrowser(preview, activeTab),
-                    ),
-                  AbIconButton(
-                    icon: AbIcons.elementPicker,
-                    tooltip: 'Pick an element',
-                    selected:
-                        _pickerActiveForPort != null &&
-                        _pickerActiveForPort == activeTab?.port,
-                    onTap: activeTab == null || captureInFlight
-                        ? null
-                        : () => _togglePicker(activeTab, activeState),
-                  ),
-                  AbIconButton(
-                    icon: AbIcons.draw,
-                    tooltip: 'Draw on the page',
-                    selected:
-                        _drawActiveForPort != null &&
-                        _drawActiveForPort == activeTab?.port,
-                    onTap: activeTab == null || captureInFlight
-                        ? null
-                        : () => _toggleDraw(activeTab, activeState),
-                  ),
-                  AbIconButton(
-                    icon: AbIcons.refresh,
-                    tooltip: 'Refresh',
-                    onTap: activeState == null
-                        ? null
-                        : () => _webViewDetached(
-                            'reload',
-                            () => activeState.controller?.reload(),
-                          ),
-                  ),
-                  PreviewTabsButton(
-                    onSelected: (port) => _selectTab(port, preview),
-                    onClosed: (port) => preview?.closeTab(port),
-                  ),
-                  // Only needed to disambiguate "open a new tab" from
-                  // "navigate the active one" on the shared address bar —
-                  // with no tab open yet, a submit already means "open a
-                  // new tab", so there's nothing for this button to add.
-                  if (state.tabs.isNotEmpty)
-                    AbIconButton(
-                      icon: AbIcons.add,
-                      tooltip: 'Open a new port',
-                      onTap: preview == null ? null : _startComposingNewTab,
-                    ),
-                  AbIconButton(
-                    key: _overflowButtonKey,
-                    icon: AbIcons.more,
-                    tooltip: 'More',
-                    onTap: () => detached(
-                      'PreviewScreen',
-                      'open preview menu',
-                      _openDesktopMoreMenu,
-                    ),
-                  ),
-                ],
+          child: Row(
+            spacing: CarbonSpacing.spacing02,
+            children: [
+              // Disabled (not hidden) until the active tab can go that way.
+              // Forward is desktop only, as on the phone design.
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.chevronLeft),
+                semanticLabel: 'Back',
+                onPressed: (activeState?.canGoBack ?? false)
+                    ? () => _webViewDetached(
+                        'back',
+                        () => activeState?.controller?.goBack(),
+                      )
+                    : null,
+              ),
+              if (desktop)
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.chevronRight),
+                  semanticLabel: 'Forward',
+                  onPressed: (activeState?.canGoForward ?? false)
+                      ? () => activeState?.controller?.goForward()
+                      : null,
+                ),
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.renew),
+                semanticLabel: 'Refresh',
+                onPressed: activeState == null ? null : reload,
+              ),
+              Expanded(
+                child: CarbonTextInput(
+                  controller: _addrController,
+                  focusNode: _addrFocus,
+                  size: CarbonFieldSize.small,
+                  semanticLabel: 'Address',
+                  placeholder: (activeTab == null || _composingNewTab)
+                      ? 'Port or link'
+                      : 'URL',
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.go,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  onSubmitted: _handleAddressSubmit,
+                ),
+              ),
+              if (desktop) ...[
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.cursor1),
+                  semanticLabel: 'Pick an element',
+                  selected: pickArmed,
+                  onPressed: activeTab == null || captureInFlight
+                      ? null
+                      : () => _togglePicker(activeTab, activeState),
+                ),
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.draw),
+                  semanticLabel: 'Draw on the page',
+                  selected: drawArmed,
+                  onPressed: activeTab == null || captureInFlight
+                      ? null
+                      : () => _toggleDraw(activeTab, activeState),
+                ),
+              ],
+              PreviewPortsButton(
+                onSelected: (port) => _selectTab(port, preview),
+                onClosed: (port) => preview?.closeTab(port),
+                onOpenPort: preview == null ? null : _startComposingNewTab,
+              ),
+              CarbonOverflowMenu(
+                semanticLabel: 'More',
+                icon: const CarbonIcon(CarbonIcons.overflowMenuVertical),
+                entries: overflow,
+                onOpenChanged: (open) {
+                  if (mounted && open != _menuOpen) {
+                    setState(() => _menuOpen = open);
+                  }
+                },
+              ),
+            ],
+          ),
         ),
-        Expanded(child: _buildBody(state)),
+        Expanded(child: _buildBody(context, state)),
       ],
     );
   }
 
-  /// Shared by [PreviewTabsButton.onSelected] and the mobile overflow menu's
-  /// tab-list section: switching tabs always cancels an in-flight pick — the
+  /// Shared by [PreviewPortsButton.onSelected]: switching tabs always cancels an in-flight pick — the
   /// picker was never meant to persist as tab state, and the backgrounded
   /// tab's listeners are still live (tabs stay mounted), so leaving it armed
   /// could fire a stale flow on an unrelated tab later.
@@ -1632,47 +1621,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (tabState != null) {
       _syncAddrField(_toDisplayUrl(tabState, tabState.currentUrl));
     }
-  }
-
-  /// Mobile's compact toolbar folds everything the desktop trailing row
-  /// spreads across separate icons — back/forward, refresh, the element
-  /// picker, opening a new port, and the tab switcher — into one popup, the
-  /// same "address bar + overflow menu" shape a phone browser uses. The tab
-  /// list section reuses [PreviewTabsPanel] verbatim rather than opening a
-  /// second nested popup: its rows already pop the enclosing route with the
-  /// picked port, which is exactly the single popup this opens.
-  Future<void> _openOverflowMenu({
-    required PreviewTab? activeTab,
-    required _TabWebViewState? activeState,
-    required PreviewService? preview,
-  }) async {
-    final anchorContext = _overflowButtonKey.currentContext;
-    if (anchorContext == null) return;
-    final anchor = abMenuAnchorRect(anchorContext);
-    if (anchor == null) return;
-    final port = await showAbPanel<int>(
-      context: anchorContext,
-      anchorRect: anchor,
-      width: 280,
-      builder: (_) => _PreviewOverflowPanel(
-        hasActiveTab: activeTab != null,
-        hasPreviewService: preview != null,
-        onNewPort: _startComposingNewTab,
-        onRefresh: () => _webViewDetached(
-          'reload',
-          () => activeState?.controller?.reload(),
-        ),
-        onDraw: activeTab == null || _screenshotCapture != null
-            ? null
-            : () => _toggleDraw(activeTab, activeState),
-        drawArmed:
-            _drawActiveForPort != null && _drawActiveForPort == activeTab?.port,
-        onClosedTab: (p) => preview?.closeTab(p),
-        onClearSiteData: () =>
-            detached('PreviewScreen', 'clear site data', _clearSiteData),
-      ),
-    );
-    if (port != null) _selectTab(port, preview);
   }
 
   /// Arms a pull-to-refresh candidate: records the drag origin and (async)
@@ -1757,6 +1705,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// [Listener] below already does: a `Listener` never enters the gesture
   /// arena, so it can't take the click away from the page's own handling.
   void _onSecondaryPointerDown(int port, PointerDownEvent event) {
+    _contextMenu?.close();
+    _contextMenu = null;
     if (event.buttons & kSecondaryMouseButton == 0) return;
     _pendingContextMenuPort = port;
     _pendingContextMenuAnchor = event.position;
@@ -1827,30 +1777,33 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// not the DOM event's own CSS-pixel position, which would need a
   /// scale-factor translation the Listener's coordinates never require.
   ///
-  /// Every row's `onTap` always runs through [detached] where it does
-  /// anything async — see `util/detached.dart` — since [showAbMenu]'s own
-  /// `onTap` is exactly the void-callback boundary that rule exists for.
+  /// Every row's `onPressed` always runs through [detached] where it does
+  /// anything async — see `util/detached.dart` — since a menu item's callback
+  /// is exactly the void-callback boundary that rule exists for. Presented
+  /// from the scoped context so the menu takes the panel's theme and density;
+  /// the platform view swallows pointers, so [_onSecondaryPointerDown] closes
+  /// it on the next click over the page.
   void _showContextMenu(int port, Offset anchor, PreviewContextMenuInfo info) {
     final tabState = _tabStates[port];
     final controller = tabState?.controller;
-    final entries = <AbMenuEntry>[];
+    final entries = <CarbonMenuEntry>[];
 
     if (info.href case final href?) {
       final host = Uri.tryParse(href)?.host ?? '';
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: isLocalDevHost(host)
               ? 'Open link in new tab'
               : 'Open link in browser',
-          icon: AbIcons.openExternal,
-          onTap: () => _openContextMenuLink(href),
+          icon: const CarbonIcon(CarbonIcons.launch),
+          onPressed: () => _openContextMenuLink(href),
         ),
       );
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: 'Copy link',
-          icon: AbIcons.copy,
-          onTap: () => detached(
+          icon: const CarbonIcon(CarbonIcons.copy),
+          onPressed: () => detached(
             'PreviewScreen',
             'copy link',
             () => _copyToClipboard(href, 'Copied link'),
@@ -1862,19 +1815,19 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (info.imgSrc case final imgSrc? when imgSrc != info.href) {
       final host = Uri.tryParse(imgSrc)?.host ?? '';
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: isLocalDevHost(host)
               ? 'Open image in new tab'
               : 'Open image in browser',
-          icon: AbIcons.openExternal,
-          onTap: () => _openContextMenuLink(imgSrc),
+          icon: const CarbonIcon(CarbonIcons.launch),
+          onPressed: () => _openContextMenuLink(imgSrc),
         ),
       );
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: 'Copy image address',
-          icon: AbIcons.copy,
-          onTap: () => detached(
+          icon: const CarbonIcon(CarbonIcons.copy),
+          onPressed: () => detached(
             'PreviewScreen',
             'copy image address',
             () => _copyToClipboard(imgSrc, 'Copied image address'),
@@ -1884,12 +1837,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     }
 
     if (info.selectionText.isNotEmpty) {
-      if (entries.isNotEmpty) entries.add(const AbMenuDivider());
+      if (entries.isNotEmpty) entries.add(const CarbonMenuDivider());
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: 'Copy',
-          icon: AbIcons.copy,
-          onTap: () => detached(
+          icon: const CarbonIcon(CarbonIcons.copy),
+          onPressed: () => detached(
             'PreviewScreen',
             'copy selection',
             () => _copyToClipboard(info.selectionText, 'Copied'),
@@ -1898,9 +1851,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
       if (info.editable) {
         entries.add(
-          AbMenuItem(
+          CarbonMenuItem(
             label: 'Cut',
-            onTap: () => detached('PreviewScreen', 'cut selection', () async {
+            onPressed: () => detached('PreviewScreen', 'cut selection', () async {
               await _copyToClipboard(info.selectionText, 'Cut');
               await controller?.runJavaScript(
                 kContextMenuDeleteSelectionScript,
@@ -1912,51 +1865,44 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     }
     if (info.editable) {
       entries.add(
-        AbMenuItem(
+        CarbonMenuItem(
           label: 'Paste',
-          enabled: controller != null,
-          onTap: () => detached('PreviewScreen', 'paste into page', () async {
-            final ctrl = controller;
-            if (ctrl == null) return;
+          onPressed: controller == null ? null : () => detached('PreviewScreen', 'paste into page', () async {
             final data = await Clipboard.getData(Clipboard.kTextPlain);
             final text = data?.text;
             if (text == null || text.isEmpty) return;
-            await ctrl.runJavaScript(buildContextMenuPasteScript(text));
+            await controller.runJavaScript(buildContextMenuPasteScript(text));
           }),
         ),
       );
     }
 
-    if (entries.isNotEmpty) entries.add(const AbMenuDivider());
+    if (entries.isNotEmpty) entries.add(const CarbonMenuDivider());
     entries.add(
-      AbMenuItem(
+      CarbonMenuItem(
         label: 'Select all',
-        enabled: controller != null,
-        onTap: () => _webViewDetached(
+        onPressed: controller == null ? null : () => _webViewDetached(
           'select all',
-          () => controller?.runJavaScript(kContextMenuSelectAllScript),
+          () => controller.runJavaScript(kContextMenuSelectAllScript),
         ),
       ),
     );
     entries.add(
-      AbMenuItem(
+      CarbonMenuItem(
         label: 'Reload',
-        icon: AbIcons.refresh,
-        enabled: controller != null,
-        onTap: () => detached(
+        icon: const CarbonIcon(CarbonIcons.renew),
+        onPressed: controller == null ? null : () => detached(
           'PreviewScreen',
           'reload page',
-          () async => controller?.reload(),
+          () async => controller.reload(),
         ),
       ),
     );
     entries.add(
-      AbMenuItem(
+      CarbonMenuItem(
         label: 'Copy page URL',
-        icon: AbIcons.copy,
-        enabled: tabState != null,
-        onTap: () {
-          if (tabState == null) return;
+        icon: const CarbonIcon(CarbonIcons.copy),
+        onPressed: tabState == null ? null : () {
           detached(
             'PreviewScreen',
             'copy page url',
@@ -1969,37 +1915,41 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ),
     );
 
-    unawaited(
-      showAbMenu<void>(
-        context: context,
-        anchorRect: Rect.fromCenter(center: anchor, width: 1, height: 1),
-        entries: entries,
-      ),
-    );
+    final scoped = _scopeKey.currentContext;
+    if (scoped == null) return;
+    _contextMenu?.close();
+    _contextMenu = showCarbonMenuAt(scoped, anchor, entries);
   }
 
-  static const _loadingRule = Positioned(
+  Widget _loadingRule() => const Positioned(
     top: 0,
     left: 0,
     right: 0,
-    child: IgnorePointer(child: AbProgressRule(fraction: null)),
+    child: IgnorePointer(
+      child: CarbonProgressBar(
+        size: CarbonProgressBarSize.small,
+        label: 'Loading page',
+        hideLabel: true,
+      ),
+    ),
   );
 
-  Widget _buildTabWebView(PreviewTab tab) {
+  Widget _buildTabWebView(BuildContext context, PreviewTab tab) {
+    final background = CarbonTheme.of(context).colors.background;
     final tabState = _tabStates[tab.port];
     final controller = tabState?.controller;
     if (controller == null) {
       if (tabState?.pendingLoadUrl == null) return const SizedBox.shrink();
       return ColoredBox(
-        color: context.antgrid.bgDeepest,
-        child: const Stack(children: [_loadingRule]),
+        color: background,
+        child: Stack(children: [_loadingRule()]),
       );
     }
     final webview = ColoredBox(
-      // Dark underlay so the beat before the platform view first paints (and
+      // Themed underlay so the beat before the platform view first paints (and
       // platforms that ignore setBackgroundColor, e.g. macOS) never flashes
       // white.
-      color: context.antgrid.bgDeepest,
+      color: background,
       child: WebViewWidget(
         key: ValueKey('preview-${tab.port}'),
         controller: controller,
@@ -2038,7 +1988,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           ),
           if (_pullDistance > 0 || _refreshingPort == tab.port)
             Positioned(
-              top: AbTokens.space12,
+              top: CarbonSpacing.spacing04,
               left: 0,
               right: 0,
               child: IgnorePointer(
@@ -2048,7 +1998,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     opacity: _refreshingPort == tab.port
                         ? 1
                         : (_pullDistance / _kPullRefreshThreshold).clamp(0, 1),
-                    child: const AbLoadingDot(size: 16),
+                    child: const CarbonSpinner(size: 16),
                   ),
                 ),
               ),
@@ -2059,150 +2009,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return Stack(
       children: [
         content,
-        if (tabState?.loading ?? false) _loadingRule,
+        if (tabState?.loading ?? false) _loadingRule(),
       ],
     );
   }
-}
-
-/// Content for [_PreviewScreenState._openOverflowMenu] — mobile's overflow
-/// popup for everything besides Back/Forward and the address bar, which stay
-/// inline in the toolbar (see [_buildPreviewView]). Every action row performs
-/// its effect then pops the route itself (`Navigator.of(context).pop()`, no
-/// value), except Clear site data, which pops first because its action pushes
-/// a dialog; the tab-list section below it is [PreviewTabsPanel] unmodified,
-/// whose rows instead pop with the picked port — the caller distinguishes the
-/// two by whether the awaited result is non-null.
-///
-/// Every row is ALWAYS rendered, DISABLED (not hidden) until there's something
-/// to act on — opening this menu with nothing open must show what it can do,
-/// not come up empty. Same reasoning covers the tab list: [PanelHint] stands
-/// in for it while there's nothing to list, so the "Tabs" section itself never
-/// disappears either.
-///
-/// A [ConsumerWidget], not stateless: [showAbPanel] builds this once from the
-/// state at open time, but whether a tab is open can change WHILE the menu is
-/// up (e.g. closing the last tab from the tab-list section below) — watching
-/// [previewStateProvider] directly, the same way [PreviewTabsPanel] already
-/// does for its own rows, is what keeps this panel from freezing on a
-/// snapshot that stopped being true.
-class _PreviewOverflowPanel extends ConsumerWidget {
-  const _PreviewOverflowPanel({
-    required this.hasActiveTab,
-    required this.hasPreviewService,
-    required this.onNewPort,
-    required this.onRefresh,
-    required this.onDraw,
-    required this.drawArmed,
-    required this.onClosedTab,
-    required this.onClearSiteData,
-  });
-
-  final bool hasActiveTab;
-
-  /// Whether a [PreviewService] was resolved at open time — static rather
-  /// than watched, like [hasActiveTab]: unlike the tab list, the service
-  /// itself isn't a provider value this widget can watch directly. Gates
-  /// "New" the same way desktop's own inline "+" button does — on the
-  /// service being resolvable at all, not on a tab already being open.
-  final bool hasPreviewService;
-  final VoidCallback onNewPort;
-  final VoidCallback onRefresh;
-
-  /// Toggles the draw overlay; null while there is no tab to draw on.
-  final VoidCallback? onDraw;
-
-  /// Whether the overlay is currently armed — the row latches, the same way
-  /// desktop's own inline pencil does, since arming it outlives the popup.
-  final bool drawArmed;
-  final ValueChanged<int> onClosedTab;
-  final VoidCallback onClearSiteData;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    void act(VoidCallback action) {
-      action();
-      Navigator.of(context).pop();
-    }
-
-    final hasTabs = ref.watch(
-      previewStateProvider.select((s) => s.value?.tabs.isNotEmpty ?? false),
-    );
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        PanelRow(
-          icon: AbIcons.add,
-          label: 'New',
-          selected: false,
-          mono: false,
-          onTap: hasPreviewService ? () => act(onNewPort) : null,
-        ),
-        PanelRow(
-          icon: AbIcons.draw,
-          label: 'Draw on the page',
-          selected: drawArmed,
-          mono: false,
-          onTap: onDraw == null ? null : () => act(onDraw!),
-        ),
-        PanelRow(
-          icon: AbIcons.refresh,
-          label: 'Refresh',
-          selected: false,
-          mono: false,
-          onTap: hasActiveTab ? () => act(onRefresh) : null,
-        ),
-        PanelRow(
-          icon: AbIcons.trash,
-          label: 'Clear site data',
-          selected: false,
-          mono: false,
-          // Not act(): the callback pushes a confirm dialog, and act()'s pop
-          // after the action would close that dialog instead of this panel.
-          onTap: () {
-            Navigator.of(context).pop();
-            onClearSiteData();
-          },
-        ),
-        const PanelSectionHeader('Tabs', mono: false),
-        if (hasTabs)
-          PreviewTabsPanel(onClosed: onClosedTab)
-        else
-          const PanelHint('No ports open'),
-      ],
-    );
-  }
-}
-
-/// Paints the four corner wedges of a [size]-sized rect in [color] — the
-/// area a rounded rect of the same [radius] excludes. Layered OVER plain
-/// content (see [_PreviewScreenState._framed]) this reads as rounded
-/// corners without ever clipping whatever sits underneath, which matters
-/// specifically for the live webview tab: clipping a platform view is what
-/// produced a flicker under the panel-expand/restore reparent (see
-/// `_framed`'s doc).
-class _CornerMaskPainter extends CustomPainter {
-  const _CornerMaskPainter({required this.radius, required this.color});
-
-  final double radius;
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final outer = Path()..addRect(Offset.zero & size);
-    final inner = Path()
-      ..addRRect(
-        RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
-      );
-    final corners = Path.combine(PathOperation.difference, outer, inner);
-    canvas.drawPath(corners, Paint()..color = color);
-  }
-
-  @override
-  bool shouldRepaint(covariant _CornerMaskPainter oldDelegate) =>
-      oldDelegate.radius != radius || oldDelegate.color != color;
 }
 
 /// Parses top-bar input for opening a NEW tab: a bare port ("3000"), a

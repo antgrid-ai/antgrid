@@ -16,6 +16,9 @@ import { ClientMessage, ErrorCode, ServerMessage } from "../src/relay-protocol";
 const TS = "2026-07-16T00:00:00.000Z";
 const SLOT = "11111111-1111-4111-8111-111111111111#22222222-2222-4222-8222-222222222222";
 const AGENT_ID = "33333333-3333-4333-8333-333333333333";
+const BUS_ID = "44444444-4444-4444-8444-444444444444";
+const BLOB = { epk: "n/YgTWG1mp5hr91k/fKUv+ihZoe6BTiCO6Wdtst7If8=", box: "A".repeat(44) };
+const SIG = "ORt1T7qaueHx0g0ap3NMClaJ9w8PNPExKuLAdj/7vyM4NWy4hPKZHTnjyrAjl9g0++0HxsOTD2QowObKBZlNBg==";
 
 // Sample retryable flags only — realistic, but the relay decides for real.
 const RETRYABLE_SAMPLE = new Set([
@@ -31,6 +34,12 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
     name: "welcome",
     dart: "parsed",
     json: { type: "welcome", deviceId: SLOT, epoch: 1752624000, serverTime: TS },
+  },
+  // Agents get `bus`; Dart ignores unknown keys, so the mirror must still parse it.
+  {
+    name: "welcome:bus",
+    dart: "parsed",
+    json: { type: "welcome", deviceId: AGENT_ID, epoch: 1752624000, serverTime: TS, bus: 1 },
   },
   ...ErrorCode.options.map((code) => ({
     name: `error:${code}`,
@@ -52,6 +61,19 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
     name: "push:result",
     dart: "tolerated",
     json: { type: "push:result", pushToken: "tok-1", ok: false, reason: "unregistered" },
+  },
+  { name: "bus:receipt", dart: "tolerated", json: { type: "bus:receipt", id: BUS_ID, to: AGENT_ID, state: "queued" } },
+  { name: "bus:deliver", dart: "tolerated", json: { type: "bus:deliver", id: BUS_ID, from: AGENT_ID, blob: BLOB } },
+  { name: "bus:acked", dart: "tolerated", json: { type: "bus:acked", id: BUS_ID, to: AGENT_ID, outcome: "applied", sig: SIG } },
+  {
+    name: "bus:acked:refused",
+    dart: "tolerated",
+    json: { type: "bus:acked", id: BUS_ID, to: AGENT_ID, outcome: "refused", code: "STALE", sig: SIG },
+  },
+  {
+    name: "bus:refused",
+    dart: "tolerated",
+    json: { type: "bus:refused", id: BUS_ID, to: AGENT_ID, reason: "queue-full", retryable: true },
   },
 ];
 
@@ -87,6 +109,32 @@ const client: Array<{ name: string; dartEmits: boolean; json: unknown }> = [
       blob: { epk: "n/YgTWG1mp5hr91k/fKUv+ihZoe6BTiCO6Wdtst7If8=", box: "BwcHBwcHBwcHBwcHBwcHBw==" },
     },
   },
+  {
+    name: "hello:bus",
+    dartEmits: false,
+    json: {
+      type: "hello",
+      protocolVersion: 3,
+      deviceType: "agent",
+      deviceId: AGENT_ID,
+      name: "Deterministic Agent",
+      publicKey: "n/YgTWG1mp5hr91k/fKUv+ihZoe6BTiCO6Wdtst7If8=",
+      epoch: 1752624000,
+      licenseToken: "test-license-token.deterministic.payload",
+      ts: TS,
+      nonce: "BwcHBwcHBwcHBwcHBwcHBw==",
+      sig: SIG,
+      bus: 1,
+    },
+  },
+  { name: "bus:send", dartEmits: false, json: { type: "bus:send", id: BUS_ID, to: AGENT_ID, blob: BLOB, ttlMs: 60000 } },
+  { name: "bus:ack", dartEmits: false, json: { type: "bus:ack", id: BUS_ID, outcome: "applied", sig: SIG } },
+  {
+    name: "bus:ack:refused",
+    dartEmits: false,
+    json: { type: "bus:ack", id: BUS_ID, outcome: "refused", code: "STALE", sig: SIG },
+  },
+  { name: "bus:drain", dartEmits: false, json: { type: "bus:drain" } },
 ];
 
 // A fixture that fails its own schema must never be written.

@@ -1,21 +1,23 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/material.dart'
+    show AdaptiveTextSelectionToolbar, SelectionArea;
 import 'package:flutter/rendering.dart' show SelectedContent;
+import 'package:flutter/widgets.dart';
 
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
-import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_diff_stat.dart';
-import '../design/widgets/ab_empty_state.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_scrollbar.dart';
 import '../util/detached.dart';
-import 'code_syntax.dart';
+import 'carbon_code_style.dart';
+import 'carbon_diff_stat.dart';
+import 'carbon_empty_state.dart';
 import 'git_status_color.dart';
 import 'send_to_agent_comment.dart';
 import 'wheel_scroll.dart';
+
+/// Row tints are washes over the page background: strong enough to read as
+/// added/removed, weak enough that code keeps its contrast on them.
+const double _tintAlpha = 0.15;
+const double _hunkTintAlpha = 0.08;
 
 /// Parsed representation of a single diff hunk.
 class _DiffHunk {
@@ -140,13 +142,13 @@ List<_DiffHunk> _parseDiff(String raw) {
 }
 
 /// Renders a unified diff the way the file viewer renders a file: same mono
-/// face, same [kCodeFontSize], same syntax colours, and the same refusal to
+/// face, same [CarbonCodeStyle], same syntax colours, and the same refusal to
 /// reflow — a long line scrolls sideways instead of wrapping, at every window
 /// size. A diff that re-wraps as the pane narrows stops matching the file it
 /// came from exactly when a phone or a split pane needs to read it.
 ///
 /// What it adds over the file viewer is diff-shaped and nothing else: a
-/// per-row tint for added/removed.
+/// per-row tint for added/removed. Only for use inside an `AbCarbonScope`.
 class DiffViewer extends StatefulWidget {
   final String path;
   final String? gitStatus;
@@ -182,40 +184,26 @@ class DiffViewer extends StatefulWidget {
 }
 
 class _DiffViewerState extends State<DiffViewer> {
-  /// The line-number gutter, sized for 5 digits at [AbTokens.fontXs].
-  /// Unscaled — read [_gutterWidth], never this.
-  static const double _baseGutterWidth = 40;
-
-  /// One monospace character, for the +/- marker beside the gutter.
-  /// Unscaled — read [_markerWidth], never this.
-  static const double _baseMarkerWidth = 12;
-
   /// How many of the widest-ranked lines [_measureWidestLine] lays out exactly.
   static const int _measuredCandidates = 24;
+
+  /// The widest line number the gutter is sized for.
+  static const String _gutterSample = '99999';
 
   /// Row height. The extra over the line height is the breathing room the
   /// editor's own rows get from their padding; without it the tint bands touch.
   ///
   /// Scaled, because [itemExtent] is a promise about how tall the row will
   /// actually be: a fixed extent against text the scaler grew clips descenders
-  /// and, past ~1.3x, whole glyphs. The height multiplier applies to the SCALED
-  /// size, which is why this is not `scale(kCodeLineHeight)` — the two agree
-  /// only for a linear scaler, and the app composes its own.
+  /// and, past ~1.3x, whole glyphs. [CarbonCodeStyle.lineHeight] applies the
+  /// height multiplier to the SCALED size, which is why this is not a scaled
+  /// constant — the two agree only for a linear scaler, and the app composes
+  /// its own.
   double get _rowHeight =>
-      _textScaler.scale(kCodeFontSize) * kCodeFontHeight + AbTokens.space4;
-
-  /// The gutter and marker hold text too, so their boxes grow with it — a
-  /// five-digit line number in an unscaled 40px box is clipped at 130%.
-  double get _gutterWidth => _textScaler.scale(_baseGutterWidth);
-  double get _markerWidth => _textScaler.scale(_baseMarkerWidth);
+      _code.lineHeight(_textScaler) + CarbonSpacing.spacing02;
 
   /// Below this the header trades its written "View file" link for an icon.
   static const double _compactHeaderWidth = 360;
-
-  static final TextStyle _codeStyle = AbTokens.monoStyle(
-    fontSize: kCodeFontSize,
-    height: kCodeFontHeight,
-  );
 
   final ScrollController _horizontal = ScrollController();
   final ScrollController _vertical = ScrollController();
@@ -229,9 +217,20 @@ class _DiffViewerState extends State<DiffViewer> {
 
   late List<_DiffRow> _rows;
   late List<_DiffHunk> _hunks;
-  late double _codeWidth;
   late bool _isBinary;
-  CodeLineHighlighter? _highlighter;
+  CarbonLineHighlighter? _highlighter;
+
+  /// Read in [didChangeDependencies] rather than per build, so the highlighter
+  /// sees one identical object between theme changes and keeps its cache.
+  CarbonCodeStyle? _style;
+  CarbonCodeStyle get _code => _style!;
+
+  // Measured, not constants: the gutter and marker hold text, so their boxes
+  // follow the face's own advance and the scaler — a five-digit line number in
+  // a box sized for a narrower face or a smaller scale is clipped.
+  double _codeWidth = 0;
+  double _gutterWidth = 0;
+  double _markerWidth = 0;
 
   /// The scaler the rows will actually be painted with. Rows render through
   /// [Text.rich], which applies [MediaQuery.textScalerOf]; every measurement
@@ -248,12 +247,16 @@ class _DiffViewerState extends State<DiffViewer> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Re-measure when the OS text size or the app's UI Size setting moves; the
-    // measured width is only correct for the scaler it was taken under.
+    // Re-measure when the OS text size, the app's UI Size setting or the theme
+    // moves; the measured widths are only correct for the pair they were taken
+    // under. Also the first measurement: the style needs a context, which
+    // initState does not have.
     final scaler = MediaQuery.textScalerOf(context);
-    if (scaler != _textScaler) {
+    final style = CarbonCodeStyle.of(context);
+    if (_style == null || scaler != _textScaler || style != _style) {
       _textScaler = scaler;
-      _codeWidth = _measureWidestLine(_hunks);
+      _style = style;
+      _measure();
     }
   }
 
@@ -262,6 +265,7 @@ class _DiffViewerState extends State<DiffViewer> {
     super.didUpdateWidget(oldWidget);
     if (widget.diff != oldWidget.diff || widget.path != oldWidget.path) {
       _parse();
+      _measure();
     }
   }
 
@@ -282,7 +286,6 @@ class _DiffViewerState extends State<DiffViewer> {
       _hunks = const [];
       _rows = const [];
       _highlighter = null;
-      _codeWidth = 0;
       return;
     }
     final hunks = _parseDiff(widget.diff);
@@ -294,8 +297,25 @@ class _DiffViewerState extends State<DiffViewer> {
         ...hunk.lines.map(_CodeRow.new),
       ],
     ];
-    _highlighter = CodeLineHighlighter.forPath(widget.path);
-    _codeWidth = _measureWidestLine(hunks);
+    _highlighter = CarbonLineHighlighter.forPath(widget.path);
+  }
+
+  void _measure() {
+    _codeWidth = _measureWidestLine(_hunks);
+    _gutterWidth = _widthOf(_gutterSample);
+    _markerWidth = _widthOf('+');
+  }
+
+  double _widthOf(String text) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: _code.text),
+      textDirection: TextDirection.ltr,
+      textScaler: _textScaler,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
   }
 
   /// The width the code column needs to hold its longest line unwrapped.
@@ -322,13 +342,8 @@ class _DiffViewerState extends State<DiffViewer> {
     var widest = 0.0;
     for (final (_, text) in ranked.take(_measuredCandidates)) {
       if (text.isEmpty) continue;
-      final painter = TextPainter(
-        text: TextSpan(text: text, style: _codeStyle),
-        textDirection: TextDirection.ltr,
-        textScaler: _textScaler,
-        maxLines: 1,
-      )..layout();
-      if (painter.width > widest) widest = painter.width;
+      final width = _widthOf(text);
+      if (width > widest) widest = width;
     }
     return widest;
   }
@@ -353,22 +368,31 @@ class _DiffViewerState extends State<DiffViewer> {
     // repeats that callback because a narrow header collapses the written link
     // to a bare icon.
     final Widget body = _isBinary
-        ? AbEmptyState(
-            icon: AbIcons.fileBinary,
-            title: 'Binary file changed: ${widget.path.split('/').last}',
-            action: AbButton(
+        ? CarbonEmptyState(
+            icon: CarbonIcons.documentUnknown,
+            heading: 'Binary file changed: ${widget.path.split('/').last}',
+            action: CarbonButton(
               label: 'View file',
-              compact: true,
-              onTap: widget.onViewFile,
+              kind: CarbonButtonKind.tertiary,
+              size: CarbonButtonSize.small,
+              onPressed: widget.onViewFile,
             ),
           )
         : _rows.isEmpty
-        ? const AbEmptyState.compact(title: 'No changes')
+        ? const CarbonEmptyState(heading: 'No changes')
         : _buildBody(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [_buildHeader(context), Expanded(child: body)],
+      children: [
+        _buildHeader(context),
+        Expanded(
+          child: ColoredBox(
+            color: CarbonTheme.of(context).colors.background,
+            child: body,
+          ),
+        ),
+      ],
     );
   }
 
@@ -378,11 +402,11 @@ class _DiffViewerState extends State<DiffViewer> {
     // viewport edge reads as a smaller change than it is.
     final contentWidth =
         _gutterWidth +
-        AbTokens.space8 +
+        CarbonSpacing.spacing03 +
         _markerWidth +
-        AbTokens.space8 +
+        CarbonSpacing.spacing03 +
         _codeWidth +
-        AbTokens.space12;
+        CarbonSpacing.spacing04;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -401,14 +425,14 @@ class _DiffViewerState extends State<DiffViewer> {
         return SelectionArea(
           contextMenuBuilder: _buildContextMenu,
           onSelectionChanged: (content) => _lastSelection = content,
-          child: AbScrollbar(
+          child: _DiffScrollbar(
             controller: _vertical,
             notificationPredicate: (n) => n.depth == 1,
-            scrollbarOrientation: ScrollbarOrientation.right,
-            child: AbScrollbar(
+            orientation: ScrollbarOrientation.right,
+            child: _DiffScrollbar(
               controller: _horizontal,
               notificationPredicate: (n) => n.depth == 0,
-              scrollbarOrientation: ScrollbarOrientation.bottom,
+              orientation: ScrollbarOrientation.bottom,
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 controller: _horizontal,
@@ -451,14 +475,15 @@ class _DiffViewerState extends State<DiffViewer> {
   }
 
   Widget _buildHeader(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space12,
-        vertical: AbTokens.space8,
+        horizontal: CarbonSpacing.spacing04,
+        vertical: CarbonSpacing.spacing02,
       ),
       decoration: BoxDecoration(
-        color: context.antgrid.bgDeep,
-        border: Border(bottom: BorderSide(color: context.antgrid.borderSubtle)),
+        color: colors.layer01,
+        border: Border(bottom: BorderSide(color: colors.borderSubtle01)),
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
@@ -467,62 +492,47 @@ class _DiffViewerState extends State<DiffViewer> {
           // below it renders the same at every width.
           final compact = constraints.maxWidth < _compactHeaderWidth;
           return Row(
+            spacing: CarbonSpacing.spacing03,
             children: [
-              if (widget.gitStatus != null) ...[
+              if (widget.gitStatus != null)
                 Text(
                   widget.gitStatus!,
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXs,
+                  style: _code.text.copyWith(
                     fontWeight: FontWeight.w600,
-                    color: gitStatusColor(context, widget.gitStatus!),
+                    color: gitStatusColor(colors, widget.gitStatus!),
                   ),
                 ),
-                const SizedBox(width: AbTokens.space8),
-              ],
               Expanded(
                 child: Text(
                   widget.path,
-                  style: AbTokens.monoStyle(),
+                  style: _code.text.copyWith(color: colors.textPrimary),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: AbTokens.space8),
-              AbDiffStat(
-                additions: widget.additions,
-                deletions: widget.deletions,
-                fontSize: AbTokens.fontXs,
-              ),
-              const SizedBox(width: AbTokens.space8),
+              // Four-digit counts at a large text scale are wider than a docked
+              // pane can spare; the Git row beside it already shows them.
+              if (!compact && (widget.additions > 0 || widget.deletions > 0))
+                CarbonDiffStat(
+                  additions: widget.additions,
+                  deletions: widget.deletions,
+                ),
               if (compact)
-                AbIconButton(
-                  icon: AbIcons.files,
-                  onTap: widget.onViewFile,
-                  tooltip: 'View file',
+                CarbonButton.iconOnly(
+                  icon: const CarbonIcon(CarbonIcons.document),
+                  semanticLabel: 'View file',
+                  onPressed: widget.onViewFile,
                 )
               else
-                GestureDetector(
-                  onTap: widget.onViewFile,
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: Text(
-                      'View file',
-                      style:
-                          AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXs,
-                            color: context.antgrid.accent,
-                          ).copyWith(
-                            decoration: TextDecoration.underline,
-                            decorationColor: context.antgrid.accent,
-                          ),
-                    ),
-                  ),
+                CarbonLink(
+                  label: 'View file',
+                  size: CarbonLinkSize.small,
+                  onPressed: widget.onViewFile,
                 ),
-              const SizedBox(width: AbTokens.space8),
-              AbIconButton(
-                icon: AbIcons.close,
-                onTap: widget.onClose,
-                tooltip: 'Close diff',
+              CarbonButton.iconOnly(
+                icon: const CarbonIcon(CarbonIcons.close),
+                semanticLabel: 'Close diff',
+                onPressed: widget.onClose,
               ),
             ],
           );
@@ -532,55 +542,50 @@ class _DiffViewerState extends State<DiffViewer> {
   }
 
   Widget _buildHunkHeader(BuildContext context, String header) {
+    final colors = CarbonTheme.of(context).colors;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
+      padding: const EdgeInsets.symmetric(horizontal: CarbonSpacing.spacing04),
       alignment: Alignment.centerLeft,
-      color: context.antgrid.accent.withValues(alpha: 0.08),
+      color: colors.linkPrimary.withValues(alpha: _hunkTintAlpha),
       child: Text(
         header,
         maxLines: 1,
         softWrap: false,
         overflow: TextOverflow.clip,
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXs,
-          height: kCodeFontHeight,
-          color: context.antgrid.accent.withValues(alpha: 0.7),
-        ),
+        style: _code.text.copyWith(color: colors.linkPrimary),
       ),
     );
   }
 
   Widget _buildHunkGap(BuildContext context) {
+    final colors = CarbonTheme.of(context).colors;
     return Container(
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: context.antgrid.bgDeep,
+        color: colors.layer01,
         border: Border.symmetric(
-          horizontal: BorderSide(color: context.antgrid.borderSubtle),
+          horizontal: BorderSide(color: colors.borderSubtle01),
         ),
       ),
       child: Text(
         '···',
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXs,
-          height: kCodeFontHeight,
-          color: context.antgrid.textDisabled,
-        ),
+        style: _code.text.copyWith(color: colors.textSecondary),
       ),
     );
   }
 
   Widget _buildLine(BuildContext context, _DiffLine line) {
-    final (Color? bgColor, Color gutterColor) = switch (line.type) {
+    final colors = CarbonTheme.of(context).colors;
+    final (Color? bgColor, Color markerColor) = switch (line.type) {
       _DiffLineType.addition => (
-        context.antgrid.success.withValues(alpha: 0.15),
-        context.antgrid.success.withValues(alpha: 0.6),
+        colors.supportSuccess.withValues(alpha: _tintAlpha),
+        colors.supportSuccess,
       ),
       _DiffLineType.deletion => (
-        context.antgrid.error.withValues(alpha: 0.15),
-        context.antgrid.error.withValues(alpha: 0.6),
+        colors.supportError.withValues(alpha: _tintAlpha),
+        colors.supportError,
       ),
-      _DiffLineType.context => (null, context.antgrid.textMuted),
+      _DiffLineType.context => (null, colors.textSecondary),
     };
 
     // Syntax colours come from the file viewer's own theme, so a line reads
@@ -589,24 +594,22 @@ class _DiffViewerState extends State<DiffViewer> {
     // alone — unreadable to a red/green-blind eye and to a washed-out screen —
     // so the marker [_parseDiff] strips off the front is reinstated in its own
     // column. Plain text when the path has no known language.
-    final base = _codeStyle.copyWith(color: context.antgrid.textPrimary);
     final span =
-        _highlighter?.span(line.text, base) ??
-        TextSpan(text: line.text, style: base);
+        _highlighter?.span(line.text, _code) ??
+        TextSpan(text: line.text, style: _code.text);
 
     return Container(
       color: bgColor,
       alignment: Alignment.centerLeft,
       child: Row(
+        spacing: CarbonSpacing.spacing03,
         children: [
           // ONE number per row: the line as it stands in the file now, falling
           // back to where a removed line used to be — the only row with no
           // "now" to point at. Two columns spent a second gutter restating a
           // number that is the same on all but the changed rows.
-          _buildGutter(line.newLineNum ?? line.oldLineNum, gutterColor),
-          const SizedBox(width: AbTokens.space8),
-          _buildMarker(line.type, gutterColor),
-          const SizedBox(width: AbTokens.space8),
+          _buildGutter(line.newLineNum ?? line.oldLineNum, colors.textSecondary),
+          _buildMarker(line.type, markerColor),
           Expanded(
             child: Text.rich(
               span,
@@ -634,11 +637,7 @@ class _DiffViewerState extends State<DiffViewer> {
             _DiffLineType.context => '',
           },
           maxLines: 1,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            height: kCodeFontHeight,
-            color: color,
-          ),
+          style: _code.text.copyWith(color: color),
         ),
       ),
     );
@@ -655,11 +654,7 @@ class _DiffViewerState extends State<DiffViewer> {
           lineNum?.toString() ?? '',
           textAlign: TextAlign.right,
           maxLines: 1,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            height: kCodeFontHeight,
-            color: color,
-          ),
+          style: _code.text.copyWith(color: color),
         ),
       ),
     );
@@ -705,5 +700,36 @@ class _DiffViewerState extends State<DiffViewer> {
     );
     if (message == null || !mounted) return;
     await widget.onSendToAgent(context, message);
+  }
+}
+
+/// Always visible rather than fading with use: a code line that runs past the
+/// viewport gives no other cue that there is more to the side, so the thumb has
+/// to say so at a glance. Paints nothing when the content fits.
+class _DiffScrollbar extends StatelessWidget {
+  const _DiffScrollbar({
+    required this.controller,
+    required this.notificationPredicate,
+    required this.orientation,
+    required this.child,
+  });
+
+  final ScrollController controller;
+  final ScrollNotificationPredicate notificationPredicate;
+  final ScrollbarOrientation orientation;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return RawScrollbar(
+      controller: controller,
+      notificationPredicate: notificationPredicate,
+      scrollbarOrientation: orientation,
+      thumbVisibility: true,
+      thickness: CarbonSpacing.spacing03,
+      crossAxisMargin: CarbonSpacing.spacing01,
+      thumbColor: CarbonTheme.of(context).colors.borderStrong01,
+      child: child,
+    );
   }
 }

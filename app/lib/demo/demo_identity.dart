@@ -43,7 +43,7 @@ const String kDemoRefusalText =
 
 /// Label on every affordance that opens the demo (sign-in, the desktop setup
 /// checklist, the Recent tab's empty state, the Scheduler's no-machine and
-/// machine-unavailable empty states). One definition because it is the
+/// machine-unavailable empty states, Memory's no-machine state). One definition because it is the
 /// same promise in each place, and a reviewer meeting two wordings would read
 /// them as two different things.
 const String kDemoEntryLabel = 'Explore a sample project';
@@ -73,3 +73,14 @@ AbProject demoProject() => AbProject(
   // sample project having last been opened in 1970.
   lastOpenedAt: DateTime.now(),
 );
+
+/// What the sample calls the machine it pretends to run on. Shared so the
+/// Scheduler and Memory selectors name the same machine.
+const String kDemoMachineName = 'Sample machine';
+
+/// Display names for the sample's agents. Kept out of the persisted agent
+/// catalog on purpose: the sample must leave nothing on disk.
+const Map<String, String> kDemoAgentLabels = <String, String>{
+  'claude-code': 'Claude Code',
+  'codex': 'Codex',
+};

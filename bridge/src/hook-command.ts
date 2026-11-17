@@ -8,7 +8,7 @@ export type BridgeCommand = HookCommand;
  * plus a subcommand is the only self-invocation available — `bun run <script>`
  * has no script to run.
  */
-export type BridgeSubcommand = "hook" | "mcp";
+export type BridgeSubcommand = "hook" | "mcp" | "memory-mcp";
 
 export interface ResolveBridgeCommandOptions {
   compiled?: boolean;
@@ -45,3 +45,9 @@ export function resolveMcpCommand(
 }
 
 export function mcpArgv(command: BridgeCommand): string[] { return [command.binary, ...command.preargs]; }
+
+export function resolveMemoryMcpCommand(
+  opts: ResolveBridgeCommandOptions = {},
+): BridgeCommand {
+  return resolveBridgeCommand("memory-mcp", opts);
+}

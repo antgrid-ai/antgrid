@@ -1,12 +1,8 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 
 import '../constants/breakpoints.dart';
-import '../design/ab_colors.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/widgets/ab_icon_button.dart';
-import '../design/widgets/ab_separator.dart';
 import '../models/file_tree_models.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
@@ -14,10 +10,13 @@ import '../util/markdown_link_target.dart';
 import 'markdown_document_config.dart';
 import 'markdown_outline.dart';
 import 'preview_with_source_toggle.dart';
+import 'viewer_support.dart';
 
 /// Below this many headings an outline says less than the document already
 /// does, so the rail and its toggle never appear.
 const int _minOutlineHeadings = 3;
+
+const double _outlineWidth = CarbonSpacing.spacing13 + CarbonSpacing.spacing10;
 
 /// Renders a markdown file. Defaults to the rendered preview; a header toggle
 /// switches to the full source code view.
@@ -70,7 +69,7 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
 
   MarkdownWidget? _cachedDocument;
   String? _cachedData;
-  AbColors? _cachedColors;
+  CarbonThemeData? _cachedTheme;
 
   @override
   void dispose() {
@@ -136,11 +135,11 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
           searchQuery: widget.searchQuery,
           extraActions: [
             if (hasOutline)
-              AbIconButton(
-                icon: AbIcons.list,
+              ViewerIconButton(
+                icon: CarbonIcons.listBulleted,
                 selected: showOutline,
-                tooltip: showOutline ? 'Hide outline' : 'Show outline',
-                onTap: () => setState(() => _outlineOpen = !showOutline),
+                label: showOutline ? 'Hide outline' : 'Show outline',
+                onPressed: () => setState(() => _outlineOpen = !showOutline),
               ),
           ],
           previewBuilder: (context) =>
@@ -155,7 +154,7 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
     required bool wide,
     required bool showOutline,
   }) {
-    final c = context.antgrid;
+    final colors = CarbonTheme.of(context).colors;
     final outline = MarkdownOutline(
       controller: _toc,
       // Back to following the pane width rather than latching closed: a
@@ -165,7 +164,7 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
     );
 
     return ColoredBox(
-      color: c.bgDeepest,
+      color: colors.background,
       child: Stack(
         // Tight constraints for the row beneath: a loose-fit stack would leave
         // the document's list to shrink-wrap a height it cannot compute.
@@ -178,13 +177,15 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
               // does: no reading-width cap, whose leftover space only ever
               // landed on the right and left half a maximised viewer empty.
               Expanded(child: _document(context)),
-              if (showOutline && wide) ...[
-                const AbSeparator.vertical(),
-                SizedBox(
-                  width: AbTokens.documentOutlineWidth,
-                  child: outline,
+              if (showOutline && wide)
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      left: BorderSide(color: colors.borderSubtle00),
+                    ),
+                  ),
+                  child: SizedBox(width: _outlineWidth, child: outline),
                 ),
-              ],
             ],
           ),
           // Narrow panes get the outline over the document rather than in place
@@ -192,7 +193,7 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
           // reader is about to jump within, and the controller with it.
           if (showOutline && !wide)
             Positioned.fill(
-              child: ColoredBox(color: c.bgDeepest, child: outline),
+              child: ColoredBox(color: colors.background, child: outline),
             ),
         ],
       ),
@@ -207,25 +208,25 @@ class _MarkdownPreviewState extends State<MarkdownPreview> {
   /// only thing keeping the heading-count `setState`, an outline toggle or a
   /// theme rebuild from re-parsing a document nobody edited. Every argument
   /// below is part of the key: one added without a matching field here renders
-  /// stale, and nothing warns.
+  /// stale, and nothing warns. The Carbon theme is compared by value, which
+  /// covers brightness and density: the config reads its colours, type roles
+  /// and code palette from it.
   MarkdownWidget _document(BuildContext context) {
     final data = widget.content.content ?? '';
-    final colors = context.antgrid;
+    final theme = CarbonTheme.of(context);
     final cached = _cachedDocument;
-    if (cached != null &&
-        _cachedData == data &&
-        identical(_cachedColors, colors)) {
+    if (cached != null && _cachedData == data && _cachedTheme == theme) {
       return cached;
     }
     _cachedData = data;
-    _cachedColors = colors;
+    _cachedTheme = theme;
     return _cachedDocument = MarkdownWidget(
       data: data,
       tocController: _toc,
       markdownGenerator: markdownDocumentGenerator,
       padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space24,
-        vertical: AbTokens.space16,
+        horizontal: CarbonSpacing.spacing06,
+        vertical: CarbonSpacing.spacing05,
       ),
       config: buildMarkdownDocumentConfig(context, onLinkTap: _onLinkTap),
     );

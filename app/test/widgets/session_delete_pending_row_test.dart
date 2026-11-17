@@ -1,10 +1,9 @@
 // A delete runs for 3-15s on the bridge. The drawer row is the surface that has
 // to say so: it stays visible, goes inert, and offers nothing that acts on a
 // session already being taken apart.
-import 'package:antgrid/design/widgets/ab_list_row.dart';
-import 'package:antgrid/design/widgets/ab_loading.dart';
-import 'package:antgrid/design/widgets/ab_status_dot.dart';
+import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/widgets/carbon_status_dot.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -12,6 +11,7 @@ import 'package:antgrid/providers/session_delete_pending.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_row.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,14 +60,14 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
-          home: Scaffold(
+          home: AbCarbonScope(child: Scaffold(
             body: Column(
               children: [
                 for (final s in sessions)
                   SessionRow(entryId: _projectId, session: s),
               ],
             ),
-          ),
+          )),
         ),
       ),
     );
@@ -80,16 +80,16 @@ void main() {
   Finder rowFor(String id) =>
       find.byWidgetPredicate((w) => w is SessionRow && w.session.id == id);
 
-  AbListRow listRowOf(WidgetTester tester, String id) =>
-      tester.widget<AbListRow>(
-        find.descendant(of: rowFor(id), matching: find.byType(AbListRow)),
+  CarbonSideNavLink listRowOf(WidgetTester tester, String id) =>
+      tester.widget<CarbonSideNavLink>(
+        find.descendant(of: rowFor(id), matching: find.byType(CarbonSideNavLink)),
       );
 
   bool kebabVisible(WidgetTester tester, String id) =>
       find
           .descendant(
             of: rowFor(id),
-            matching: find.byTooltip('Session actions'),
+            matching: find.byType(CarbonOverflowMenu),
           )
           .evaluate()
           .isNotEmpty;
@@ -103,22 +103,21 @@ void main() {
 
     // Still on screen — the point is to show the delete, not to hide the row.
     expect(rowFor('a'), findsOneWidget);
-    expect(find.text('DELETING'), findsOneWidget);
+    expect(find.text('Deleting'), findsOneWidget);
 
     // The leading slot swaps outright: work status is about a live agent.
     expect(
-      find.descendant(of: rowFor('a'), matching: find.byType(AbLoadingDot)),
+      find.descendant(of: rowFor('a'), matching: find.byType(CarbonSpinner)),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: rowFor('a'), matching: find.byType(AbStatusDot)),
+      find.descendant(of: rowFor('a'), matching: find.byType(CarbonWorkStatusDot)),
       findsNothing,
     );
 
     final deleting = listRowOf(tester, 'a');
-    expect(deleting.enabled, isFalse);
-    expect(deleting.onTap, isNull);
-    expect(deleting.onDoubleTap, isNull);
+    expect(deleting.disabled, isTrue);
+    expect(deleting.onDoublePressed, isNull);
 
     // Every kebab item acts on the session being removed, so the whole menu
     // goes — including the working-directory rows pointing into the checkout.
@@ -136,10 +135,10 @@ void main() {
 
     // The sibling is untouched.
     final sibling = listRowOf(tester, 'b');
-    expect(sibling.enabled, isTrue);
-    expect(sibling.onTap, isNotNull);
+    expect(sibling.disabled, isFalse);
+    expect(sibling.onPressed, isNotNull);
     expect(
-      find.descendant(of: rowFor('b'), matching: find.byType(AbLoadingDot)),
+      find.descendant(of: rowFor('b'), matching: find.byType(CarbonSpinner)),
       findsNothing,
     );
     expect(kebabVisible(tester, 'b'), isTrue);
@@ -153,9 +152,9 @@ void main() {
     final transport = FakeAgentTransport();
     await pumpRows(tester, transport, [_session('a')]);
 
-    expect(find.text('DELETING'), findsNothing);
+    expect(find.text('Deleting'), findsNothing);
     expect(
-      find.descendant(of: rowFor('a'), matching: find.byType(AbLoadingDot)),
+      find.descendant(of: rowFor('a'), matching: find.byType(CarbonSpinner)),
       findsNothing,
     );
 
@@ -169,15 +168,15 @@ void main() {
   ) async {
     final transport = FakeAgentTransport();
     final container = await pumpRows(tester, transport, [_session('a')]);
-    expect(find.text('DELETING'), findsNothing);
+    expect(find.text('Deleting'), findsNothing);
 
     container
         .read(sessionDeleteRequestsProvider.notifier)
         .arm(sessionDeleteKey(_projectId, 'a'));
     await tester.pump();
 
-    expect(find.text('DELETING'), findsOneWidget);
-    expect(listRowOf(tester, 'a').enabled, isFalse);
+    expect(find.text('Deleting'), findsOneWidget);
+    expect(listRowOf(tester, 'a').disabled, isTrue);
     expect(kebabVisible(tester, 'a'), isFalse);
 
     // Releases the mark's auto-expiry timer, which outlives the widget tree.

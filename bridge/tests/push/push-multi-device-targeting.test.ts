@@ -79,7 +79,7 @@ async function startCore(
     remote: {
       attachStream: (b) => {
         bus = b;
-        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
+        return { detach: () => {}, sendTo: async () => "sent" as const };
       },
       establishedPeers: () => peers,
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,

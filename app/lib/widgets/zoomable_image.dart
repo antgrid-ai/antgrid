@@ -1,9 +1,8 @@
 import 'dart:math' as math;
 
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
-
-import '../design/ab_tokens.dart';
 
 /// Pinch, pan, double-tap and wheel zoom over [child], which is laid out at
 /// the viewport's size and scaled inside it.
@@ -49,8 +48,17 @@ class ZoomableImageState extends State<ZoomableImage>
     super.initState();
     _animation = AnimationController(
       vsync: this,
-      duration: AbTokens.motionDefault,
+      duration: CarbonMotion.moderate01,
     )..addListener(_stepAnimation);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _animation.duration = CarbonMotion.resolve(
+      context,
+      CarbonMotion.moderate01,
+    );
   }
 
   @override
@@ -61,7 +69,9 @@ class ZoomableImageState extends State<ZoomableImage>
   }
 
   void _stepAnimation() {
-    _matrix.value = _tween.transform(Curves.easeOut.transform(_animation.value));
+    _matrix.value = _tween.transform(
+      CarbonMotion.standard.transform(_animation.value),
+    );
   }
 
   void _animateTo(Matrix4 target) {

@@ -44,6 +44,12 @@ export interface Connection {
    */
   helloNonce: string;
   helloTs: number;
+  /**
+   * The agent's hello asked for bus frames. Not part of the signed hello body,
+   * so it claims a capability, not an identity: a client that omits it is never
+   * sent a `bus:*` frame it would reject as schema-invalid.
+   */
+  busCapable: boolean;
   ws: ServerWebSocket<WsData>;
   connectedAt: number;
   /** Transport diagnostics only — NEVER consulted for arbitration. */

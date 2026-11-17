@@ -1,26 +1,21 @@
 // app/lib/widgets/drawer_entry_row.dart
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/material.dart' show Scaffold;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../connection/peer_connection.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
-import '../design/ab_icons.dart';
-import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
-import '../design/widgets/ab_disclosure_chevron.dart';
-import '../design/widgets/ab_icon.dart';
-import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_toast.dart';
+import '../models/agent_work_status.dart';
 import '../models/drawer_entry.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
+import '../util/detached.dart';
 import '../util/device_id.dart';
 import '../project/checkout_readiness.dart';
-import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/checkout_readiness.dart';
@@ -35,137 +30,166 @@ import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import 'ab_status_helpers.dart';
+import 'carbon_confirm.dart' show showCarbonConfirm;
+import 'carbon_status_dot.dart';
+import 'drawer/drawer_metrics.dart';
+import 'recent_sessions/recent_sessions_summary.dart' show workStatusLabel;
 import 'session_isolation_badge.dart' show sessionIsIsolated;
 
-/// Shared hover shell for drawer rows: the gutter [Padding] kept outside the
-/// [MouseRegion] (so the L/R strips aren't hover/tap-reactive), the click cursor,
-/// and the hover bits both row variants drive. [onHoverStart]/[onHoverEnd] let a
-/// row hang extra work (e.g. a prefetch timer) off the desktop pointer
-/// transitions; they never fire on mobile.
+/// A status dot is 8px on a pointer and 10px on touch, where the whole row
+/// grows to 44.
+const double _kTouchDotSize = 10;
+
+double _dotSize(CarbonThemeData t) =>
+    t.isTouch ? _kTouchDotSize : CarbonSpacing.spacing03;
+
+/// A hollow liveness ring must show the row's own fill (rest, hover or
+/// selected) through its middle, so it is filled with nothing.
+Color _transparentFill(CarbonThemeData t) =>
+    t.colors.background.withValues(alpha: 0);
+
+/// Gives the outermost trailing mark the rail's width, so a bare dot at rest
+/// centres where the actions that replace it will.
+Widget _railed(BuildContext context, Widget child) {
+  final t = CarbonTheme.of(context);
+  if (t.isTouch) return child;
+  return ConstrainedBox(
+    constraints: BoxConstraints(minWidth: drawerRailCell(t)),
+    child: Center(child: child),
+  );
+}
+
+/// A project row's whole accessible name. The row's content is hidden from
+/// semantics, so the marks it shows have to be spoken from here.
+String drawerSpokenProjectName(String name, {List<String> extras = const []}) =>
+    [name, ...extras].join(', ');
+
+/// The one project row, whichever machines hold the project.
 ///
-/// The builder gets TWO bits, and they differ only on touch. `hovered` gates
-/// hover-revealed AFFORDANCES and starts true on mobile, which has no pointer to
-/// reveal them with. `pointerOver` is the literal pointer state and stays false
-/// there — a row that swaps its identity glyph for a chevron must key off this
-/// one, or the glyph is permanently swapped on every phone and never shows at
-/// all.
-class HoverableDrawerRow extends StatefulWidget {
-  const HoverableDrawerRow({
+/// At rest the leading slot carries the folder and under a pointer a container
+/// swaps it for its disclosure chevron, in the same slot so the swap never
+/// shifts the title (deviation CSN-chevron). Project rows take no hover fill
+/// (deviation CSN-no-hover): the fill previews selection and this row's tap
+/// expands.
+///
+/// The hover callbacks are on one region around the whole row, actions
+/// included, so moving from the title onto an action does not end the hover
+/// that a prefetch is timing. The strip outside the row is not part of it.
+class DrawerProjectRow extends StatelessWidget {
+  const DrawerProjectRow({
     super.key,
-    required this.builder,
-    this.above,
+    required this.name,
+    required this.spokenName,
+    required this.expanded,
+    required this.warm,
+    required this.onToggle,
+    this.dimmed = false,
+    this.error,
+    this.marks = const <Widget>[],
+    this.actions = const <Widget>[],
+    this.keepActionsRevealed = false,
     this.onHoverStart,
     this.onHoverEnd,
   });
 
-  /// Chrome that belongs to this row's block but must not be hover-reactive:
-  /// it sits inside the gutter, above the [MouseRegion]. Kept out of [builder]
-  /// so the pointer neither reveals the row's hover affordances from over it
-  /// nor rebuilds it.
-  final Widget? above;
+  final String name;
+  final String spokenName;
+  final bool expanded;
 
-  final Widget Function(BuildContext context, bool hovered, bool pointerOver)
-  builder;
+  /// The project holds an open session, so its folder is not dimmed.
+  final bool warm;
+  final VoidCallback onToggle;
+
+  /// Every machine holding the project is offline, so its name steps down too.
+  final bool dimmed;
+
+  /// Shown beside the title rather than in the trailing slot: the trailing
+  /// marks are covered by the actions under the pointer, and this one is the
+  /// only way to read the error's text.
+  final Widget? error;
+
+  /// Status marks, outermost last.
+  final List<Widget> marks;
+  final List<Widget> actions;
+  final bool keepActionsRevealed;
   final VoidCallback? onHoverStart;
   final VoidCallback? onHoverEnd;
 
   @override
-  State<HoverableDrawerRow> createState() => _HoverableDrawerRowState();
-}
-
-class _HoverableDrawerRowState extends State<HoverableDrawerRow> {
-  bool _pointerOver = false;
-
-  /// Affordance visibility. Mobile has no pointer, so they start visible.
-  bool get _hovered => isMobilePlatform || _pointerOver;
-
-  void _onEnter(PointerEnterEvent _) {
-    if (isMobilePlatform) return;
-    if (!_pointerOver && mounted) setState(() => _pointerOver = true);
-    widget.onHoverStart?.call();
-  }
-
-  void _onExit(PointerExitEvent _) {
-    if (isMobilePlatform) return;
-    if (_pointerOver && mounted) setState(() => _pointerOver = false);
-    widget.onHoverEnd?.call();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final region = MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: _onEnter,
-      onExit: _onExit,
-      child: widget.builder(context, _hovered, _pointerOver),
-    );
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.drawerGutter),
-      child: widget.above == null
-          ? region
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [widget.above!, region],
+    final colors = CarbonTheme.of(context).colors;
+    // Silent: the row's spoken name already carries each mark's state.
+    final trailing = <Widget>[
+      for (var i = 0; i < marks.length; i++)
+        ExcludeSemantics(
+          child: i == marks.length - 1
+              ? _railed(context, marks[i])
+              : marks[i],
+        ),
+    ];
+    final row = CarbonSideNavMenu(
+      title: spokenName,
+      content: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              name,
+              style: dimmed ? TextStyle(color: colors.textPlaceholder) : null,
             ),
+          ),
+          if (error != null) ...[
+            const SizedBox(width: CarbonSpacing.spacing02),
+            error!,
+          ],
+        ],
+      ),
+      // Dimmed while the project holds no open session. `iconDisabled` would
+      // read as a row that cannot be tapped, so the cold glyph steps down to
+      // the placeholder tone instead.
+      leading: CarbonIcon(
+        CarbonIcons.folder,
+        color: warm ? colors.iconSecondary : colors.textPlaceholder,
+      ),
+      expanded: expanded,
+      onExpandedChanged: (_) => onToggle(),
+      chevron: CarbonSideNavChevron.swapsIcon,
+      hoverFill: false,
+      trailing: trailing,
+      actions: actions,
+      keepActionsRevealed: keepActionsRevealed,
+      children: const <Widget>[],
+    );
+    final start = onHoverStart;
+    final end = onHoverEnd;
+    if (start == null && end == null) return row;
+    return MouseRegion(
+      onEnter: (_) => start?.call(),
+      onExit: (_) => end?.call(),
+      child: row,
     );
   }
 }
 
-/// The leading slot of a PROJECT row, local or advertised-remote alike.
-///
-/// One rule for the whole drawer: at rest the slot carries the row's identity
-/// glyph, and under the pointer a container swaps it for its disclosure
-/// chevron. Both are boxed to [AbTokens.drawerLeadingSlot] at the same glyph
-/// size, so the swap never shifts the title.
-class DrawerProjectLeading extends StatelessWidget {
-  const DrawerProjectLeading({
-    super.key,
-    required this.expanded,
-    required this.pointerOver,
-    required this.warm,
-  });
+/// A work-status dot for a rollup. Only `attention` pulses: it is the one
+/// status that is asking for the user, and a pulse on every rollup would dilute
+/// it. The pulse is an app-level addition (see [CarbonStatusDot]).
+class DrawerAttentionDot extends StatelessWidget {
+  const DrawerAttentionDot({super.key, required this.status});
 
-  final bool expanded;
-  final bool pointerOver;
-
-  /// The project holds an open session — see [_leadingTint].
-  final bool warm;
+  final AgentWorkStatus status;
 
   @override
   Widget build(BuildContext context) {
-    final tint = _leadingTint(context, warm);
-    if (pointerOver) {
-      return AbDisclosureChevron(expanded: expanded, color: tint);
-    }
-    return SizedBox(
-      width: AbTokens.drawerLeadingSlot,
-      height: AbTokens.drawerLeadingSlot,
-      child: Center(
-        // Match chevron size so the glyph doesn't shrink on hover.
-        child: AbIcon(AbIcons.folder, size: 10, color: tint),
-      ),
+    final t = CarbonTheme.of(context);
+    return CarbonWorkStatusDot(
+      status: status,
+      pulse: status == AgentWorkStatus.attention,
+      size: _dotSize(t),
+      semanticLabel: workStatusLabel(status),
+      hollowFill: _transparentFill(t),
     );
   }
-}
-
-/// Title style for a PROJECT row. Weight, not size, is what makes it read as
-/// the container of the session rows beneath it: those are the payload the user
-/// is scanning for and stay the largest text in the panel, so a project that
-/// out-sized them would invert the hierarchy it is supposed to anchor.
-TextStyle drawerProjectTitleStyle(BuildContext context) => AbTokens.sansStyle(
-  fontSize: AbTokens.fontSm,
-  fontWeight: FontWeight.w600,
-  color: context.antgrid.textSecondary,
-);
-
-/// Leading-glyph tint for a drawer row, dimmed while the project holds no open
-/// session.
-///
-/// Baked into the colour rather than applied with `Opacity`, which would
-/// composite a layer per row to reach the same pixels.
-Color _leadingTint(BuildContext context, bool isWarm) {
-  final muted = context.antgrid.textMuted;
-  return isWarm ? muted : muted.withValues(alpha: muted.a * 0.6);
 }
 
 /// Trash affordance for removing a project/machine from history.
@@ -184,9 +208,9 @@ Color _leadingTint(BuildContext context, bool isWarm) {
 class DrawerRemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
 
-  /// Held true while the confirm dialog is up. The row that revealed this
-  /// button collapses on pointer-exit, and the pointer leaves it the moment the
-  /// modal opens — without the latch the trash unmounts under its own dialog.
+  /// Held true while the menu or the confirm dialog is up. The pointer leaves
+  /// the row for the menu's overlay and then the modal, and without the latch
+  /// the actions would hide under their own menu or dialog.
   final ValueChanged<bool>? onLatch;
 
   const DrawerRemoveButton({super.key, required this.entry, this.onLatch});
@@ -229,67 +253,175 @@ class _DrawerRemoveButtonState extends ConsumerState<DrawerRemoveButton> {
   // second tap can't re-enter `_confirmRemove`.
   bool _busy = false;
 
+  // Owned so focus can be put back on a live node: the menu's own restore
+  // target is an overlay item that is gone by the time the menu closes.
+  final FocusNode _triggerFocus = FocusNode(debugLabel: 'drawer remove menu');
+
+  // The package does not report a close when the trigger unmounts under an
+  // open menu, so the latch it took would never be released.
+  bool _menuOpen = false;
+
+  bool _modalOpen = false;
+
+  void _onMenuOpenChanged(bool open) {
+    _menuOpen = open;
+    if (open) {
+      widget.onLatch?.call(true);
+      return;
+    }
+    _restoreFocus();
+    // An item's callback follows this close in the same event and takes the
+    // latch back for its modal, so the release waits to see whether it did.
+    _releaseLatchAfterFrame(() => !_modalOpen);
+  }
+
+  // The row learns that focus now sits on the trigger only after a frame, so
+  // releasing the latch at once hides the actions, and the trigger with them,
+  // just after it was handed focus.
+  void _releaseLatchAfterFrame(bool Function() stillWanted) {
+    final onLatch = widget.onLatch;
+    if (onLatch == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (stillWanted()) onLatch(false);
+    });
+  }
+
+  // Asked twice: the menu and the modal route each restore their own captured
+  // focus target as they unwind, after this runs, and neither target survives.
+  void _restoreFocus() {
+    void request() {
+      if (!mounted || !_triggerFocus.canRequestFocus) return;
+      _triggerFocus.requestFocus();
+      FocusManager.instance.applyFocusChangesIfNeeded();
+    }
+
+    request();
+    WidgetsBinding.instance.addPostFrameCallback((_) => request());
+  }
+
+  @override
+  void dispose() {
+    final onLatch = widget.onLatch;
+    if (_menuOpen && onLatch != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => onLatch(false));
+    }
+    _triggerFocus.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isLocal = widget.entry is LocalProjectEntry;
-    return AbIconButton(
-      icon: AbIcons.trash,
-      tooltip: isLocal ? 'Remove from history' : 'Forget agent',
-      onTap: _busy ? null : () => _confirmRemove(isLocal: isLocal),
+    final cell = drawerRailCell(CarbonTheme.of(context));
+    // The cell is the rail's square. Carbon's extra-small trigger is exactly
+    // that box on a pointer and a full touch target on touch, so the trigger
+    // fills it and what paints is what takes the tap.
+    return SizedBox(
+      key: const ValueKey('drawer-remove-cell'),
+      width: cell,
+      height: cell,
+      child: CarbonOverflowMenu(
+        semanticLabel: 'Actions for ${widget.entry.displayName}',
+        enabled: !_busy,
+        size: CarbonButtonSize.extraSmall,
+        focusNode: _triggerFocus,
+        // The menu's overlay sits outside the row's hover region, so the
+        // pointer crossing into it would un-reveal the row. The latch holds
+        // the actions visible for as long as the menu is up.
+        onOpenChanged: _onMenuOpenChanged,
+        entries: [
+          CarbonMenuItem(
+            label: isLocal ? 'Remove from history' : 'Forget agent',
+            kind: CarbonMenuItemKind.danger,
+            onPressed: () => detached(
+              'DrawerEntryRow',
+              'remove project',
+              _confirmRemove,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  Future<void> _confirmRemove({required bool isLocal}) async {
+  Future<void> _confirmRemove() async {
     final entry = widget.entry;
     // Captured before the dialog await: the removal below must still run if the
     // drawer rebuilt this row away while the confirm was open.
     final container = ref.container;
     final onLatch = widget.onLatch;
     onLatch?.call(true);
+    _modalOpen = true;
+    // The modal route restores whatever held focus when it opened, and at this
+    // point that is the menu item, which dies with the menu overlay.
+    _triggerFocus.requestFocus();
+    FocusManager.instance.applyFocusChangesIfNeeded();
     try {
-      final ok = await AbConfirmDialog.show(
-        context: context,
-        title: isLocal
-            ? 'Remove ${entry.displayName}?'
-            : 'Forget ${entry.displayName}?',
-        body: isLocal
-            ? removeLocalProjectBody(container, entry.id)
-            : 'This clears the cached sessions and connection details for '
-                  'this machine. It comes back on its own while it is signed '
-                  'in to your account.',
-        confirmLabel: isLocal ? 'Remove' : 'Forget',
-        destructive: true,
+      await confirmRemoveDrawerEntry(
+        context,
+        container,
+        entry,
+        // No `mounted` EARLY RETURN here, only a guarded setState: a confirmed
+        // destructive action runs off the captured container, and bailing out
+        // because the row was rebuilt away would turn a Yes into a silent no-op.
+        onConfirmed: () {
+          if (mounted) setState(() => _busy = true);
+        },
       );
-      if (!ok) return;
-      // No `mounted` EARLY RETURN here, only a guarded setState: a confirmed
-      // destructive action runs off the captured container, and bailing out
-      // because the row was rebuilt away would turn a Yes into a silent no-op.
-      if (mounted) setState(() => _busy = true);
-      try {
-        switch (entry) {
-          case LocalProjectEntry e:
-            // `ProjectsNotifier.remove` owns the local teardown: it stops the
-            // project's sessions/terminals, disposes its services + transport,
-            // then forgets the record.
-            await container.read(projectsProvider.notifier).remove(e.id);
-          case RemoteAgentEntry e:
-            await container
-                .read(machineConnectionProvider.notifier)
-                .forgetMachine(e.agent.agentDeviceId);
-          case InventoryAgentEntry _:
-            // Inventory agents are not stored locally — nothing to remove.
-            // The entry will disappear from the list when the account inventory
-            // is next refreshed or the device is deleted server-side.
-            break;
-        }
-      } finally {
-        // The row is usually gone after removal (entry dropped from the
-        // drawer); guard the setState so we don't touch a disposed State.
-        if (mounted) setState(() => _busy = false);
-      }
     } finally {
-      onLatch?.call(false);
+      // The row is usually gone after removal (entry dropped from the drawer);
+      // guard the setState so we don't touch a disposed State.
+      if (mounted) setState(() => _busy = false);
+      _modalOpen = false;
+      _restoreFocus();
+      _releaseLatchAfterFrame(() => !_modalOpen && !_menuOpen);
     }
+  }
+}
+
+/// Asks to remove [entry] from history (a local project) or forget it (a
+/// remote machine), and does it on a Yes. [onConfirmed] runs between the Yes
+/// and the teardown, for a caller that disables itself while it runs.
+///
+/// Takes the [ProviderContainer] rather than a `WidgetRef`: the removal must
+/// still run when the row that asked was rebuilt away while the dialog was up.
+Future<void> confirmRemoveDrawerEntry(
+  BuildContext context,
+  ProviderContainer container,
+  DrawerEntry entry, {
+  VoidCallback? onConfirmed,
+}) async {
+  final isLocal = entry is LocalProjectEntry;
+  final ok = await showCarbonConfirm(
+    context,
+    title: isLocal
+        ? 'Remove ${entry.displayName}?'
+        : 'Forget ${entry.displayName}?',
+    body: isLocal
+        ? removeLocalProjectBody(container, entry.id)
+        : 'This clears the cached sessions and connection details for '
+              'this machine. It comes back on its own while it is signed '
+              'in to your account.',
+    confirmLabel: isLocal ? 'Remove' : 'Forget',
+    danger: true,
+  );
+  if (!ok) return;
+  onConfirmed?.call();
+  switch (entry) {
+    case LocalProjectEntry e:
+      // `ProjectsNotifier.remove` owns the local teardown: it stops the
+      // project's sessions/terminals, disposes its services + transport, then
+      // forgets the record.
+      await container.read(projectsProvider.notifier).remove(e.id);
+    case RemoteAgentEntry e:
+      await container
+          .read(machineConnectionProvider.notifier)
+          .forgetMachine(e.agent.agentDeviceId);
+    case InventoryAgentEntry _:
+      // Inventory agents are not stored locally — nothing to remove. The entry
+      // will disappear from the list when the account inventory is next
+      // refreshed or the device is deleted server-side.
+      break;
   }
 }
 

@@ -2445,7 +2445,7 @@ export class HandlerEngine {
    * escalation must survive to the next arm. Without that, every host shutdown
    * silently emptied the session it was supposed to preserve.
    *
-   * `keepArmed` is for a session:set-mode flip, where the runtime is being
+   * `keepArmed` is for a session:set-mode flip or session:restart, where the runtime is being
    * swapped underneath a session that itself survives. The supervisor is keyed
    * by session id, so disarming there would answer "I changed how I'm viewing
    * this" with "your supervision is off" — a status flap the user never asked

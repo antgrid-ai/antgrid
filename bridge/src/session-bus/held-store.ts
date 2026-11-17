@@ -1,17 +1,18 @@
-// Messages this bridge's own transport REFUSED, kept so a link that was down for
-// a moment does not cost a message.
+// The outbox: every message this bridge sent to another machine and has not yet
+// seen acknowledged, kept so a link that was down for a moment, a relay that
+// restarted, or a recipient that was asleep does not cost a message.
 //
-// A message carries no seq and no ack and is allowed to be lossy, which makes
-// one already on the wire unretryable: a second copy would land as a second
-// message with nothing to tell it from the first. What CAN be redelivered is one
-// that never left — `send` returning false is this machine's own refusal,
-// decided before anything reached the relay — so nothing here can duplicate at
-// the receiver. That distinction is the whole reason this store is allowed to
-// exist, and it is why a caller must hold ONLY on a false return and never on a
-// silence.
+// DELIVERY IS AT-LEAST-ONCE. A frame stays here until the recipient's signed
+// ack says it stored it (or says it will never be stored), and it is offered
+// again on a backoff until then, so the recipient may see the same message id
+// more than once. That is safe only because the receiving side remembers every
+// id it has verdicted (`seen-store.ts`) and answers a repeat from the stored
+// verdict instead of applying it again. The two halves are one contract:
+// loosening either alone turns a retry into a duplicate or a loss.
 //
-// The lossiness is still spent, just deliberately: past the cap the oldest goes,
-// and past the TTL the stale go.
+// Nothing is dropped silently. Past the cap the oldest entry is evicted and past
+// the TTL the stale ones expire; the caller stamps each of them refused on the
+// message log, so the sender can read what became of it.
 
 import { z } from "zod";
 import { SessionMemberKeySchema } from "../protocol";
@@ -23,15 +24,21 @@ export const HELD_MESSAGE_TTL_MS = BUS_MESSAGE_TTL_MS;
 export const HeldMessageSchema = z.object({
   messageId: z.string().min(1).max(200),
   contextId: z.string().min(1).max(200),
-  /** Which way the send was addressed: out through this machine's own carrier,
-   *  or back down the carrier that brought the context in. Kept rather than
-   *  re-derived at flush time so the frame goes out the way it was addressed. */
-  role: z.enum(["lead", "peer"]),
   to: SessionMemberKeySchema,
   /** The serialized send frame, opaque here: this store is a parking space for
    *  a send, never a reader of what it carries. */
   frame: z.unknown(),
   heldAt: z.number().int().nonnegative(),
+  /** Offers made so far, the first one included. */
+  attempts: z.number().int().nonnegative(),
+  /** Earliest time the next offer may be made. Persisted so a restart resumes
+   *  the backoff rather than offering every held message at once. */
+  nextAttemptAt: z.number().int().nonnegative(),
+  /** When the relay said it holds the message. From then the resend is only a
+   *  safety net for a relay that lost its queue. */
+  relayedAt: z.number().int().optional(),
+  /** Why the last offer did not complete, for the send line and the thread. */
+  lastReason: z.string().max(64).optional(),
 });
 export type HeldMessage = z.infer<typeof HeldMessageSchema>;
 
@@ -47,20 +54,24 @@ export function hasHeld(s: HeldState, messageId: string): boolean {
   return s.held.some((m) => m.messageId === messageId);
 }
 
-/** Hold one refused message. Appended at the end and evicted from the front, so
- *  the order a sender wrote in is the order the target reads. */
-export function holdMessage(s: HeldState, m: HeldMessage): HeldState {
+/** Hold one unacknowledged message. Appended at the end and evicted from the
+ *  front, so the order a sender wrote in is the order the target reads. The
+ *  evicted entries are returned so the caller can say what became of them. */
+export function holdMessage(s: HeldState, m: HeldMessage): { state: HeldState; evicted: HeldMessage[] } {
   const held = [...s.held, m];
-  return { held: held.length > MAX_HELD_MESSAGES ? held.slice(held.length - MAX_HELD_MESSAGES) : held };
+  if (held.length <= MAX_HELD_MESSAGES) return { state: { held }, evicted: [] };
+  const cut = held.length - MAX_HELD_MESSAGES;
+  return { state: { held: held.slice(cut) }, evicted: held.slice(0, cut) };
 }
 
-export function expireHeld(s: HeldState, now: number): HeldState {
-  const held = s.held.filter((m) => now - m.heldAt < HELD_MESSAGE_TTL_MS);
-  return held.length === s.held.length ? s : { held };
+export function expireHeld(s: HeldState, now: number): { state: HeldState; expired: HeldMessage[] } {
+  const expired = s.held.filter((m) => now - m.heldAt >= HELD_MESSAGE_TTL_MS);
+  if (expired.length === 0) return { state: s, expired };
+  return { state: { held: s.held.filter((m) => now - m.heldAt < HELD_MESSAGE_TTL_MS) }, expired };
 }
 
-/** Drop the ones that got out. Called with what actually left, never with what
- *  was attempted. */
+/** Drop the ones the far side has settled, applied or refused. Never the ones
+ *  merely offered. */
 export function releaseHeld(s: HeldState, messageIds: readonly string[]): HeldState {
   if (messageIds.length === 0) return s;
   const gone = new Set(messageIds);

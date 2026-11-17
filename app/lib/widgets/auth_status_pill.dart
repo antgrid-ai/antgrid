@@ -1,14 +1,21 @@
-import 'package:flutter/material.dart';
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 
-import '../design/ab_colors.dart';
-import '../design/widgets/ab_chip.dart';
 import '../services/auth_service.dart';
 
-/// Small status chip rendered via `AccountFooter` in the drawer, showing the
+/// The tier text the tag shows, so the footer's spoken name matches it.
+String tierLabel(CurrentUser user) {
+  final tier = user.tier;
+  return tier == null || tier.isEmpty
+      ? 'Trial'
+      : '${tier[0].toUpperCase()}${tier.substring(1)}';
+}
+
+/// Small status tag rendered via `AccountFooter` in the drawer, showing the
 /// app user's subscription tier:
 ///   - promotional grant (unpurchased) → nothing, regardless of tier
-///   - `tier == 'pro'` (real subscription) → accent "PRO"
-///   - else (trial / unknown) → amber tier label, defaulting to "TRIAL"
+///   - `tier == 'pro'` (real subscription) → blue "Pro"
+///   - else (trial / unknown) → outlined tier label, defaulting to "Trial"
 class AuthStatusPill extends StatelessWidget {
   final CurrentUser? user;
   const AuthStatusPill(this.user, {super.key});
@@ -20,15 +27,18 @@ class AuthStatusPill extends StatelessWidget {
     // this branch (and CurrentUser.promotional) once payment integration
     // ships.
     //
-    // No chip at all, because every label is wrong: "PRO" claims a purchase,
-    // "FREE" names allowances that aren't in force (the grant carries Pro
-    // entitlement), and "BETA" got the iOS build rejected under App Store
+    // No tag at all, because every label is wrong: "Pro" claims a purchase,
+    // "Free" names allowances that aren't in force (the grant carries Pro
+    // entitlement), and "Beta" got the iOS build rejected under App Store
     // guideline 2.2 as a pre-release app.
     if (user!.promotional) return const SizedBox.shrink();
-    final label = user!.tier?.toUpperCase() ?? 'TRIAL';
-    final color = user!.tier == 'pro'
-        ? context.antgrid.accent
-        : Colors.amber.shade400;
-    return AbChip.system(label: label, color: color);
+    final tier = user!.tier;
+    return CarbonTag(
+      label: tierLabel(user!),
+      size: CarbonTheme.of(context).isTouch
+          ? CarbonTagSize.medium
+          : CarbonTagSize.small,
+      color: tier == 'pro' ? CarbonTagColor.blue : CarbonTagColor.outline,
+    );
   }
 }

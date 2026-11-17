@@ -37,6 +37,7 @@ import { opencodeFamilyMcp } from "./opencode/mcp";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
+import { OPENCODE_STANDALONE, prepareOpencodeTerminal } from "./opencode/terminal";
 import { isInterruptRecord as isClaudeInterruptRecord, lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { isInterruptRecord as isCodexInterruptRecord, readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
@@ -44,6 +45,7 @@ import { claudeFork } from "./claude-code/fork";
 import { codexFork } from "./codex/fork";
 import { opencodeFork } from "./opencode/fork";
 import { resolveOpencodeNamingModel } from "./opencode/naming-model";
+import { opencodeUpgradeArgs } from "./opencode/version";
 import { resolveKiloNamingModel } from "./kilo/naming-model";
 import { cursorAgentFork } from "./cursor-agent/fork";
 import { copilotFork } from "./github-copilot/fork";
@@ -167,6 +169,14 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     // gate never reaches the REPL keymap (measured on the 2.1.247 binary).
     env: () => ({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" }),
     resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
+    // claude reports its id at SessionStart, before it writes the transcript, so
+    // a session closed before its first message leaves an id `--resume` refuses.
+    isResumeRefusal: (output, agentSessionId) => {
+      const compact = (s: string) => s.replace(/[\x00-\x20]+/g, "").toLowerCase();
+      const text = compact(output);
+      const id = compact(agentSessionId);
+      return text.includes(`noconversationfoundwithsessionid:${id}`) || text.includes(`noconversationfoundwithsessionid${id}`);
+    },
     resolveTitle: async ({ transcriptPath }) =>
       transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,
     update: {
@@ -273,6 +283,9 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   },
   opencode: {
     bin: "opencode",
+    augmentsDefaultSpec: true,
+    args: [OPENCODE_STANDALONE],
+    prepareTerminal: prepareOpencodeTerminal,
     label: "opencode",
     defaultApprovalGated: false,
     approvalPolicies: {},
@@ -286,7 +299,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     initialPrompt: (p) => ["--prompt", p],
     fork: opencodeFork,
     hooks: opencodeHooks,
-    mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT"),
+    mcp: opencodeFamilyMcp("OPENCODE_CONFIG_CONTENT", { serversLayout: true }),
     driver: createOpencodeDriver,
     // No fixed `cheapNamingModel`: opencode serves whatever providers the user
     // configured, so any one slug fails for every user without it — the last
@@ -304,7 +317,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       // verify.
       transcript: {
         cmd: (prompt, model) =>
-          ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+          ["opencode", "run", OPENCODE_STANDALONE, "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
         // opencode has no --ephemeral, so persistence is redirected instead of
         // disabled: the whole session store is one SQLite file, and OPENCODE_DB
         // takes `:memory:` verbatim (opencode's own tests and its desktop dev
@@ -345,7 +358,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
       injectConfig("OPENCODE_TUI_CONFIG", abDir, "opencode-tui.json", {
         attention: { enabled: true },
       }),
-    update: { npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"] },
+    update: { npmPackage: "@opencode/cli", command: "opencode", updateArgs: opencodeUpgradeArgs },
   },
   "cursor-agent": {
     bin: "cursor-agent",

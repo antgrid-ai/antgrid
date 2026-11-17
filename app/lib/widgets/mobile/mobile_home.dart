@@ -1,15 +1,9 @@
-import 'package:flutter/material.dart';
+import 'dart:math' as math;
+
+import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_status_tone.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_empty_state.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_list_row.dart';
-import '../../design/widgets/ab_status_dot.dart';
 import '../../models/agent_work_status.dart';
 import '../../providers/machine_directory.dart';
 import '../../providers/machine_scope.dart';
@@ -19,7 +13,9 @@ import '../../providers/project_composer.dart';
 import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
-import '../project_sidebar.dart' show SidebarSectionLabel;
+import '../carbon_empty_state.dart';
+import '../drawer_entry_row.dart' show DrawerAttentionDot;
+import '../project_sidebar.dart' show SidebarSectionHeader;
 import '../recent_sessions/starting_session_row.dart';
 
 /// The phone's home: what waits on the user across the machines in scope, then
@@ -30,6 +26,7 @@ class MobileHomeList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = CarbonTheme.of(context);
     final needs = ref.watch(needsYouProvider);
     final views = ref.watch(inScopeProjectViewsProvider);
     final anyProjects = ref.watch(projectViewsProvider).isNotEmpty;
@@ -39,10 +36,10 @@ class MobileHomeList extends ConsumerWidget {
         const SliverToBoxAdapter(child: StartingSessionRow()),
         if (needs.isNotEmpty) ...[
           SliverToBoxAdapter(
-            child: SidebarSectionLabel(
-              label: 'NEEDS YOU',
+            child: SidebarSectionHeader(
+              label: 'Needs you',
               count: needs.length,
-              color: context.antgrid.warning,
+              color: t.colors.supportWarning,
             ),
           ),
           SliverList.list(
@@ -59,7 +56,7 @@ class MobileHomeList extends ConsumerWidget {
         ],
         if (views.isNotEmpty) ...[
           SliverToBoxAdapter(
-            child: SidebarSectionLabel(label: _projectsLabel(ref)),
+            child: SidebarSectionHeader(label: _projectsLabel(ref)),
           ),
           SliverList.list(
             children: [
@@ -68,36 +65,55 @@ class MobileHomeList extends ConsumerWidget {
             ],
           ),
         ] else
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: ref.watch(mobileConnectEnabledProvider)
-                ? const AbEmptyState(
-                    title: 'No projects on this machine',
-                    subtitle:
-                        'Open a folder in Antgrid on that machine to see it '
-                        'here.',
-                  )
-                : anyProjects
-                ? AbEmptyState(
-                    title: 'No projects on the machines in scope',
-                    action: AbButton(
-                      label: 'Show all machines',
-                      onTap: () =>
-                          ref.read(machineScopeProvider.notifier).selectAll([
-                            for (final m in ref.read(machineDirectoryProvider))
-                              if (m.remoteAccessEnabled != false) m.id,
-                          ]),
-                    ),
-                  )
-                : const AbEmptyState(
-                    title: 'No projects yet',
-                    subtitle: 'Connect a machine to see its projects here.',
+          // Not SliverFillRemaining: that sizes its child from the child's
+          // intrinsic height, which CarbonEmptyState's LayoutBuilder cannot
+          // report. A minimum height centres it the same way and lets it grow
+          // past the viewport.
+          SliverLayoutBuilder(
+            builder: (context, constraints) => SliverToBoxAdapter(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: math.max(
+                    0,
+                    constraints.viewportMainAxisExtent -
+                        constraints.precedingScrollExtent,
                   ),
+                ),
+                child: Center(child: _empty(ref, anyProjects)),
+              ),
+            ),
           ),
-        const SliverToBoxAdapter(child: SizedBox(height: AbTokens.space16)),
+        const SliverToBoxAdapter(
+          child: SizedBox(height: CarbonSpacing.spacing05),
+        ),
       ],
     );
   }
+
+  Widget _empty(WidgetRef ref, bool anyProjects) =>
+      ref.watch(mobileConnectEnabledProvider)
+      ? const CarbonEmptyState(
+          heading: 'No projects on this machine',
+          body:
+              'Open a folder in Antgrid on that machine to see it '
+              'here.',
+        )
+      : anyProjects
+      ? CarbonEmptyState(
+          heading: 'No projects on the machines in scope',
+          action: CarbonButton(
+            label: 'Show all machines',
+            kind: CarbonButtonKind.tertiary,
+            onPressed: () => ref.read(machineScopeProvider.notifier).selectAll([
+              for (final m in ref.read(machineDirectoryProvider))
+                if (m.remoteAccessEnabled != false) m.id,
+            ]),
+          ),
+        )
+      : const CarbonEmptyState(
+          heading: 'No projects yet',
+          body: 'Connect a machine to see its projects here.',
+        );
 }
 
 /// One session waiting on the user. The only one-tap action is Open: what the
@@ -110,12 +126,13 @@ class _NeedsYouCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final asking = item.status == AgentWorkStatus.attention;
-    final kind = asking ? 'WAITING' : 'FAILED';
+    final kind = asking ? 'Waiting' : 'Failed';
     final when = DateTime.fromMillisecondsSinceEpoch(
       item.row.session.lastUsedAt,
     );
+    final helper = t.typography.helper.copyWith(color: t.colors.textHelper);
     void open() {
       final container = ref.container;
       detached(
@@ -127,82 +144,67 @@ class _NeedsYouCard extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
-        AbTokens.space12,
+        CarbonSpacing.spacing05,
         0,
-        AbTokens.space12,
-        AbTokens.space8,
+        CarbonSpacing.spacing05,
+        CarbonSpacing.spacing03,
       ),
       child: Semantics(
         container: true,
         label:
             '$kind: ${item.row.session.name}, ${item.machineName}, '
             '${item.projectName}',
-        child: Container(
-          padding: const EdgeInsets.all(AbTokens.space12),
+        child: DecoratedBox(
           decoration: BoxDecoration(
-            color: p.bgSurface,
-            border: Border.all(color: p.borderDefault),
-            borderRadius: AbTokens.borderRadius8,
+            color: t.layer(1),
+            border: Border.all(
+              color: t.borderSubtle(1),
+              width: CarbonBorders.hairline,
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ExcludeSemantics(
-                child: Row(
-                  children: [
-                    AbStatusDot(
-                      tone: asking ? AbStatusTone.warning : AbStatusTone.danger,
-                      pulse: asking,
-                    ),
-                    const SizedBox(width: AbTokens.space6),
-                    Text(
-                      kind,
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontXxs,
-                        letterSpacing: 0.4,
-                        color: asking ? p.warning : p.error,
+          child: Padding(
+            padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ExcludeSemantics(
+                  child: Row(
+                    children: [
+                      DrawerAttentionDot(status: item.status),
+                      const SizedBox(width: CarbonSpacing.spacing03),
+                      Text(
+                        kind,
+                        style: t.typography.label.copyWith(
+                          color: asking
+                              ? t.colors.supportWarning
+                              : t.colors.supportError,
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      relativeTime(when),
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontXs,
-                        color: p.textMuted,
-                      ),
-                    ),
-                  ],
+                      const Spacer(),
+                      Text(relativeTime(when), style: helper),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: AbTokens.space6),
-              Text(
-                item.row.session.name,
-                style: AbTokens.sansStyle(
-                  fontWeight: FontWeight.w600,
-                  color: p.textPrimary,
+                const SizedBox(height: CarbonSpacing.spacing03),
+                Text(
+                  item.row.session.name,
+                  style: t.typography.heading.copyWith(
+                    color: t.colors.textPrimary,
+                  ),
                 ),
-              ),
-              const SizedBox(height: AbTokens.space4),
-              Text(
-                '${item.machineName} · ${item.projectName}',
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: p.textMuted,
+                const SizedBox(height: CarbonSpacing.spacing02),
+                Text(
+                  '${item.machineName} · ${item.projectName}',
+                  style: t.typography.code.copyWith(color: t.colors.textHelper),
                 ),
-              ),
-              const SizedBox(height: AbTokens.space10),
-              ConstrainedBox(
-                constraints: const BoxConstraints(
-                  minHeight: AbTokens.tapTargetMin,
-                ),
-                child: AbButton(
+                const SizedBox(height: CarbonSpacing.spacing05),
+                CarbonButton(
                   label: asking ? 'Open and respond' : 'Open',
-                  variant: AbButtonVariant.primary,
                   expand: true,
-                  onTap: open,
+                  onPressed: open,
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -217,71 +219,59 @@ class _ProjectTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final p = context.antgrid;
+    final t = CarbonTheme.of(context);
     final parts = [
       if (view.liveCount > 0) '${view.liveCount} live',
       if (view.allOffline) 'offline',
     ];
-    return Semantics(
-      button: true,
-      label: [
+    return CarbonContainedListRow(
+      title: [
         view.group.name,
         if (view.needsYouCount > 0) '${view.needsYouCount} need you',
         ...parts,
       ].join(', '),
-      excludeSemantics: true,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: AbTokens.touchControlMin),
-        child: AbListRow(
-          leading: AbIcon(
-            AbIcons.folder,
-            size: AbTokens.iconButtonGlyph,
-            color: p.textMuted,
-          ),
-          title: Text(
-            view.group.name,
-            style: AbTokens.monoStyle(
-              fontWeight: FontWeight.w600,
-              color: view.allOffline ? p.textMuted : p.textPrimary,
-            ),
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (view.needsYouCount > 0) const AbStatusDot(tone: AbStatusTone.warning),
-              if (view.needsYouCount > 0 && parts.isNotEmpty)
-                const SizedBox(width: AbTokens.space8),
-              if (parts.isNotEmpty)
-                Text(
-                  parts.join(' · '),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: p.textSecondary,
-                  ),
-                ),
-            ],
-          ),
-          horizontalPadding: AbTokens.space12,
-          // Lit while it is what the composer below will start a session in.
-          selected: ref.watch(
-            composerProjectViewProvider.select(
-              (v) => v?.group.key == view.group.key,
-            ),
-          ),
-          selectionStyle: AbRowSelection.surface,
-          onTap: () => pointComposerAtProject(ref.container, view),
+      content: Text(
+        view.group.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: t.typography.code.copyWith(
+          color: view.allOffline ? t.colors.textPlaceholder : null,
         ),
       ),
+      leading: const CarbonIcon(CarbonIcons.folder),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (view.needsYouCount > 0)
+            const DrawerAttentionDot(status: AgentWorkStatus.attention),
+          if (view.needsYouCount > 0 && parts.isNotEmpty)
+            const SizedBox(width: CarbonSpacing.spacing03),
+          if (parts.isNotEmpty)
+            Text(
+              parts.join(' · '),
+              style: t.typography.helper.copyWith(
+                color: t.colors.textSecondary,
+              ),
+            ),
+        ],
+      ),
+      // Lit while it is what the composer below will start a session in.
+      selected: ref.watch(
+        composerProjectViewProvider.select(
+          (v) => v?.group.key == view.group.key,
+        ),
+      ),
+      onPressed: () => pointComposerAtProject(ref.container, view),
     );
   }
 }
 
-/// "PROJECTS ON MACBOOK PRO" on a phone connected to one machine.
+/// "Projects on MacBook Pro" on a phone connected to one machine.
 String _projectsLabel(WidgetRef ref) {
-  if (!ref.watch(mobileConnectEnabledProvider)) return 'PROJECTS';
+  if (!ref.watch(mobileConnectEnabledProvider)) return 'Projects';
   final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
   for (final m in ref.watch(machineDirectoryProvider)) {
-    if (m.id == id) return 'PROJECTS ON ${m.name.toUpperCase()}';
+    if (m.id == id) return 'Projects on ${m.name}';
   }
-  return 'PROJECTS';
+  return 'Projects';
 }

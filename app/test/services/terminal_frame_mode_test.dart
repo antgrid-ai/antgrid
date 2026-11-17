@@ -2988,4 +2988,86 @@ void main() {
       await session.close();
     });
   });
+
+  group('insertGeneratedText', () {
+    Iterable<Map<String, dynamic>> inputFrames(FakeAgentTransport t) =>
+        t.sent.where((m) => m['type'] == 'terminal:input');
+
+    test('types into a live terminal no pane has painted', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+      await seedRunningTab(t, 'a');
+      expect(svc.canSendInput('a'), isFalse);
+
+      expect(await svc.insertGeneratedText('a', '"/staged/a.png" '), isTrue);
+      expect(inputFrames(t).single['data'], '"/staged/a.png" ');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('waits for a terminal a rebuilt session does not know yet', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+
+      final sent = svc.insertGeneratedText('a', '"/staged/a.png" ');
+      await Future<void>.delayed(Duration.zero);
+      expect(inputFrames(t), isEmpty);
+
+      await seedRunningTab(t, 'a');
+
+      expect(await sent, isTrue);
+      expect(inputFrames(t), hasLength(1));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('gives up at once on a terminal that has exited', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.tabs['a']?.sessionState,
+        TerminalSessionState.exited,
+      );
+
+      final sent = await svc
+          .insertGeneratedText('a', '"/staged/a.png" ')
+          .timeout(const Duration(seconds: 1));
+
+      expect(sent, isFalse);
+      expect(inputFrames(t), isEmpty);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('gives up after the timeout without typing', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+
+      final sent = await svc.insertGeneratedText(
+        'a',
+        '"/staged/a.png" ',
+        timeout: const Duration(milliseconds: 10),
+      );
+
+      expect(sent, isFalse);
+      expect(inputFrames(t), isEmpty);
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
 }
