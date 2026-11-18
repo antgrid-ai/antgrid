@@ -234,8 +234,11 @@ class _ProjectTile extends ConsumerWidget {
         view.group.name,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
+        // Carbon styles inherit nothing, so a null colour paints white.
         style: t.typography.code.copyWith(
-          color: view.allOffline ? t.colors.textPlaceholder : null,
+          color: view.allOffline
+              ? t.colors.textPlaceholder
+              : t.colors.textPrimary,
         ),
       ),
       leading: const CarbonIcon(CarbonIcons.folder),

@@ -18,6 +18,7 @@ import '../providers/project_work_status.dart' show recentStatusKey;
 import '../providers/projects.dart';
 import '../providers/recent_sessions.dart';
 import '../util/detached.dart';
+import '../utils/platform_utils.dart';
 import 'drawer_entry_row.dart'
     show DrawerAttentionDot, DrawerProjectRow, DrawerRemoveButton;
 import 'memory/memory_project_button.dart';
@@ -302,7 +303,11 @@ class _ProjectGroupRowState extends ConsumerState<ProjectGroupRow> {
 
   /// Memory is per machine, so a project merged across machines opens the
   /// copy on this one when there is one, and otherwise its only copy.
+  ///
+  /// None on touch: a row's actions show at rest there, with no hover to hold
+  /// them back, so every project would repeat the Memory nav item's lightbulb.
   static Widget? _memoryButton(ProjectView view, String? localId) {
+    if (isMobilePlatform) return null;
     if (localId != null) {
       return MemoryProjectButton(
         target: const MemoryTarget.machine(),

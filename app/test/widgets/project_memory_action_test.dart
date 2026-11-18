@@ -279,6 +279,15 @@ void main() {
     expect(container.read(memoryViewProvider).projectId, kDemoProjectId);
   });
 
+  testWidgets('on touch the rows carry no lightbulb; the nav row stays', (
+    tester,
+  ) async {
+    await pump(tester);
+    expect(find.text(_localName), findsOneWidget);
+    expect(find.byType(MemoryProjectButton), findsNothing);
+    expect(find.text('Memory'), findsWidgets);
+  });
+
   desktopTest('the Memory nav row carries the machine total', (tester) async {
     await pump(tester);
     expect(find.text('Memory'), findsWidgets);

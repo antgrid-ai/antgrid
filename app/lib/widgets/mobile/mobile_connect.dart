@@ -71,11 +71,19 @@ String mobileMachineName(WidgetRef ref, String id) =>
     'this machine';
 
 /// Machines a phone can be pointed at: never this device, which runs no
-/// bridge of its own.
+/// bridge of its own, and never one whose remote-access switch is off — the
+/// phone could not drive it, so listing it only offers a row that does nothing.
 List<MachineInfo> _remoteMachines(WidgetRef ref) => [
   for (final m in ref.watch(machineDirectoryProvider))
-    if (!m.isLocal) m,
+    if (!m.isLocal && m.remoteAccessEnabled != false) m,
 ];
+
+/// Whether the account has a machine [_remoteMachines] leaves out for its
+/// remote-access switch, so an empty picker can say why instead of
+/// "No machines yet".
+bool _anyRemoteAccessOff(WidgetRef ref) => ref
+    .watch(machineDirectoryProvider)
+    .any((m) => !m.isLocal && m.remoteAccessEnabled == false);
 
 String _offlineLine(MachineInfo m) {
   final seen = m.lastSeenAt;
@@ -104,21 +112,17 @@ class MobileMachinePicker extends ConsumerWidget {
     final rows = ref.watch(recentSessionsProvider);
     final statuses = ref.watch(recentSessionStatusesProvider);
     final machines = _remoteMachines(ref);
-    final locked = [
-      for (final m in machines)
-        if (m.remoteAccessEnabled == false) m,
-    ];
     final online =
         [
           for (final m in machines)
-            if (m.online && m.remoteAccessEnabled != false) m,
+            if (m.online) m,
         ]..sort((a, b) {
           final last = connection.lastMachineId;
           return (b.id == last ? 1 : 0) - (a.id == last ? 1 : 0);
         });
     final offline = [
       for (final m in machines)
-        if (!m.online && m.remoteAccessEnabled != false) m,
+        if (!m.online) m,
     ];
     final loading = ref.watch(accountAgentsProvider).isLoading;
     final container = ref.container;
@@ -132,6 +136,13 @@ class MobileMachinePicker extends ConsumerWidget {
             hasScrollBody: false,
             child: loading
                 ? const Center(child: AbLoading(message: 'Loading machines'))
+                : _anyRemoteAccessOff(ref)
+                ? const AbEmptyState(
+                    title: 'Remote access is off',
+                    subtitle:
+                        'Turn on remote access in Antgrid on your computer to '
+                        'connect to it from here.',
+                  )
                 : const AbEmptyState(
                     title: 'No machines yet',
                     subtitle:
@@ -177,20 +188,6 @@ class MobileMachinePicker extends ConsumerWidget {
                 key: ValueKey('pick:${m.id}'),
                 machine: m,
                 subtitle: _offlineLine(m),
-              ),
-          ],
-          if (locked.isNotEmpty) ...[
-            SidebarSectionLabel(
-              label: 'REMOTE ACCESS OFF',
-              count: locked.length,
-            ),
-            for (final m in locked)
-              MobileMachineRow(
-                key: ValueKey('pick:${m.id}'),
-                machine: m,
-                subtitle:
-                    'Turn on remote access on that machine to connect from '
-                    'here',
               ),
           ],
           const SizedBox(height: AbTokens.space16),
@@ -265,8 +262,8 @@ class MobileMachinePicker extends ConsumerWidget {
 }
 
 /// One machine in the picker or the switch sheet. Tappable only when
-/// [onTap] is given: an offline or locked machine is listed so the user sees
-/// it is known, not missing.
+/// [onTap] is given: an offline machine is listed so the user sees it is
+/// known, not missing.
 class MobileMachineRow extends StatelessWidget {
   const MobileMachineRow({
     super.key,
@@ -287,11 +284,7 @@ class MobileMachineRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = machine;
     final p = context.antgrid;
-    final locked = m.remoteAccessEnabled == false;
-    final reachable = m.online && !locked;
-    final state = locked
-        ? 'remote access off'
-        : m.online
+    final state = m.online
         ? (current ? 'connected' : 'online')
         : 'offline';
     return Semantics(
@@ -310,13 +303,11 @@ class MobileMachineRow extends StatelessWidget {
           borderRadius: AbTokens.borderRadius5,
         ),
         child: AbListRow(
-          leading: locked
-              ? AbIcon(AbIcons.lock, size: AbTokens.fontLg, color: p.textMuted)
-              : AbStatusDot(
-                  tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
-                  style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
-                  size: AbDotSize.md,
-                ),
+          leading: AbStatusDot(
+            tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
+            style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
+            size: AbDotSize.md,
+          ),
           title: Row(
             children: [
               Flexible(
@@ -325,7 +316,7 @@ class MobileMachineRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: AbTokens.monoStyle(
                     fontSize: AbTokens.fontBody,
-                    color: reachable ? p.textPrimary : p.textMuted,
+                    color: m.online ? p.textPrimary : p.textMuted,
                   ),
                 ),
               ),
@@ -696,9 +687,6 @@ class SwitchMachineSheet extends ConsumerWidget {
     void close() => Navigator.of(context).pop();
 
     String subtitleFor(MachineInfo m) {
-      if (m.remoteAccessEnabled == false) {
-        return 'Remote access is off on this machine';
-      }
       if (!m.online) return _offlineLine(m);
       final activity = machineActivityLine(m, rows, statuses) ?? 'idle';
       return m.id == current ? 'Connected · $activity' : 'Online · $activity';
@@ -706,11 +694,11 @@ class SwitchMachineSheet extends ConsumerWidget {
 
     final reachable = [
       for (final m in machines)
-        if (m.online && m.remoteAccessEnabled != false) m,
+        if (m.online) m,
     ];
     final unreachable = [
       for (final m in machines)
-        if (!m.online || m.remoteAccessEnabled == false) m,
+        if (!m.online) m,
     ];
 
     return SafeArea(

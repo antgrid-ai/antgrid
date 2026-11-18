@@ -230,7 +230,7 @@ final scopedMachineIdsProvider = Provider<Set<String>>((ref) {
 
 /// The machines a scope can include on this device. A phone cannot drive a
 /// machine whose remote-access switch is off — its advert is empty and every
-/// verb is refused — so there such a machine is shown locked, never in scope.
+/// verb is refused — so there such a machine is left out of every list.
 List<MachineInfo> scopeCandidates(List<MachineInfo> machines, {bool? mobile}) {
   if (!(mobile ?? isMobilePlatform)) return machines;
   return [

@@ -29,21 +29,15 @@ class MobileScopeButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final all = ref.watch(machineDirectoryProvider);
-    final machines = scopeCandidates(all);
+    final machines = scopeCandidates(ref.watch(machineDirectoryProvider));
     final scope = ref.watch(machineScopeProvider);
     final inScope = ref.watch(scopedMachineIdsProvider);
     final online = machines.where((m) => inScope.contains(m.id) && m.online);
     final running = ref
         .watch(projectViewsProvider)
         .fold<int>(0, (n, v) => n + v.liveCount);
-    final locked = all.length - machines.length;
     final label = machineScopeLabel(machines, scope);
-    final summary = [
-      '${online.length} online',
-      '$running running',
-      if (locked > 0) '$locked locked',
-    ].join(' · ');
+    final summary = ['${online.length} online', '$running running'].join(' · ');
     return MachineSummaryTile(
       leading: const CarbonIcon(CarbonIcons.screen),
       title: label,
@@ -55,20 +49,19 @@ class MobileScopeButton extends ConsumerWidget {
   }
 }
 
-/// The scope on a phone. A machine whose remote-access switch is off is shown
-/// locked rather than as a checkbox: this device could not drive it anyway, and
-/// a box that ticked would promise a choice that changes nothing.
+/// The scope on a phone. A machine whose remote-access switch is off is left
+/// out ([scopeCandidates]): this device could not drive it, so a row for it
+/// would offer a choice that changes nothing.
 class MachineScopeSheet extends ConsumerWidget {
   const MachineScopeSheet({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final machines = ref.watch(machineDirectoryProvider);
     final scope = ref.watch(machineScopeProvider);
     final rows = ref.watch(recentSessionsProvider);
     final statuses = ref.watch(recentSessionStatusesProvider);
     final notifier = ref.read(machineScopeProvider.notifier);
-    final reachable = scopeCandidates(machines);
+    final reachable = scopeCandidates(ref.watch(machineDirectoryProvider));
     final p = context.antgrid;
 
     Widget action(String label, VoidCallback onTap, {Widget? trailing}) =>
@@ -115,17 +108,14 @@ class MachineScopeSheet extends ConsumerWidget {
                 ],
               ),
             ),
-            for (final m in machines)
-              if (m.remoteAccessEnabled == false)
-                _LockedMachineRow(machine: m)
-              else
-                _SheetMachineRow(
-                  key: ValueKey(m.id),
-                  machine: m,
-                  checked: scope.isChecked(m.id, online: m.online),
-                  status: machineStatusLine(m, rows, statuses),
-                  onTap: () => notifier.toggle(m.id, online: m.online),
-                ),
+            for (final m in reachable)
+              _SheetMachineRow(
+                key: ValueKey(m.id),
+                machine: m,
+                checked: scope.isChecked(m.id, online: m.online),
+                status: machineStatusLine(m, rows, statuses),
+                onTap: () => notifier.toggle(m.id, online: m.online),
+              ),
             const AbSeparator.horizontal(),
             action(
               'Select all',
@@ -193,43 +183,6 @@ class _SheetMachineRow extends StatelessWidget {
           ),
           horizontalPadding: AbTokens.space16,
           onTap: onTap,
-        ),
-      ),
-    );
-  }
-}
-
-class _LockedMachineRow extends StatelessWidget {
-  const _LockedMachineRow({required this.machine});
-
-  final MachineInfo machine;
-
-  @override
-  Widget build(BuildContext context) {
-    final m = machine;
-    final p = context.antgrid;
-    const reason = 'Remote access is off on this machine';
-    return Semantics(
-      label: '${m.name}, locked. $reason',
-      excludeSemantics: true,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: AbTokens.rowHeightXl),
-        child: AbListRow(
-          leading: AbStatusDot(
-            tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
-            style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
-            size: AbDotSize.md,
-          ),
-          title: Text(
-            m.name,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontMd,
-              color: p.textSecondary,
-            ),
-          ),
-          subtitle: const Text(reason),
-          trailing: AbIcon(AbIcons.lock, size: AbTokens.fontLg, color: p.textMuted),
-          horizontalPadding: AbTokens.space16,
         ),
       ),
     );

@@ -1,3 +1,4 @@
+import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -158,6 +159,20 @@ void main() {
     expect(button.height, greaterThanOrEqualTo(44));
   });
 
+  testWidgets('a reachable project is named in the primary text colour', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(const MobileHomeList()));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final name = find.text('antgrid');
+    final style = tester.widget<Text>(name).style!;
+    expect(
+      style.color,
+      CarbonTheme.of(tester.element(name)).colors.textPrimary,
+    );
+  });
+
   testWidgets('a project points the composer at it', (tester) async {
     await tester.pumpWidget(host(const MobileHomeList()));
     // The needs-you dot pulses for as long as it is shown, so this never
@@ -173,7 +188,7 @@ void main() {
     expect(container.read(composerProjectViewProvider)?.group.key, 'git:r/antgrid');
   });
 
-  testWidgets('the scope sheet locks a machine whose remote access is off', (
+  testWidgets('the scope sheet leaves out a machine whose remote access is off', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -184,7 +199,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Remote access is off on this machine'), findsOneWidget);
-    expect(find.bySemanticsLabel(RegExp('win, locked')), findsOneWidget);
+    expect(find.text('mbp'), findsOneWidget);
+    expect(find.text('win'), findsNothing);
   });
 }
