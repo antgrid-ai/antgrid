@@ -421,7 +421,7 @@ class AuthService {
   // bodies fall through to the caller's generic copy.
   static const _rejectionCopy = {
     'EMAIL_USE_GOOGLE':
-        'Gmail addresses sign in with Google. Use Continue with Google.',
+        'Gmail addresses sign in with Google. Choose Google on the sign-in screen.',
     'EMAIL_UNDELIVERABLE':
         "We can't send email to that address. Check the spelling, or use a different address.",
     'EMAIL_DOMAIN_UNDELIVERABLE':
