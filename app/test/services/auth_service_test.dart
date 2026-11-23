@@ -1259,6 +1259,107 @@ void main() {
       );
     });
 
+    group('address refusals', () {
+      const copy = {
+        'EMAIL_USE_GOOGLE':
+            'Gmail addresses sign in with Google. Use Continue with Google.',
+        'EMAIL_UNDELIVERABLE':
+            "We can't send email to that address. Check the spelling, or use a different address.",
+        'EMAIL_DOMAIN_UNDELIVERABLE':
+            "That email domain can't receive mail. Check the part after the @.",
+      };
+
+      AuthService serviceReplying(int status, String body) => AuthService(
+        licenseApiUrl: 'https://lic.test',
+        storage: _InMemoryStorage(),
+        httpClient: protocolClient((req) async => http.Response(body, status)),
+      );
+
+      Matcher validation(String message) => throwsA(
+        isA<AuthException>()
+            .having((e) => e.message, 'message', message)
+            .having((e) => e.kind, 'kind', AuthFailure.validation),
+      );
+
+      for (final entry in copy.entries) {
+        final body = jsonEncode({'code': entry.key, 'message': 'server text'});
+
+        test('magic link surfaces ${entry.key}', () async {
+          await expectLater(
+            serviceReplying(400, body).startMagicLink('a@b.com'),
+            validation(entry.value),
+          );
+        });
+
+        test('sign-up surfaces ${entry.key}', () async {
+          await expectLater(
+            serviceReplying(400, body).signUpWithPassword(
+              email: 'a@b.com',
+              password: 'a-very-long-password',
+            ),
+            validation(entry.value),
+          );
+        });
+
+        test('reset surfaces ${entry.key}', () async {
+          await expectLater(
+            serviceReplying(400, body).requestPasswordReset('a@b.com'),
+            validation(entry.value),
+          );
+        });
+      }
+
+      test('an unknown code keeps the generic copy', () async {
+        await expectLater(
+          serviceReplying(
+            400,
+            jsonEncode({'code': 'SOMETHING_ELSE'}),
+          ).startMagicLink('a@b.com'),
+          validation('Request was not accepted. Check your details and try again.'),
+        );
+        await expectLater(
+          serviceReplying(400, '{"code":"SOMETHING_ELSE"}').signUpWithPassword(
+            email: 'a@b.com',
+            password: 'a-very-long-password',
+          ),
+          throwsA(
+            isA<AuthException>().having(
+              (e) => e.message,
+              'message',
+              'Could not create the account. Try again.',
+            ),
+          ),
+        );
+      });
+
+      test('an unparseable body keeps the generic copy', () async {
+        await expectLater(
+          serviceReplying(400, '<html>bad</html>').startMagicLink('a@b.com'),
+          validation('Request was not accepted. Check your details and try again.'),
+        );
+        await expectLater(
+          serviceReplying(400, '[1,2]').startMagicLink('a@b.com'),
+          validation('Request was not accepted. Check your details and try again.'),
+        );
+      });
+
+      test('a 429 still reads as throttled whatever the body says', () async {
+        await expectLater(
+          serviceReplying(
+            429,
+            jsonEncode({'code': 'EMAIL_UNDELIVERABLE'}),
+          ).startMagicLink('a@b.com'),
+          throwsA(
+            isA<AuthException>().having(
+              (e) => e.kind,
+              'kind',
+              AuthFailure.throttled,
+            ),
+          ),
+        );
+      });
+    });
+
     group('verification and reset sends', () {
       test(
         'sends no cookie, so the endpoint takes its anonymous branch',
