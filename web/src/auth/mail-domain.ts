@@ -68,6 +68,7 @@ export function createMailDomainCheck(opts: {
   const canaryDomain = opts.canaryDomain ?? "gmail.com";
   const now = opts.now ?? Date.now;
   const cache = new Map<string, Cached>();
+  const pending = new Map<string, Promise<MailDomainVerdict>>();
   let inFlight = 0;
   let canary: { healthy: boolean; until: number } | null = null;
 
@@ -117,12 +118,17 @@ export function createMailDomainCheck(opts: {
       const hit = cache.get(domain);
       if (hit && hit.until > now()) return hit.verdict;
       if (hit) cache.delete(domain);
-      if (inFlight >= maxInFlight) return "unknown";
-
-      inFlight++;
-      // The slot is released when the lookup itself settles, not when the deadline
-      // fires, so hung lookups keep counting against the cap.
-      const work = lookup(domain).catch((): MailDomainVerdict => "unknown").finally(() => { inFlight--; });
+      // Callers asking about one domain share a lookup, so a single hostile zone
+      // can hold at most one slot however many requests name it.
+      let work = pending.get(domain);
+      if (!work) {
+        if (inFlight >= maxInFlight) return "unknown";
+        inFlight++;
+        // The slot is released when the lookup itself settles, not when the deadline
+        // fires, so hung lookups keep counting against the cap.
+        work = lookup(domain).catch((): MailDomainVerdict => "unknown").finally(() => { inFlight--; pending.delete(domain); });
+        pending.set(domain, work);
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<MailDomainVerdict>((resolve) => { timer = setTimeout(() => resolve("unknown"), deadlineMs); });
       const verdict = await Promise.race([work, deadline]);

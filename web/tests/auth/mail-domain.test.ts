@@ -105,6 +105,14 @@ describe("createMailDomainCheck", () => {
     expect(calls.length).toBe(2);
   });
 
+  test("concurrent checks of one domain share one lookup and one slot", async () => {
+    const { resolver, calls } = stub({ mx: async () => { await Bun.sleep(20); return GOOD_MX; } });
+    const check = createMailDomainCheck({ resolver, maxInFlight: 1 });
+    const verdicts = await Promise.all(["a", "b", "c"].map((u) => check(`${u}@shared.io`)));
+    expect(verdicts).toEqual(["deliverable", "deliverable", "deliverable"]);
+    expect(calls).toEqual(["mx:shared.io"]);
+  });
+
   test("beyond the in-flight cap the check answers unknown immediately", async () => {
     const { resolver } = stub({ mx: () => new Promise(() => {}) });
     const check = createMailDomainCheck({ resolver, maxInFlight: 1, deadlineMs: 5000 });

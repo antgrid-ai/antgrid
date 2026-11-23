@@ -15,6 +15,7 @@ import { canonicalMailbox, recipientDigest } from "./recipient-key.js";
 import type { MailDomainCheck, MailDomainVerdict } from "./mail-domain.js";
 import { nativeAuth, digest } from "./native-plugin.js";
 import { authEmail } from "./templates.js";
+import { tokenBucket } from "../util/rate-limit.js";
 import { APIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { oneTimeToken } from "better-auth/plugins";
@@ -145,6 +146,7 @@ const GOOGLE_ONLY_PATHS = new Set(["/sign-in/cross-device/start", "/sign-up/emai
 /** The DNS verdict is computed before the auth transaction opens so a slow
  *  lookup never holds one of the few pooled connections; the before-hook reads
  *  it back from here. */
+const PRE_STEP_MAX_BODY_BYTES = 16 * 1024;
 const mailDomainScope = new AsyncLocalStorage<MailDomainVerdict>();
 
 export function createAuth(deps: CreateAuthDeps) {
@@ -563,11 +565,27 @@ export function createAuth(deps: CreateAuthDeps) {
     const verdict = await verdictFor(email);
     return mailDomainScope.run(verdict, fn);
   };
+  // The lookup and body parse run ahead of every before-hook limiter, so they get a
+  // cheap budget of their own. A spent budget yields no email, hence "unknown":
+  // the request is admitted to the hooks, whose limiters then answer it.
+  const preStepBudget = tokenBucket(20, 1);
+  const preStepEmail = async (request: Request): Promise<unknown> => {
+    const length = request.headers.get("content-length");
+    if (/chunked/i.test(request.headers.get("transfer-encoding") ?? "")) return undefined;
+    if (length !== null && !(Number(length) <= PRE_STEP_MAX_BODY_BYTES)) return undefined;
+    if (!preStepBudget(request.headers.get("x-forwarded-for") ?? "unknown")) return undefined;
+    const clone = request.clone();
+    if (/^application\/x-www-form-urlencoded/i.test(request.headers.get("content-type") ?? "")) {
+      const text = await clone.text().catch(() => "");
+      if (text.length > PRE_STEP_MAX_BODY_BYTES) return undefined;
+      return new URLSearchParams(text).get("email") ?? undefined;
+    }
+    return (await clone.json().catch(() => null) as { email?: unknown } | null)?.email;
+  };
   return new Proxy(auth, { get(target, key) {
     if (key === "handler") return async (request: Request) => {
       const path = new URL(request.url).pathname.replace(/^\/api\/auth/, "");
-      const email = request.method === "POST" && MAIL_PATHS.includes(path)
-        ? (await request.clone().json().catch(() => null) as { email?: unknown } | null)?.email : undefined;
+      const email = request.method === "POST" && MAIL_PATHS.includes(path) ? await preStepEmail(request) : undefined;
       return withVerdict(email, () => invoke(() => target.handler(request)));
     };
     if (key === "api") return new Proxy(target.api, { get(api, name) {

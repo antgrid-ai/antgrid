@@ -164,6 +164,46 @@ describe("domain check", () => {
     expect(stub.calls).toHaveLength(0);
   });
 
+  test("a form-encoded sign-up is checked like a JSON one", async () => {
+    const stub = verdict("no_mail");
+    const { app } = appWith(stub.check);
+    await pg.db.authRateBucket.deleteMany();
+    const response = await app.request(SIGN_UP.path, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(SIGN_UP.body("someone@dead.example")).toString(),
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { code?: string }).code).toBe("EMAIL_DOMAIN_UNDELIVERABLE");
+    expect(stub.calls).toEqual(["someone@dead.example"]);
+    expect(await pg.db.emailJob.count()).toBe(0);
+  });
+
+  test("a client over its lookup budget no longer reaches the check", async () => {
+    const stub = verdict("deliverable");
+    const { app, auth } = appWith(stub.check);
+    for (let i = 0; i < 40; i++) {
+      await pg.db.authRateBucket.deleteMany();
+      await app.request(RESET.path, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://localhost:8787", "x-forwarded-for": "203.0.113.9" },
+        body: JSON.stringify(RESET.body(`u${i}@corp.example`)),
+      });
+    }
+    expect(stub.calls.length).toBeGreaterThan(0);
+    expect(stub.calls.length).toBeLessThan(30);
+    const before = stub.calls.length;
+    await pg.db.authRateBucket.deleteMany();
+    // The app strips a header it cannot trust, so a second client is only
+    // expressible by calling the handler with the resolved hop already set.
+    await auth.handler(new Request("http://localhost:8787" + RESET.path, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://localhost:8787", "x-forwarded-for": "198.51.100.7" },
+      body: JSON.stringify(RESET.body("other@corp.example")),
+    }));
+    expect(stub.calls.length).toBe(before + 1);
+  });
+
   test("password sign-in does not consult the check", async () => {
     const stub = verdict("no_mail");
     const { app } = appWith(stub.check);

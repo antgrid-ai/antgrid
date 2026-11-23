@@ -21,26 +21,44 @@ export type BounceClass = "recipient" | "unclassified" | "transient" | "sender";
 // Order matters: a sender-side rejection often carries generic "mailbox unavailable"
 // wording, so sender is tested before recipient; transient before recipient because
 // provider "relaying" errors describe our connection, not the mailbox.
-const SENDER = /5\.7\.\d|spam|virus|black.?list|block|listed|policy|reputation|sender.?ip|spf|dkim|dmarc|authenticat/i;
-const TRANSIENT = /relay|timeout|timed.?out|connect|refused|unreachable|not.?reachable|quota|full|grey.?list|gray.?list|temporar|try.?again|4\.\d\.\d|dns.?fail|routing|protocol/i;
-const RECIPIENT = /unknown.?user|user.?unknown|no.?such|not.?found|does.?not.?exist|mailbox.?(not|unavail)|bad.?mailbox|invalid.?(recipient|mailbox|address)|inactive|disabled|5\.1\.\d|domain.?not.?found|invalid.?dns/i;
+// Status codes are anchored so dotted quads in a diagnostic (an IP, a version) can
+// never read as an enhanced status code.
+const status = (codes: string) => String.raw`(?:^|[\s;(:])(?:${codes})(?!\d)(?!\.\d)`;
+const SENDER = new RegExp(
+  String.raw`${status(String.raw`5\.7\.\d{1,3}|5\.1\.[78]`)}|sender.?address|\b(?:spam|virus|blocked|policy|reputation|spf|dkim|dmarc)\b|\b(?:black|block)-?list(?:ed)?\b|\b(?:is|been|are) listed\b|sender.?ip|\bauthenticat`,
+  "i",
+);
+const TRANSIENT = new RegExp(
+  String.raw`relay(?:ing)?[ -](?:issues?|denied|not permitted|access denied)|\btime(?:d.?)?out\b|\bconnection\b|\bunreachable\b|not.?reachable|mailbox full|inbox full|\bquota\b|grey.?list|gray.?list|\btemporar|try.?again|${status(String.raw`4\.\d{1,3}\.\d{1,3}`)}|dns.?fail|\brouting\b|\bprotocol\b`,
+  "i",
+);
+const RECIPIENT = new RegExp(
+  String.raw`unknown.?user|user.?unknown|\bno.?such\b|\bnot.?found\b|does.?not.?exist|mailbox.?(?:not|unavail)|bad.?mailbox|invalid.?(?:recipient|mailbox|address)|\b(?:inactive|disabled)\b|${status(String.raw`5\.1\.(?:1|2|3|6|10)`)}|domain.?not.?found|invalid.?dns`,
+  "i",
+);
+// ZeptoMail's structured reason vocabulary; a value that is exactly one of these
+// names the recipient, whatever free text the diagnostic quotes around it.
+const RECIPIENT_CATEGORY = /^(?:unknown-user|bad-mailbox|inactive-mailbox|bad-domain|invalid-[a-z-]+)$/i;
 
-function collectReasons(node: unknown, out: string[], depth = 0): void {
+function collectReasons(node: unknown, reasons: string[], diagnostics: string[], depth = 0): void {
   if (depth > 4 || node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) { for (const item of node.slice(0, 20)) collectReasons(item, out, depth + 1); return; }
+  if (Array.isArray(node)) { for (const item of node.slice(0, 20)) collectReasons(item, reasons, diagnostics, depth + 1); return; }
   const record = node as Record<string, unknown>;
-  for (const key of ["reason", "diagnostic_message"]) if (typeof record[key] === "string") out.push(record[key]);
-  collectReasons(record.event_data, out, depth + 1);
-  collectReasons(record.details, out, depth + 1);
+  if (typeof record.reason === "string") reasons.push(record.reason);
+  if (typeof record.diagnostic_message === "string") diagnostics.push(record.diagnostic_message);
+  collectReasons(record.event_data, reasons, diagnostics, depth + 1);
+  collectReasons(record.details, reasons, diagnostics, depth + 1);
 }
 
 /** Classifies a provider bounce message. Nothing it reads is persisted: diagnostics
  *  usually quote the recipient address. */
 export function classifyBounce(message: unknown): BounceClass {
   const reasons: string[] = [];
-  collectReasons(message, reasons);
-  const text = reasons.join(" ");
+  const diagnostics: string[] = [];
+  collectReasons(message, reasons, diagnostics);
+  const text = [...reasons, ...diagnostics].join(" ");
   if (SENDER.test(text)) return "sender";
+  if (reasons.some((r) => RECIPIENT_CATEGORY.test(r.trim()))) return "recipient";
   if (TRANSIENT.test(text)) return "transient";
   if (RECIPIENT.test(text)) return "recipient";
   return "unclassified";

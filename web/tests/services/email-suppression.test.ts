@@ -32,6 +32,22 @@ describe("classifyBounce", () => {
     expect(classifyBounce(wrap({ reason: "550 5.7.1 blocked" }))).toBe("sender");
     expect(classifyBounce(wrap({ reason: "mailbox unavailable 5.7.1" }))).toBe("sender");
   });
+  test.each([
+    ["553 5.1.8 Sender address rejected: Domain not found", "sender"],
+    ["553 5.1.7 Invalid sender mailbox syntax", "sender"],
+    ["550 5.1.1 <x@y.io>: Recipient address rejected: User unknown in relay recipient table", "recipient"],
+    ["550 5.1.1 <x@y.io> check the address carefully", "recipient"],
+    ["550 5.1.1 user unknown [host 10.4.5.6] from 192.5.7.1.9", "recipient"],
+    ["452 4.2.2 mailbox full", "transient"],
+    ["550 5.7.1 message looks like spam", "sender"],
+    ["451 4.7.0 relay access denied", "transient"],
+  ] as const)("diagnostic %s is %s", (diagnostic, expected) => {
+    expect(classifyBounce(wrap({ diagnostic_message: diagnostic }))).toBe(expected);
+  });
+  test("a structured recipient category beats misleading free text", () => {
+    expect(classifyBounce(wrap({ reason: "unknown-user", diagnostic_message: "relay recipient table, 10.4.5.6" }))).toBe("recipient");
+    expect(classifyBounce(wrap({ reason: "bad-mailbox", diagnostic_message: "553 5.1.8 Sender address rejected" }))).toBe("sender");
+  });
   test("transient and unclassified", () => {
     expect(classifyBounce(wrap({ reason: "over quota" }))).toBe("transient");
     expect(classifyBounce({})).toBe("unclassified");
