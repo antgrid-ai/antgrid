@@ -64,6 +64,10 @@ export function LoginPage({ error, notice, email, apple = false }: LoginPageProp
             {/* Filled from localStorage on submit. Empty is the honest default
                 and routes to the magic link — with JS off it always is. */}
             <input type="hidden" name="method" value="" />
+            {/* Bait for form-filling bots; people never see or reach it. */}
+            <div aria-hidden="true" style="position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden">
+              <input type="text" name="ab_contact_ref" tabindex={-1} autocomplete="off" />
+            </div>
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
                 <label class="block text-sm font-medium" for="login-email">

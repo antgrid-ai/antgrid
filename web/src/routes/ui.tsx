@@ -3,6 +3,8 @@
 
 import { safeReturnPath } from "../auth/contracts.js";
 import { recipientLimit } from "../auth/recipient-limit.js";
+import { admitRecipient } from "../auth/email-suppression.js";
+import type { MailDomainCheck } from "../auth/mail-domain.js";
 import { AuthReportQuery, loadAuthReport } from "../models/auth-report.js";
 import { AuthReportPage } from "../ui/auth-report.js";
 import { Hono, type MiddlewareHandler } from "hono";
@@ -171,6 +173,16 @@ function checkoutFailureNotice(failure: Extract<StartCheckoutResult, { ok: false
   return "Checkout is temporarily unavailable. Try again shortly.";
 }
 
+// Shown on the pages that mailed (or tried to mail) the address. The refusals are
+// decided from the address alone, so they read the same for every account state.
+const DOMAIN_COPY = "That email domain can't receive mail. Check the part after the @.";
+const ADDRESS_COPY = "We can't send email to that address. Check the spelling, or sign in another way.";
+const GMAIL_COPY = "Gmail addresses sign in with Google. Use Continue with Google.";
+
+// Hidden from people, tempting to form-filling bots. Only a non-empty value
+// counts, so a form that never carried the field passes unchanged.
+const HONEYPOT_FIELD = "ab_contact_ref";
+
 export function uiRoutes(deps: {
   db: DB;
   auth: Auth;
@@ -178,6 +190,7 @@ export function uiRoutes(deps: {
   relay: RelayPushConfig;
   clientIp: ClientIpResolver;
   sendEmail: SendEmail;
+  mailDomain: MailDomainCheck;
   apple?: AppleTokenClient;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
@@ -300,6 +313,24 @@ export function uiRoutes(deps: {
     }
   }
 
+  /** Which of the two address refusals a mail endpoint answered with, if either. */
+  async function undeliverableKind(res: Response): Promise<"domain" | "address" | null> {
+    const code = await authErrorCode(res.clone());
+    if (code === "EMAIL_DOMAIN_UNDELIVERABLE") return "domain";
+    if (code === "EMAIL_UNDELIVERABLE") return "address";
+    return null;
+  }
+
+  /** Whether an invite may not be mailed to this address. Both reads happen
+   *  before any auth transaction: the DNS lookup must not hold a pooled
+   *  connection. */
+  async function inviteUndeliverable(email: string): Promise<boolean> {
+    const verdict = await deps.mailDomain(email).catch(() => "unknown" as const);
+    const admission = await rateDatabase.$transaction((tx) =>
+      admitRecipient(tx as DB, deps.env.BETTER_AUTH_SECRET, email, verdict, { googleOnly: false }));
+    return admission !== "ok";
+  }
+
   /** Headers for an `auth.api.*` call that must take its UNAUTHENTICATED
    *  branch. `sendVerificationEmail` looks up the session first and, when it
    *  finds one, throws EMAIL_MISMATCH/EMAIL_ALREADY_VERIFIED instead of
@@ -401,6 +432,9 @@ export function uiRoutes(deps: {
         // chain — it reads the rightmost hop (see cross-device-plugin.ts).
         "x-forwarded-for": deps.clientIp(c) ?? "",
         cookie: c.req.header("cookie") ?? "",
+        // Server-set attribution; app.ts strips it from inbound /api/auth
+        // requests so only this in-process call can claim the web form.
+        "x-antgrid-entry": "ui",
       },
       body: { email, previousId, returnPath: returnDestination(c) },
       asResponse: true
@@ -408,6 +442,12 @@ export function uiRoutes(deps: {
     forwardRequestCookies(c,res);
     if (res.headers.get("retry-after")) c.header("Retry-After", res.headers.get("retry-after")!);
     if (!res.ok) {
+      const code = await authErrorCode(res);
+      // Each of these is decided from the address alone, so naming it reveals
+      // nothing about whether an account exists. The address stays in the field.
+      if (code === "EMAIL_USE_GOOGLE") return redirectWith(c, "/login", { error: GMAIL_COPY, email });
+      if (code === "EMAIL_DOMAIN_UNDELIVERABLE") return redirectWith(c, "/login", { error: DOMAIN_COPY, email });
+      if (code === "EMAIL_UNDELIVERABLE") return redirectWith(c, "/login", { error: ADDRESS_COPY, email });
       return c.redirect(`/login?error=${encodeURIComponent("Could not send link")}`);
     }
     forwardSetCookies(c, res);
@@ -425,6 +465,7 @@ export function uiRoutes(deps: {
       return redirectWith(c, "/login", { error: "Too many requests" });
     }
     const form = await c.req.formData();
+    if (String(form.get(HONEYPOT_FIELD) ?? "") !== "") return redirectWith(c, "/login", { error: "Could not send link" });
     const email = String(form.get("email") ?? "").trim();
     // What the BROWSER remembers about its own last sign-in (ui/auth-memory.ts),
     // never something this server looked up — no route here knows whether an
@@ -529,6 +570,7 @@ export function uiRoutes(deps: {
         // per-IP email budget as the resend button or a self-registered,
         // never-verified address becomes a 700-mails-an-hour firehose.
         let sent = true;
+        let undeliverable: "domain" | "address" | null = null;
         if (sent) {
           const response = await deps.auth.api
             .sendVerificationEmail({
@@ -539,6 +581,7 @@ export function uiRoutes(deps: {
             })
             .catch(() => new Response(null, { status: 503 }));
           sent = response.ok;
+          if (!sent) undeliverable = await undeliverableKind(response);
           forwardRequestCookies(c,response);
         }
         // Report what actually happened. Claiming a fresh link on the throttled
@@ -546,7 +589,7 @@ export function uiRoutes(deps: {
         // recourse — signing in again — spends the sign-in bucket instead.
         return redirectWith(c, "/login/check-email", {
           email,
-          ...(sent ? { resent: "1" } : { throttled: "1" }),
+          ...(sent ? { resent: "1" } : undeliverable ? { undeliverable } : { throttled: "1" }),
         });
       }
       // Everything else collapses to one message deliberately: Better-Auth
@@ -620,6 +663,9 @@ export function uiRoutes(deps: {
       if (code === "PASSWORD_TOO_SHORT" || code === "PASSWORD_TOO_LONG") {
         return fail(passwordLengthError(password) ?? "Choose a different password");
       }
+      if (code === "EMAIL_USE_GOOGLE") return fail(GMAIL_COPY);
+      if (code === "EMAIL_DOMAIN_UNDELIVERABLE") return fail(DOMAIN_COPY);
+      if (code === "EMAIL_UNDELIVERABLE") return fail(ADDRESS_COPY);
       // Not USER_ALREADY_EXISTS — with requireEmailVerification on, Better-Auth
       // answers a duplicate with a synthetic success and sends nothing, which
       // is what keeps this endpoint from being an enumeration oracle. It lands
@@ -637,6 +683,7 @@ export function uiRoutes(deps: {
   r.get("/login/check-email", (c) => {
     const email = c.req.query("email") ?? null;
     const throttled = c.req.query("throttled");
+    const undeliverable = c.req.query("undeliverable");
     return c.html(
       <CheckEmailPage
         kind="verify"
@@ -650,10 +697,14 @@ export function uiRoutes(deps: {
             : null
         }
         error={
-          throttled
-            ? "Too many requests — no link was sent. Wait a minute, then use " +
-              "the button below."
-            : null
+          undeliverable === "domain"
+            ? "That email domain can't receive mail. If the address is mistyped, sign up again with the correct one."
+            : undeliverable === "address"
+              ? "We can't send email to that address. If it's mistyped, sign up again with the correct one, or sign in another way."
+              : throttled
+                ? "Too many requests — no link was sent. Wait a minute, then use " +
+                  "the button below."
+                : null
         }
       />
     );
@@ -683,7 +734,8 @@ export function uiRoutes(deps: {
       .catch(() => new Response(null, { status: 503 }));
     forwardRequestCookies(c,response);
     if (response.headers.get("retry-after")) c.header("Retry-After", response.headers.get("retry-after")!);
-    return redirectWith(c, "/login/check-email", { email, ...(response.ok ? { resent: "1" } : { throttled: "1" }) });
+    const undeliverable = response.ok ? null : await undeliverableKind(response);
+    return redirectWith(c, "/login/check-email", { email, ...(response.ok ? { resent: "1" } : undeliverable ? { undeliverable } : { throttled: "1" }) });
   });
 
   // Landing for the emailed verification link. Better-Auth redirects here bare
@@ -744,7 +796,13 @@ export function uiRoutes(deps: {
     // user needs to request a replacement link.
     forwardRequestCookies(c,response);
     if (response.headers.get("retry-after")) c.header("Retry-After", response.headers.get("retry-after")!);
-    if (!response.ok) return redirectWith(c, "/forgot-password", { error: response.status === 429 ? "Too many requests. Try again later." : "Email service unavailable. Try again." });
+    if (!response.ok) {
+      const undeliverable = response.status === 429 ? null : await undeliverableKind(response);
+      // The email is still not echoed: the page must not undo the account-blind answer.
+      if (undeliverable === "domain") return redirectWith(c, "/forgot-password", { error: "That email domain can't receive mail. Check the address and try again." });
+      if (undeliverable === "address") return redirectWith(c, "/forgot-password", { error: "We can't send email to that address. Check the spelling." });
+      return redirectWith(c, "/forgot-password", { error: response.status === 429 ? "Too many requests. Try again later." : "Email service unavailable. Try again." });
+    }
     return c.redirect("/forgot-password/sent");
   });
 
@@ -821,6 +879,7 @@ export function uiRoutes(deps: {
   r.post("/ui/login/start", async (c) => {
 
     const form = await c.req.formData();
+    if (String(form.get(HONEYPOT_FIELD) ?? "") !== "") return redirectWith(c, "/login", { error: "Could not send link" });
     const email = String(form.get("email") ?? "").trim();
     if (!email) return c.redirect("/login?error=Email%20required");
     return startMagicLink(c, email, String(form.get("previousId") ?? "") || undefined);
@@ -1202,6 +1261,7 @@ export function uiRoutes(deps: {
     if (normalized) {
       const retry = await rateDatabase.$transaction((tx) => recipientLimit(tx as DB,deps.env.BETTER_AUTH_SECRET,normalized));
       if (retry) { c.header("Retry-After",String(retry)); return c.text("Please wait before requesting another email.",429); }
+      if (await inviteUndeliverable(normalized)) return teamRedirect(c, "undeliverable");
     }
 
     await provisionProductAccountForUser(deps.db, userId);
@@ -1234,6 +1294,7 @@ export function uiRoutes(deps: {
     if (pendingInvite?.accountId === accountId) {
       const retry = await rateDatabase.$transaction((tx) => recipientLimit(tx as DB,deps.env.BETTER_AUTH_SECRET,pendingInvite.email));
       if (retry) { c.header("Retry-After",String(retry)); return c.text("Please wait before requesting another email.",429); }
+      if (await inviteUndeliverable(pendingInvite.email)) return teamRedirect(c, "undeliverable");
     }
     // Mints a new token and invalidates the one already in the invitee's inbox.
     // Two live tokens for one seat is two ways in, and the older mail is the one

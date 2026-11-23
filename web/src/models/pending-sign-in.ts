@@ -67,6 +67,7 @@ export async function createPending(
     secret: string;
     requesterUa: string | null;
     requesterIp: string | null;
+    requesterEntry?: string | null;
   }
 ): Promise<PendingSignInRow> {
   const nonceHash = hmacBytes(args.secret, args.nonce);
@@ -83,6 +84,7 @@ export async function createPending(
       browserTokenHash,
       requesterUa: args.requesterUa,
       requesterIp: args.requesterIp,
+      requesterEntry: args.requesterEntry,
       expiresAt,
     },
     select: rowSelect,

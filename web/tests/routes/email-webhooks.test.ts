@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
 import { createPending, findByIdWithHashes } from "../../src/models/pending-sign-in.js";
 import { TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
 import { createOutboxSender, EmailKeyring } from "../../src/auth/email-outbox.js";
+import { recipientDigest } from "../../src/auth/recipient-key.js";
 import { createInvite, inviteEmailReference } from "../../src/models/account-invite.js";
 import { createTestUser } from "../helpers/fixtures.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
@@ -220,4 +221,99 @@ test("distinct provider webhook events survive deduplication and mismatched iden
   await submit("provider-current","first");
   await submit("provider-current","second");
   expect(await pg.db.emailRecipientEvent.count()).toBe(2);
+});
+
+describe("bounce suppression", () => {
+  const SECRET = "webhook-recipient-secret-0123456789abcdef";
+  const keys = new EmailKeyring("v1", { v1: Buffer.alloc(32, 3).toString("base64") });
+  const digest = (email: string) => recipientDigest(SECRET, email);
+  async function job(to = "dead@example.com", withSecret = true) {
+    await createOutboxSender(pg.db, keys, withSecret ? { recipientSecret: SECRET } : {})({ to, subject: "s", text: "t" });
+    return pg.db.emailJob.findFirstOrThrow({ orderBy: { createdAt: "desc" } });
+  }
+  const post = (body: unknown) => appWithSecret().app.request(`/webhooks/zeptomail/${KEY}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const bounce = (ref: string, reason?: string, extra: Record<string, unknown> = {}) => ({
+    event_name: ["hardbounce"], ...extra,
+    event_message: [{ email_info: { client_reference: ref, to: "other@example.com" },
+      event_data: reason === undefined ? [] : [{ details: [{ reason, diagnostic_message: "x" }] }] }],
+  });
+
+  test("a recipient-side hard bounce suppresses for about 180 days", async () => {
+    const j = await job();
+    expect((await post(bounce(j.reference, "unknown-user"))).status).toBe(200);
+    const row = await pg.db.emailSuppression.findUniqueOrThrow({ where: { recipientHash: digest("dead@example.com") } });
+    expect(row.reason).toBe("recipient");
+    expect(Math.round((row.expiresAt.getTime() - Date.now()) / 86400000)).toBe(180);
+  });
+
+  test("an unclassifiable hard bounce suppresses for about 7 days", async () => {
+    const j = await job();
+    await post(bounce(j.reference));
+    const row = await pg.db.emailSuppression.findFirstOrThrow();
+    expect(row.reason).toBe("unclassified");
+    expect(Math.round((row.expiresAt.getTime() - Date.now()) / 86400000)).toBe(7);
+  });
+
+  test("sender-side and transient reasons never suppress", async () => {
+    const j = await job();
+    await post(bounce(j.reference, "relaying-issues", { webhook_request_id: "a" }));
+    await post(bounce(j.reference, "550 5.7.1 blocked", { webhook_request_id: "b" }));
+    expect(await pg.db.emailSuppression.count()).toBe(0);
+    expect(await pg.db.emailRecipientEvent.count()).toBe(2);
+  });
+
+  test("complaints and soft bounces are recorded without suppressing", async () => {
+    const j = await job();
+    await post({ event_name: ["fbl_complaint"], webhook_request_id: "c", event_message: [{ email_info: { client_reference: j.reference } }] });
+    await post({ event_name: ["softbounce"], webhook_request_id: "s", event_message: [{ email_info: { client_reference: j.reference } }] });
+    expect(await pg.db.emailRecipientEvent.count()).toBe(2);
+    expect(await pg.db.emailSuppression.count()).toBe(0);
+  });
+
+  test("a replayed webhook is counted once", async () => {
+    const j = await job();
+    await post(bounce(j.reference, "unknown-user"));
+    await post(bounce(j.reference, "unknown-user"));
+    const rows = await pg.db.emailSuppression.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].events).toBe(1);
+    expect(await pg.db.emailRecipientEvent.count()).toBe(1);
+  });
+
+  test("a job without a digest, or an unknown reference, suppresses nothing", async () => {
+    const j = await job("dead@example.com", false);
+    await post(bounce(j.reference, "unknown-user"));
+    await post(bounce("11111111-1111-1111-1111-111111111111", "unknown-user"));
+    expect(await pg.db.emailSuppression.count()).toBe(0);
+  });
+
+  test("a body address never keys a suppression", async () => {
+    const j = await job("real@example.com");
+    await post(bounce(j.reference, "unknown-user"));
+    const rows = await pg.db.emailSuppression.findMany();
+    expect(rows).toHaveLength(1);
+    expect(Buffer.from(rows[0].recipientHash).equals(Buffer.from(digest("real@example.com")))).toBe(true);
+  });
+
+  test("the bounce log line carries the class and no address", async () => {
+    const j = await job();
+    const info = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await post(bounce(j.reference, "unknown-user"));
+      const line = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("email.bounce"))!;
+      expect(JSON.parse(line)).toEqual({ evt: "email.bounce", kind: "hard_bounce", class: "recipient", reason: "unknown-user" });
+      expect(line).not.toContain("@");
+    } finally { info.mockRestore(); }
+  });
+
+  test("the third hard bounce in 24 hours raises the bounce-rate alert once", async () => {
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 4; i++) {
+        const j = await job(`dead${i}@example.com`);
+        await post(bounce(j.reference, "unknown-user", { webhook_request_id: String(i) }));
+      }
+      expect(err.mock.calls.filter((c) => String(c[0]).includes("hard bounces in 24h"))).toHaveLength(1);
+    } finally { err.mockRestore(); }
+  });
 });

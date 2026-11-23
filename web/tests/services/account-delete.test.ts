@@ -6,6 +6,7 @@ import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
 import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember } from "../helpers/fixtures.js";
 import { createAuth } from "../../src/auth/better-auth.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../../src/services/account.js";
 import { ensureFreeSubscription, provisionProductAccountForUser } from "../../src/models/subscription.js";
@@ -27,6 +28,7 @@ function authFor(db: typeof pg.db, url: string) {
            EMAIL_FROM: "Antgrid <no-reply@radhaai.org>", NODE_ENV: "test" } as never,
     db,
     sendEmail: createEmailSender({ zeptoToken: undefined, from: "x@y.z" }),
+    mailDomain: acceptAllMailDomains,
   });
 }
 

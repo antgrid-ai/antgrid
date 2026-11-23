@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Auth } from "../../src/auth/better-auth.js";
 import { uiRoutes } from "../../src/routes/ui.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 
 // Better-Auth's signOut can clear more than one cookie (session token plus, when
 // cookie-cache / dont-remember are in play, `session_data` / `dont_remember`).
@@ -31,6 +32,7 @@ function appWithSignOutCookies(cookies: string[]) {
     relay: {} as never,
     clientIp: () => null,
     sendEmail: async () => {},
+    mailDomain: acceptAllMailDomains,
   });
 }
 

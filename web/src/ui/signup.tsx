@@ -4,6 +4,10 @@
 import { Layout } from "./layout.js";
 import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
 
+// Same Simple Icons mark login.tsx draws for its Google provider button.
+const GOOGLE_ICON_PATH =
+  "M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053z";
+
 export type SignUpPageProps = {
   /** Carried in from step 2's "create one" link, so deciding to sign up never
    *  costs the user the address they already typed. */
@@ -115,6 +119,24 @@ export function SignUpPage({
               Create account
             </button>
           </form>
+
+          {/* Gmail addresses are refused by the form above, so the door they are
+              sent to has to be on this page. */}
+          <div class="mt-4 mb-4 flex items-center gap-3 text-xs text-muted">
+            <span class="h-px flex-1 bg-edge" />
+            <span>or</span>
+            <span class="h-px flex-1 bg-edge" />
+          </div>
+          <a
+            href="/oauth/start?provider=google&callbackURL=/dashboard"
+            class="btn btn-quiet relative h-11 w-full gap-2 px-2 shadow-none text-sm font-medium"
+            data-ab-remember="google"
+          >
+            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+              <path d={GOOGLE_ICON_PATH} />
+            </svg>
+            <span>Continue with Google</span>
+          </a>
 
           <p class="text-xs text-muted mt-4 text-center">
             Already have an account?{" "}

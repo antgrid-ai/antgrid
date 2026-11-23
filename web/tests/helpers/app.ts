@@ -8,6 +8,7 @@ import { createEmailSender, type SendEmail } from "../../src/auth/email.js";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import type { Env } from "../../src/env.js";
 import type { AppleTokenClient } from "../../src/auth/apple-tokens.js";
+import { acceptAllMailDomains, type MailDomainCheck } from "../../src/auth/mail-domain.js";
 
 /**
  * Fixed Better-Auth secret shared across all test runs so that
@@ -21,6 +22,9 @@ export type BuildTestAppOptions = {
    *  both Better-Auth and the UI router, so a capture array sees invite mail
    *  as well as sign-in mail. */
   sendEmail?: SendEmail;
+  /** Stands in for the DNS-backed domain check; defaults to accepting every
+   *  domain so fixtures on reserved TLDs keep working. */
+  mailDomain?: MailDomainCheck;
   /**
    * @deprecated No-op. The Prisma adapter is now always used so that sessions
    * inserted via fixtures are visible to auth.api.getSession. Kept for
@@ -76,7 +80,8 @@ export function buildTestApp(
   // Always use the real Prisma adapter so that sessions inserted via fixtures
   // (db.session.create) are visible to auth.api.getSession — the same path
   // the production middleware uses after the Better-Auth refactor.
-  const auth = createAuth({ env, db, sendEmail });
+  const mailDomain = opts.mailDomain ?? acceptAllMailDomains;
+  const auth = createAuth({ env, db, sendEmail, mailDomain });
   const relay = { baseUrl: env.RELAY_INTERNAL_URL, secret: env.RELAY_INTERNAL_SECRET };
   return {
     app: buildApp({
@@ -86,6 +91,7 @@ export function buildTestApp(
       corsOrigins: env.CORS_ORIGINS,
       relay,
       sendEmail,
+      mailDomain,
       ...("appleTokens" in opts ? { appleTokens: opts.appleTokens } : {}),
     }),
     env,

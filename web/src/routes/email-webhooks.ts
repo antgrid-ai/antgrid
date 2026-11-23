@@ -9,12 +9,22 @@ import type { DB } from "../db/index.js";
 import { markDelivery } from "../models/pending-sign-in.js";
 import { INVITE_REFERENCE_PREFIX, markInviteDelivery } from "../models/account-invite.js";
 import { recordStage } from "../auth/flows.js";
+import { classifyBounce, suppressRecipient, type BounceClass } from "../auth/email-suppression.js";
 
 const Info = z.object({ client_reference: z.string().max(128).optional(), request_id: z.string().max(128).optional() }).passthrough();
 const Message = z.object({ email_info: Info.optional(), request_id: z.string().max(128).optional() }).passthrough();
 const Event = z.object({ event_name: z.union([z.string().max(64), z.array(z.string().max(64)).max(100)]).optional(),
   event_message: z.union([Message, z.array(Message).max(100)]).optional(), webhook_request_id: z.string().max(128).optional() }).passthrough();
 const Payload = z.union([Event, z.array(Event).max(100)]);
+/** First provider reason for the log, dropped when it could quote an address. */
+function reasonOf(message: unknown): string | null {
+  const data = (message as { event_data?: unknown })?.event_data;
+  const first = (Array.isArray(data) ? data[0] : data) as { details?: unknown } | undefined;
+  const details = first?.details;
+  const reason = (Array.isArray(details) ? details[0] : details) as { reason?: unknown } | undefined;
+  const text = typeof reason?.reason === "string" ? reason.reason.slice(0, 64) : null;
+  return text && !text.includes("@") ? text : null;
+}
 const hash = (s: string) => createHash("sha256").update(s).digest();
 
 export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
@@ -43,8 +53,21 @@ export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
           const legacyRef = job?.relatedReference ?? ref;
           if (job) {
             const id = hash(JSON.stringify([job.id, kind, providerId ?? ref, event.webhook_request_id ?? ""])).toString("hex");
-            await tx.emailRecipientEvent.upsert({ where: { id }, create: { id, jobId: job.id, kind }, update: {} });
+            // The key comes from the job we sent, never from an address in the webhook body,
+            // so a forged or replayed body cannot suppress an address we did not mail.
+            const inserted = await tx.emailRecipientEvent.createMany({ data: [{ id, jobId: job.id, kind }], skipDuplicates: true });
             if (kind === "hard_bounce") await recordStage(tx, job.flowId ?? undefined, "mail_bounced");
+            if (inserted.count && kind === "hard_bounce") {
+              const cls: BounceClass = classifyBounce(message);
+              console.info(JSON.stringify({ evt: "email.bounce", kind, class: cls, reason: reasonOf(message) }));
+              // Sender-side and transient bounces describe our reputation or the provider
+              // link, not the mailbox, so they must not lock a real user out.
+              if (job.recipientHash && (cls === "recipient" || cls === "unclassified")) {
+                await suppressRecipient(tx, job.recipientHash as Uint8Array<ArrayBuffer>, cls, job.createdAt);
+              }
+              const recent = await tx.emailRecipientEvent.count({ where: { kind: "hard_bounce", at: { gt: new Date(Date.now() - 86400000) } } });
+              if (recent === 3) console.error("[email] 3 hard bounces in 24h — provider bounce-rate limit at risk");
+            }
           }
           if (kind === "hard_bounce" && legacyRef) {
             // Resends rotate invitation tokens; an earlier message's bounce
