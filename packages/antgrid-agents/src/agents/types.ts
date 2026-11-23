@@ -719,6 +719,10 @@ export interface AgentSpec {
    *  Most agents (claude → "Claude Code", cursor → "Cursor Agent") publish a good
    *  name here and leave this unset. */
   oscTitleUnusable?: boolean;
+  /** Strips the turn-state decoration an agent adds to its OSC title, so the
+   *  session name does not change with every state. An empty result is chrome,
+   *  not a name. */
+  normalizeOscTitle?: (raw: string) => string;
   /**
    * True when a launch through the antgrid.yaml DEFAULT spec (`agent.command`,
    * no per-session `tool`) still gets this agent's hook injection AND resume
