@@ -366,10 +366,11 @@ describe("cheapNamingModel", () => {
   // opencode and its fork kilo serve whatever providers the user configured, so
   // naming asks the installed CLI for the model it titles its own sessions with.
   // OpenCode 2 is probed through `opencode api --standalone <operation>`, which
-  // prints the request location and `data`; kilo 7.8.x keeps opencode 1.19.5's
+  // prints the request location and `data`, and `debug agents --standalone`,
+  // which prints the agents as a bare array; kilo 7.8.x keeps opencode 1.19.5's
   // debug/models output. The resolution rules themselves are covered by
   // opencode-naming-model.test.ts in antgrid-agents.
-  function opencodeSpawn(answers: { config: object; models: string; stateDir: string; api?: Record<string, unknown> }) {
+  function opencodeSpawn(answers: { config: object; models: string; stateDir: string; api?: Record<string, unknown>; agents?: unknown[] }) {
     const calls: string[][] = [];
     const options: Array<Record<string, any>> = [];
     const spawn = ((cmd: string[], o?: Record<string, any>) => {
@@ -378,6 +379,7 @@ describe("cheapNamingModel", () => {
       const key = cmd.slice(1, 3).join(" ");
       const api = key === "api --standalone" ? answers.api?.[cmd[3]!] : undefined;
       const stdout = api !== undefined ? JSON.stringify({ location: { directory: "/scratch" }, data: api }, null, 2)
+        : key === "debug agents" ? JSON.stringify(answers.agents ?? [], null, 2)
         : key === "debug config" ? JSON.stringify(answers.config, null, 2)
         : key === "debug paths" ? `home       /scratch\nstate      ${answers.stateDir}\n`
         : key === "models --verbose" ? answers.models
@@ -401,9 +403,8 @@ describe("cheapNamingModel", () => {
 
   test("opencode names with the small model opencode itself would title with", async () => {
     const { spawn, calls, options } = opencodeSpawn({
-      config: {}, stateDir: tmp(), models: "",
+      config: {}, stateDir: tmp(), models: "", agents: V2_AGENTS,
       api: {
-        "agent.list": V2_AGENTS,
         "model.default": v2Model("anthropic", "claude-sonnet-5", "claude-sonnet"),
         "model.list": [
           v2Model("anthropic", "claude-sonnet-5", "claude-sonnet"),
@@ -429,9 +430,8 @@ describe("cheapNamingModel", () => {
   // titling falls back to the session's model; so does this.
   test("opencode with no small model for its provider names on its own default", async () => {
     const { spawn, calls } = opencodeSpawn({
-      config: {}, stateDir: tmp(), models: "",
+      config: {}, stateDir: tmp(), models: "", agents: V2_AGENTS,
       api: {
-        "agent.list": V2_AGENTS,
         "model.default": v2Model("openai", "gpt-6.1-sol", "gpt-sol"),
         "model.list": [v2Model("openai", "gpt-6.1-sol", "gpt-sol")],
       },

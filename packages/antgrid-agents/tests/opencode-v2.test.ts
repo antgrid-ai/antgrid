@@ -11,6 +11,7 @@ import { opencodeUpgradeArgs, requireOpencodeV2 } from "../src/agents/opencode/v
 import { createAgentRunScope } from "../src/run-scope";
 import { withAgentHost, type AgentHostServices, type AgentLogger } from "../src/host";
 import { readOpencodeV2Messages } from "../src/agents/opencode/v2-store";
+import { readLastOpencodeMessages } from "../src/agents/opencode/db-read";
 import { serializeOpencodeSession } from "../src/agents/handoff/opencode-serialize";
 
 const event = (type: string, data: object) => ({ type, data, id: "evt_fixture", created: 1 } as OpenCodeEvent);
@@ -111,6 +112,29 @@ test("V2 client preserves native defaults, paginates history and reverts without
   } finally { await client.dispose(); }
 });
 
+// 2.2.7 and 2.3.0 answer agent.list with no agents for the first few hundred
+// milliseconds after a location boots, and command.list with no commands until
+// the same load (2.2.6 already did for commands). Records as 2.3.0 lists them.
+test("V2 client waits for the location's agents and commands before listing them", async () => {
+  let agentRequests = 0;
+  const agents = ["build", "plan", "general", "title"].map((id) => ({ id, name: id, mode: id === "general" ? "subagent" : "primary",
+    hidden: id === "title", permissions: [], request: { settings: {}, headers: {}, body: {} } }));
+  const commands = ["init", "review", "goal"].map((name) => ({ name, description: `${name} fixture` }));
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    const path = new URL(request.url).pathname;
+    const loaded = agentRequests > 2;
+    if (path === "/api/agent") return Response.json({ location: { directory: "/checkout" }, data: ++agentRequests > 3 ? agents : [] });
+    if (path === "/api/command") return Response.json({ location: { directory: "/checkout" }, data: loaded ? commands : [] });
+    return new Response(null, { status: 404 });
+  } });
+  const { client } = connectOpencode({ url: server.url.href, close: async () => { await server.stop(true); } }, "/checkout");
+  try {
+    const [listedCommands, listedAgents] = await Promise.all([client.listCommands(), client.listAgents()]);
+    expect(listedAgents.map((agent) => agent.name)).toEqual(["build", "plan", "general", "title"]);
+    expect(listedCommands.map((command) => command.name)).toEqual(["init", "review", "goal"]);
+  } finally { await client.dispose(); }
+});
+
 test.each(["1.19.5", "2.0.0-beta.1", "invalid", undefined])("both modes reject unsupported version %s", (version) => {
   expect(() => requireOpencodeV2(version)).toThrow("OpenCode 2.0.0 or later is required");
 });
@@ -198,4 +222,56 @@ test("V2 store reads streamed parts in native order and redacts provider interna
     expect(JSON.stringify(serialized)).not.toContain("SECRET-");
     expect(serialized.doc.messages[1]?.parts[1]?.state).toMatchObject({ error: { name: "APIError", data: { message: "failed" } } });
   } finally { db.close(); }
+});
+
+// OpenCode 2.2.6-2.3.0 rows: a completed compaction names in metadata.keepID the
+// oldest message it kept verbatim, and OpenCode still sends the model the kept
+// turns from keepID up to the compaction, not only the summary and later turns.
+// Field sets as the native store writes them; the content is invented.
+test("the V2 reader keeps the turns a compaction retained", () => {
+  const directory = mkdtempSync(join(tmpdir(), "opencode-v2-keep-"));
+  const path = join(directory, "opencode.db");
+  const db = new Database(path);
+  try {
+    db.exec("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, time_created INTEGER, title TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)");
+    let seq = 0;
+    const insert = (session: string, id: string, type: string, data: object) => {
+      seq++;
+      db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [id, session, type, seq, seq, seq, JSON.stringify({ time: { created: seq }, ...data })]);
+    };
+    const user = (session: string, id: string, text: string) => insert(session, id, "user", { text, files: [], agents: [] });
+    const assistant = (session: string, id: string, text: string) => insert(session, id, "assistant", {
+      agent: "build", model, cost: 0, finish: "stop", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      content: [{ type: "text", text, native: {} }],
+    });
+    const compaction = (session: string, id: string, keepID: string) => insert(session, id, "compaction", {
+      status: "completed", reason: "auto", model, summary: `summary of ${session}`, metadata: { keepID }, cost: 0, tokens: { input: 1, output: 1 },
+    });
+    for (const session of ["kept", "unknown"]) {
+      db.run("INSERT INTO session_v2 VALUES (?, NULL, 1, ?)", [session, session]);
+      user(session, `${session}-old-q`, "summarized question");
+      assistant(session, `${session}-old-a`, "summarized answer");
+      user(session, `${session}-keep-q`, "kept question");
+      assistant(session, `${session}-keep-a`, "kept answer");
+      insert(session, `${session}-idle`, "idle", { outcome: "succeeded" });
+      compaction(session, `${session}-compaction`, session === "kept" ? `${session}-keep-q` : "msg_missing");
+      user(session, `${session}-new-q`, "later question");
+      assistant(session, `${session}-new-a`, "later answer");
+    }
+    // A kept tail longer than the reader's row window.
+    db.run("INSERT INTO session_v2 VALUES ('long', NULL, 1, 'long')");
+    user("long", "long-keep", "first kept question");
+    for (let i = 0; i < 250; i++) assistant("long", `long-a${i}`, `kept answer ${i}`);
+    compaction("long", "long-compaction", "long-keep");
+    user("long", "long-new", "later question");
+    db.close();
+
+    expect(readLastOpencodeMessages("kept", 10, path))
+      .toEqual(["kept question", "kept answer", "summary of kept", "later question", "later answer"]);
+    expect(readLastOpencodeMessages("unknown", 10, path)).toEqual(["summary of unknown", "later question", "later answer"]);
+    expect(readLastOpencodeMessages("long", 3, path)).toEqual(["kept answer 249", "summary of long", "later question"]);
+    expect(readLastOpencodeMessages("long", 300, path)).toHaveLength(200);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
