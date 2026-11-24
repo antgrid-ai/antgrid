@@ -10,6 +10,7 @@ import {
   titleSourceFor,
 } from "../../packages/antgrid-agents/src/known-agents";
 import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
+import { oscTitleForNaming } from "../src/agent-runtime";
 
 describe("known-agents registry", () => {
   it("exposes entries for the known coding agents", () => {
@@ -69,6 +70,14 @@ describe("known-agents registry", () => {
     expect(isOscTitleUnusable("codex")).toBe(false);
     expect(isOscTitleUnusable(undefined)).toBe(false);
     expect(isOscTitleUnusable("not-a-real-agent")).toBe(false);
+  });
+
+  it("names a Vibe session from its OSC title without the turn-state decoration", () => {
+    expect(oscTitleForNaming("mistral-vibe", ">> Session Title")).toBe("Session Title");
+    expect(oscTitleForNaming("mistral-vibe", "Session Title - Task Complete")).toBe("Session Title");
+    expect(oscTitleForNaming("mistral-vibe", ">> Vibe")).toBe("");
+    expect(oscTitleForNaming("antigravity", "C:/x/agy.exe")).toBe("Antigravity");
+    expect(oscTitleForNaming("codex", ">> kept as is")).toBe(">> kept as is");
   });
 
   it("codex keeps OSC approval notifications enabled alongside its hooks", () => {

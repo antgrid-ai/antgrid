@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -15,9 +18,18 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
 
-Widget _wrap(Widget child, {required List<Override> overrides}) {
+Widget _wrap(
+  Widget child, {
+  required List<Override> overrides,
+  Future<Map<String, String?>> Function()? scan,
+}) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      localDetectedToolsProvider.overrideWith(
+        (_) => scan?.call() ?? Future.value({}),
+      ),
+      ...overrides,
+    ],
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
@@ -32,7 +44,7 @@ List<FirstRunStep> _desktopSteps({
   bool openProject = false,
   bool startSession = false,
   bool connectPhone = false,
-  bool armHandler = false,
+  bool detectAgent = false,
 }) => [
   (id: FirstRunStepIds.signIn, label: 'Sign in', done: signIn),
   (id: FirstRunStepIds.openProject, label: 'Open a project', done: openProject),
@@ -47,9 +59,9 @@ List<FirstRunStep> _desktopSteps({
     done: connectPhone,
   ),
   (
-    id: FirstRunStepIds.armHandler,
-    label: 'Arm Handler on a session',
-    done: armHandler,
+    id: FirstRunStepIds.detectAgent,
+    label: 'Detect a supported coding agent',
+    done: detectAgent,
   ),
 ];
 
@@ -143,7 +155,7 @@ void main() {
               openProject: true,
               startSession: true,
               connectPhone: true,
-              armHandler: true,
+              detectAgent: true,
             ),
           ),
         ],
@@ -171,7 +183,7 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('armHandler cursor hint renders when it is the first unchecked '
+  testWidgets('missing agent guidance renders when it is the first unchecked '
       'step', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     useInMemoryPrefs();
@@ -197,13 +209,62 @@ void main() {
     expect(find.text('SETUP · 4/5'), findsOneWidget);
     expect(
       find.text(
-        'Click the shield in a session title bar — Handler replies while you '
-        'are away.',
+        'No coding agent found on this computer. Install one to start a session.',
       ),
       findsOneWidget,
     );
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets(
+    'detection shows loading, failure, and retries without claiming completion',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      useInMemoryPrefs();
+      final store = await FirstRunStore.open();
+      final scan = Completer<Map<String, String?>>();
+      var attempts = 0;
+      await tester.pumpWidget(
+        _wrap(
+          const FirstRunSetupSection(),
+          scan: () {
+            attempts++;
+            return attempts == 1 ? scan.future : Future.value({});
+          },
+          overrides: [
+            firstRunStoreProvider.overrideWithValue(store),
+            desktopFirstRunStepsProvider.overrideWith(
+              (_) => _desktopSteps(
+                signIn: true,
+                openProject: true,
+                startSession: true,
+                connectPhone: true,
+              ),
+            ),
+          ],
+        ),
+      );
+      expect(find.text('Checking agents on this computer…'), findsOneWidget);
+      expect(find.text('Check again'), findsNothing);
+      scan.completeError(StateError('host unavailable'));
+      await tester.pump();
+      expect(
+        find.text('Couldn’t check agents on this computer.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('No coding agent found'), findsNothing);
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      await tester.pump();
+      expect(attempts, 2);
+      expect(find.textContaining('No coding agent found'), findsOneWidget);
+      expect(
+        store.read().completedSteps,
+        isNot(contains(FirstRunStepIds.detectAgent)),
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   testWidgets('collapse folds the steps to the header row, leaves the count '
       'visible, and persists across a restart', (tester) async {
@@ -303,6 +364,53 @@ void main() {
     expect(find.textContaining('SETUP'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final textScale in [1.0, 1.5]) {
+    testWidgets('short mobile checklist scrolls at text scale $textScale', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      useInMemoryPrefs();
+      final store = await FirstRunStore.open();
+      await tester.pumpWidget(
+        _wrap(
+          MediaQuery(
+            data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+            child: const Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: 390,
+                height: 180,
+                child: RecentSessionsTab(),
+              ),
+            ),
+          ),
+          overrides: [
+            firstRunStoreProvider.overrideWithValue(store),
+            recentSessionsProvider.overrideWith((_) => const []),
+            pickerSourcesProvider.overrideWithValue(const <PickerSource>[]),
+            accountAgentsProvider.overrideWith((_) async => const []),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      final scrollable = find.descendant(
+        of: find.byType(RecentSessionsTab),
+        matching: find.byType(Scrollable),
+      );
+      await tester.scrollUntilVisible(
+        find.text(kDemoEntryLabel),
+        100,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(kDemoEntryLabel).hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 
   testWidgets('mobile checklist renders in the empty Recent slot for a '
       'no-machine account', (tester) async {

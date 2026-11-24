@@ -304,10 +304,8 @@ String? _bounded(String? value, int max) {
 /// it is fenced as data, because a hostname or a repo path in a WRAPPER would
 /// read as a grant.
 ///
-/// Nothing in the app parses one yet — the bus inbox reads the bare key as
-/// `SessionBusAddress`, and the `session-bus:directory` read the bridge offers
-/// is unconsumed — so this is the mirror kept ready for the remote session
-/// directory surface, not an orphan to delete.
+/// The bridge's directory read is not consumed here yet; this mirror is kept
+/// for the remote session directory surface.
 class SessionMemberRef {
   /// The account device uuid, which is how the app addresses a machine — never
   /// a relay slot id or a hostname.

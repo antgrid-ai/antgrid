@@ -161,7 +161,7 @@ the set of invariants a future edit breaks silently.
 - **Agent reach is one local switch plus the requester's orchestrator role.**
   The switch is `agent-reach-policy.ts` (a boolean, default on); `effectiveReachLevel`
   (`session-bus/request-policy.ts`) maps it to `off` | `on`. On allows reads and
-  posts; control methods additionally need the REQUESTING machine to be an
+  notifications; control methods additionally need the REQUESTING machine to be an
   orchestrator in this machine's directory. Local off always wins. The
   orchestrator grant is the one account-held bit: only the owner's account
   session can raise it (from the app, on web); the loopback verbs

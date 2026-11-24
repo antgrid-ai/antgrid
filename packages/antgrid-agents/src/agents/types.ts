@@ -666,6 +666,8 @@ export interface AgentSpec {
    *  advertisement so a newly-added agent shows with a proper name without
    *  needing an app release. */
   label: string;
+  /** Official CLI installation guide, exposed to clients before installation. */
+  installUrl?: string;
   /** Explicit per-mode support. An empty object means bypass is unsupported. */
   approvalPolicies: { bypass?: AgentApprovalPolicy };
   /** True when a session launched with the default policy stops to ask before
@@ -717,6 +719,10 @@ export interface AgentSpec {
    *  Most agents (claude → "Claude Code", cursor → "Cursor Agent") publish a good
    *  name here and leave this unset. */
   oscTitleUnusable?: boolean;
+  /** Strips the turn-state decoration an agent adds to its OSC title, so the
+   *  session name does not change with every state. An empty result is chrome,
+   *  not a name. */
+  normalizeOscTitle?: (raw: string) => string;
   /**
    * True when a launch through the antgrid.yaml DEFAULT spec (`agent.command`,
    * no per-session `tool`) still gets this agent's hook injection AND resume

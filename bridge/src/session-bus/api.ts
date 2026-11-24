@@ -45,7 +45,6 @@ import {
 import type { Rung, SessionBusCoordinator } from "./coordinator";
 import type { BusHeldReason } from "./relay-transport";
 import { entriesForThread, type LoggedEnvelope } from "./message-log";
-import { unreadPosts, type MailboxPost } from "./mailbox";
 import { threadById, type ThreadRow } from "./thread-store";
 import { REMOTE_CODE_PATTERN, SESSION_BUS_ERRORS, isRefusal, refuse, refusalSentence, type SessionBusErrorCode, type SessionBusRefusal } from "./errors";
 import type { BusRequestResult } from "./bus-requests";
@@ -107,8 +106,6 @@ const SendTargetSchema = z
   })
   .strict();
 
-/** The fields a message carries whichever verb sends it. Shared as one shape so
- *  the two bodies cannot drift into accepting different messages. */
 const messageFields = {
   summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
   text: z.string().min(1).max(MAX_PART_CHARS).optional(),
@@ -147,22 +144,6 @@ export const SendBodySchema = z
 
 export type SendBody = z.infer<typeof SendBodySchema>;
 
-/** A reply addresses the THREAD: the id is required and the address is not,
- *  because the thread row already records its peer and making an agent respell
- *  an address it was never given is how a reply misroutes. */
-export const ReplyBodySchema = z
-  .object({
-    to: SendTargetSchema.optional(),
-    ...messageFields,
-    threadId: z.string().min(1).max(200),
-  })
-  .strict()
-  .refine(carriesBody, CARRIES_BODY_MESSAGE);
-
-export type ReplyBody = z.infer<typeof ReplyBodySchema>;
-
-/** The shape both send bodies satisfy, so one implementation answers three
- *  verbs. An absent `to` is legal only beside a thread that records the peer. */
 interface SendRequest {
   to?: { machineId?: string | null | undefined; projectId: string; sessionId: string } | undefined;
   summary: string;
@@ -199,7 +180,7 @@ export interface SendResultView {
   rung: Rung;
   heldReason?: BusHeldReason;
   refusedCode?: string;
-  /** A session on this machine: `delivered` is its own mailbox taking it. */
+
   local?: true;
   machineLabel?: string;
   sessionName?: string;
@@ -212,30 +193,6 @@ export interface SendResultView {
   /** Whether this send opened the thread — the event pair-budget.ts counts as
    *  progress, resetting the no-progress halt. */
   opensThread: boolean;
-}
-
-/** An artifact an inbound message NAMES: a reference to bytes on the machine
- *  that published them, never a handle this bridge can serve. */
-export interface InboxArtifactView {
-  artifactId: string;
-  name: string;
-  mediaType: string;
-  bytes: number;
-  sha256: string;
-  summary: string;
-}
-
-export interface InboxPostView {
-  messageId: string;
-  threadId: string | null;
-  contextId: string;
-  at: number;
-  from: SessionMemberKey;
-  summary: string;
-  /** The body, rendered here so a reader needs no second call per row. */
-  text: string[];
-  unexpected?: string;
-  artifacts: InboxArtifactView[];
 }
 
 /** Who the CALLER is, as the other end of the bus would have to spell it.
@@ -287,36 +244,14 @@ export interface SessionBusApi {
     | { sessions: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach; machineId: string | null }
     | SessionBusRefusal
   >;
-  /** Post and notify, the bus's two send verbs. Both synchronous, and so is
-   *  everything below them: what a send consults — one directory row, the
-   *  pair's budget, this session's own artifacts — is in memory or on local
-   *  disk. {@link listSessions} is async for the one reason a send must not
-   *  inherit, a git spawn per row, which is also why nothing here resolves a
-   *  target through `directory.list()`. */
-  post(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
-  notify(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
-  reply(terminalId: string | undefined, body: ReplyBody): SendResultView | SessionBusRefusal;
+  notify(terminalId: string | undefined, body: SendBody): Promise<SendResultView | SessionBusRefusal>;
   /** Wait up to [timeoutMs] for a sent message to reach a rung above `held`,
    *  then report the rung it is on. For the route that answers an agent's send:
-   *  the relay receipt arrives asynchronously, and the send itself stays
-   *  synchronous. */
+   *  the relay receipt arrives asynchronously after the send. */
   awaitRung(
     messageId: string,
     timeoutMs: number,
   ): Promise<{ rung: Rung; heldReason?: BusHeldReason; refusedCode?: string }>;
-  /** Unread posts, and the count of the ones this session will never see.
-   *  Reading MARKS READ: what was handed over has been delivered. This is the
-   *  AGENT's read — the one an MCP tool call answers. */
-  inbox(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
-  /** The same view, and it marks NOTHING. This is the HUMAN's read — a badge, a
-   *  panel, anything a person can trigger by looking.
-   *
-   *  The split is not a convenience. Reading is what spends the unread flag, so
-   *  a human peek that marked would consume the AGENT's mail: the post would be
-   *  gone from the agent's own inbox before the agent ever saw it, and nothing
-   *  anywhere would report the loss. Whoever adds the next surface picks the
-   *  read by asking who is looking, never by which one is closer to hand. */
-  inboxPeek(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
   /** Ask another of the account's machines to do something and wait for its
    *  answer. The caller still names a session of its own; what the other
    *  machine allows is decided there, from the role the account's directory
@@ -437,38 +372,6 @@ function textPartsOf(envelope: BusEnvelope): string[] {
   return text;
 }
 
-function artifactViewsOf(envelope: BusEnvelope): InboxArtifactView[] {
-  const views: InboxArtifactView[] = [];
-  for (const part of envelope.parts) {
-    if (part.kind !== "artifact") continue;
-    views.push({
-      artifactId: part.artifactId,
-      name: part.name,
-      mediaType: part.mediaType,
-      bytes: part.bytes,
-      sha256: part.sha256,
-      summary: part.summary,
-    });
-  }
-  return views;
-}
-
-function inboxViewOf(post: MailboxPost): InboxPostView {
-  return {
-    messageId: post.messageId,
-    threadId: post.threadId,
-    contextId: post.contextId,
-    at: post.at,
-    from: post.from,
-    summary: post.summary,
-    text: textPartsOf(post.envelope),
-    ...(post.envelope.metadata.unexpected === undefined
-      ? {}
-      : { unexpected: post.envelope.metadata.unexpected }),
-    artifacts: artifactViewsOf(post.envelope),
-  };
-}
-
 function threadEntryOf(entry: LoggedEnvelope): ThreadEntryView {
   const delivery: Rung | undefined =
     entry.direction !== "out"
@@ -489,6 +392,18 @@ function threadEntryOf(entry: LoggedEnvelope): ThreadEntryView {
     ...(entry.deliveredAt === undefined ? {} : { deliveredAt: entry.deliveredAt }),
     ...(delivery === undefined ? {} : { delivery }),
     ...(entry.refusedCode === undefined ? {} : { refusedCode: entry.refusedCode }),
+  };
+}
+
+const remoteStarts = new WeakMap<SessionBusCoordinator, Map<string, Promise<BusRequestResult>>>();
+
+function requestRefusal(answer: Extract<BusRequestResult, { ok: false }>): SessionBusRefusal {
+  const known = Object.hasOwn(SESSION_BUS_ERRORS, answer.code);
+  const code: SessionBusErrorCode = known ? answer.code as SessionBusErrorCode : "REQUEST_FAILED";
+  return {
+    ...refuse(code, refusalSentence(answer.code)),
+    ...(!known && REMOTE_CODE_PATTERN.test(answer.code) ? { remoteCode: answer.code } : {}),
+    ...(answer.held ? { held: answer.held } : {}),
   };
 }
 
@@ -573,19 +488,15 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
    * switch, open the desktop — so a rung that ran out of turn would answer a
    * caller truthfully and still send it after the wrong one.
    */
-  function sendMessage(
+  async function sendMessage(
     terminalId: string | undefined,
-    verb: "post" | "notify",
     req: SendRequest,
-  ): SendResultView | SessionBusRefusal {
+    started = false,
+  ): Promise<SendResultView | SessionBusRefusal> {
+    const verb = "notify";
     const m = resolve(terminalId);
     if (!m) return notMember();
 
-    // The THREAD STORE, never the mailbox: a session that was notified holds no
-    // mailbox row at all, so a mailbox-side lookup would omit the context for
-    // every reply to a notify — and the coordinator then defaults it to the
-    // replier's own session, which resolves as a lead and sends the answer to
-    // this machine's desktop app, where it is accepted and reported sent.
     let thread: ThreadRow | null = null;
     if (req.threadId !== undefined) {
       thread = threadById(deps.coordinator.threads(m.sessionId), req.threadId);
@@ -719,43 +630,46 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     const pairRefusal = deps.coordinator.pairRefusal(m.sessionId, target, verb);
     if (pairRefusal) return pairRefusal;
 
-    // This refusal covers only the state it names: a STOPPED session never
-    // reaches a turn boundary. An idle one reaches it at once — the delivery
-    // queue hands a line to an idle session immediately — so refusing there
-    // would refuse a live peer at rest, which is what every session is
-    // between turns.
-    //
-    // A SAME-MACHINE target narrows the refusal: this bridge can start a
-    // session it already holds, so it does, and lets the send through — the
-    // message rides `coordinator.message()`'s ordinary path into the delivery
-    // queue exactly as it would for an already-running target, and the queue
-    // already knows how to hold a line for a session with no turn yet and
-    // flush it the moment that session reports itself running (the same edge
-    // "a line held across a restart" uses). A cross-machine target is still
-    // refused unconditionally: starting a process on another machine is not
-    // this host's call to make on the sender's behalf, whoever is on the other
-    // end of it.
-    //
-    // An ABSENT row is liveness unknown, never "stopped": the send that got
-    // this far did so on a thread and a live route, which is better evidence
-    // about that session than a row this machine was never offered. Refusing it
-    // here would put the fallback back where it started.
-    if (verb === "notify" && row?.activity === "stopped") {
-      const woken = namesMachine(target.machineId, selfMachineId) && (deps.startSession?.(target.sessionId) ?? false);
-      if (!woken) {
-        return refuse(
-          "NOT_RUNNING",
-          "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_post lands in its mailbox instead",
-        );
-      }
-    }
-
     const attached = partsForArtifacts(m.sessionId, req.artifactIds);
     if (isRefusal(attached)) return attached;
     const parts: BusPart[] = [
       ...(req.text === undefined ? [] : [{ kind: "text", text: req.text } as BusPart]),
       ...attached,
     ];
+    const invalid = deps.coordinator.messageRefusal({
+      sessionId: m.sessionId, verb, threadId: req.threadId ?? null,
+      to: target, summary: req.summary, parts, contextId,
+      ...(req.unexpected === undefined ? {} : { unexpected: req.unexpected }),
+    });
+    if (invalid) return invalid;
+
+    if (!started && row?.activity === "stopped") {
+      if (offMachine) {
+        if (!deps.request) return refuse("AGENT_NOT_READY", "this bridge cannot send requests to other machines");
+        let starts = remoteStarts.get(deps.coordinator);
+        if (!starts) remoteStarts.set(deps.coordinator, starts = new Map());
+        const key = JSON.stringify([target.machineId, target.sessionId]);
+        let pending = starts.get(key);
+        if (!pending) {
+          pending = deps.request({
+            to: target.machineId, method: "session.start",
+            params: { projectId: target.projectId, sessionId: target.sessionId },
+            timeoutMs: BUS_REQUEST_DEFAULT_TIMEOUT_MS,
+          });
+          starts.set(key, pending);
+        }
+        let answer: BusRequestResult;
+        try { answer = await pending; }
+        finally { if (starts.get(key) === pending) starts.delete(key); }
+        if (!answer.ok) return requestRefusal(answer);
+        // Awaiting a start can outlive membership, policy, thread or budget.
+        if (resolve(terminalId)?.sessionId !== m.sessionId) return notMember();
+        return sendMessage(terminalId, req, true);
+      }
+      if (!(deps.startSession?.(target.sessionId) ?? false)) {
+        return refuse("NOT_RUNNING", "that session is stopped and cannot be started by this bridge");
+      }
+    }
 
     return deps.coordinator.message({
       sessionId: m.sessionId,
@@ -770,51 +684,12 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
   }
 
   return {
-    post(terminalId, body) {
-      return sendMessage(terminalId, "post", body);
-    },
-
     notify(terminalId, body) {
-      return sendMessage(terminalId, "notify", body);
-    },
-
-    // A reply answers on a thread the peer is waiting on, so it takes the
-    // interrupting verb. That choice lives in the VERB rather than in a flag,
-    // which leaves `post` carrying a threadId as the way to answer a thread
-    // without interrupting.
-    reply(terminalId, body) {
-      return sendMessage(terminalId, "notify", body);
+      return sendMessage(terminalId, body);
     },
 
     awaitRung(messageId, timeoutMs) {
       return deps.coordinator.awaitRung(messageId, timeoutMs);
-    },
-
-    inbox(terminalId) {
-      const m = resolve(terminalId);
-      if (!m) return notMember();
-      const mailbox = deps.coordinator.mailbox(m.sessionId);
-      const unread = unreadPosts(mailbox);
-      const posts = unread.map(inboxViewOf);
-      // Handing it over is what spends the unread flag, which is why the
-      // coordinator's getter deliberately does not: a read that did not mark
-      // would re-offer the same mail forever.
-      if (unread.length > 0) {
-        deps.coordinator.markMailboxRead(m.sessionId, unread.map((p) => p.messageId));
-      }
-      // `dropped` rides every answer, zero included: a reader that cannot
-      // tell an empty inbox from an emptied one has been told the wrong thing,
-      // not merely told less.
-      return { posts, dropped: mailbox.dropped };
-    },
-
-    inboxPeek(terminalId) {
-      const m = resolve(terminalId);
-      if (!m) return notMember();
-      const mailbox = deps.coordinator.mailbox(m.sessionId);
-      // No `markMailboxRead`, and that omission is the whole method: the flag
-      // belongs to the agent's read above.
-      return { posts: unreadPosts(mailbox).map(inboxViewOf), dropped: mailbox.dropped };
     },
 
     thread(terminalId, threadId) {
@@ -822,7 +697,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (!m) return notMember();
       const row = threadById(deps.coordinator.threads(m.sessionId), threadId);
       if (!row) {
-        return refuse("UNKNOWN_PEER", `no thread "${threadId}" on this session; threads age out with the mailbox`);
+        return refuse("UNKNOWN_PEER", `no thread "${threadId}" on this session; threads expire after inactivity`);
       }
       return {
         threadId,
@@ -938,14 +813,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         timeoutMs: body.timeoutMs ?? BUS_REQUEST_DEFAULT_TIMEOUT_MS,
       });
       if (answer.ok) return { ok: true, result: answer.result };
-      const known = Object.hasOwn(SESSION_BUS_ERRORS, answer.code);
-      const code: SessionBusErrorCode = known ? (answer.code as SessionBusErrorCode) : "REQUEST_FAILED";
-      const refusal = refuse(code, refusalSentence(answer.code));
-      return {
-        ...refusal,
-        ...(!known && REMOTE_CODE_PATTERN.test(answer.code) ? { remoteCode: answer.code } : {}),
-        ...(answer.held ? { held: answer.held } : {}),
-      };
+      return requestRefusal(answer);
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

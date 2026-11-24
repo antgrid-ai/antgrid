@@ -258,7 +258,7 @@ function composedByBridge(): string[] {
  *  without one would have to invent an id only the bridge may mint. */
 function answerLine(labels: ProvenanceLabels): string {
   return labels.thread
-    ? `What to do: read it below. To answer, use antgrid_reply on thread "${labels.thread}".`
+    ? `What to do: read it below. To answer, use antgrid_notify on thread "${labels.thread}".`
     : "What to do: read it below. Its thread id could not be shown safely, so there is no id here to answer on.";
 }
 

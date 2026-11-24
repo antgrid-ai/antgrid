@@ -638,10 +638,6 @@ export interface BuildAgentCoreOptions {
  *  makes the Git view move while the user is looking at it. */
 const GIT_POLL_BASE_MS = 10_000;
 
-/** How long a session's arrival push waits for the rest of a burst. Wide enough
- *  that a fan-out of arrivals is one push, narrow enough that a sheet open on
- *  that mailbox still re-reads while its reader is looking at it. */
-const BUS_ARRIVED_COALESCE_MS = 100;
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -1276,7 +1272,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Declared ahead of the listener below, unlike the hoisted functions that use
   // it: a `const` in the temporal dead zone would throw on an event that arrived
   // during construction.
-  const arrivedPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // The consumer that turns THIS project's bus events into lines its own
   // agents read (defined below; hoisted, so the forward reference is safe).
@@ -1318,27 +1313,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("could not render a session-bus delivery: %s", errorName(err));
       return;
     }
-    // A notify leaves no mailbox row — it is rendered into the session instead
-    // (coordinator's `onMessage`) — so only a post changes what the sheet would
-    // show.
-    if (event.kind === "post") pushArrived(event.sessionId);
     if (!line) return;
     deliverLine(line);
-  }
-
-  /** Tell the app one session's mailbox grew. Deliberately no count: nothing
-   *  in the app announces a peer's mail, and a number on the wire that no
-   *  surface renders is a badge waiting to be re-grown. The signal alone is
-   *  what an open sheet re-reads on.
-   *
-   *  Coalesced per session: a task that lands five posts at once is one push,
-   *  not five. */
-  function pushArrived(sessionId: string): void {
-    if (arrivedPushTimers.has(sessionId)) return;
-    arrivedPushTimers.set(sessionId, setTimeout(() => {
-      arrivedPushTimers.delete(sessionId);
-      sendAb(createMessage("session-bus:arrived", { sessionId }));
-    }, BUS_ARRIVED_COALESCE_MS));
   }
 
   /** Hand a rendered line to whoever owns delivery: the turn-boundary queue when
@@ -1581,7 +1557,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "memory:result": break;
       // Bus frames travel sealed over the relay, never on a project stream, so
       // one arriving here is not applied.
-      case "session-bus:post":
       case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
@@ -1621,42 +1596,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               }),
           );
         })();
-        break;
-      }
-      case "session-bus:inbox": {
-        // `inboxPeek`, never `inbox`: this is a human looking, and the marking
-        // read belongs to the agent. See the two methods' own docs — a peek that
-        // marked would spend the agent's unread flag and the post would vanish
-        // from its inbox unseen.
-        const view = sessionBusApi.inboxPeek(msg.sessionId);
-        sendAb(
-          isRefusal(view)
-            ? createMessage("session-bus:inbox:result", { requestId: msg.requestId, error: view.error, code: view.code })
-            : createMessage("session-bus:inbox:result", {
-              requestId: msg.requestId,
-              posts: view.posts,
-              dropped: view.dropped,
-            }),
-        );
-        break;
-      }
-      case "session-bus:thread": {
-        const view = sessionBusApi.thread(msg.sessionId, msg.threadId);
-        sendAb(
-          isRefusal(view)
-            ? createMessage("session-bus:thread:result", {
-              requestId: msg.requestId,
-              threadId: msg.threadId,
-              error: view.error,
-              code: view.code,
-            })
-            : createMessage("session-bus:thread:result", {
-              requestId: msg.requestId,
-              threadId: view.threadId,
-              contextId: view.contextId,
-              entries: view.entries,
-            }),
-        );
         break;
       }
       case "agent:prompt":
@@ -5622,11 +5561,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // has already removed. Mirrors the construction guard: whoever built it
       // stops it.
       sessionBus.setListener(project.id, null);
-      // A coalescing window that outlived the core would fire into a torn-down
-      // transport, and on a host-injected coordinator it would also read a
-      // mailbox for a project nothing is serving any more.
-      for (const timer of arrivedPushTimers.values()) clearTimeout(timer);
-      arrivedPushTimers.clear();
       if (!opts.sessionBus) sessionBus.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty

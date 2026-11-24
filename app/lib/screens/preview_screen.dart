@@ -44,6 +44,7 @@ import '../widgets/auto_send_capture_dialog.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
+import '../widgets/preview_surface_gate.dart';
 import '../widgets/send_to_agent_comment.dart';
 import '../design/widgets/ab_loading.dart';
 import 'preview_context_menu_script.dart';
@@ -990,9 +991,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   Widget _buildBody(PreviewState state) {
     if (state.tabs.isNotEmpty) {
       final active = state.activeTab ?? state.tabs.first;
-      final activeIndex = state.activeTabId == null
-          ? 0
-          : state.tabs.indexWhere((t) => t.port == state.activeTabId);
       // The overlay only mounts over the tab it was armed on, and only while
       // that tab is the visible one — a background tab's marks would be
       // drawn against a page nobody can see.
@@ -1007,8 +1005,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         Stack(
           children: [
             IndexedStack(
-              index: activeIndex < 0 ? 0 : activeIndex,
-              children: [for (final tab in state.tabs) _buildTabWebView(tab)],
+              index: state.tabs.indexOf(active),
+              children: [
+                for (final tab in state.tabs)
+                  PreviewSurfaceGate(
+                    isActiveTab: identical(tab, active),
+                    child: _buildTabWebView(tab),
+                  ),
+              ],
             ),
             // Fills exactly the webview's own box, which is what lets a
             // mark's position map onto the captured viewport with nothing

@@ -10,6 +10,7 @@ import 'auth.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'now_ticker.dart';
+import 'agent_setup.dart';
 import 'projects.dart';
 import 'recent_sessions.dart';
 
@@ -27,7 +28,7 @@ abstract final class FirstRunStepIds {
   static const openProject = 'openProject';
   static const startSession = 'startSession';
   static const connectPhone = 'connectPhone';
-  static const armHandler = 'armHandler';
+  static const detectAgent = 'detectAgent';
   // Mobile.
   static const machineLinked = 'machineLinked';
   static const remoteOn = 'remoteOn';
@@ -163,7 +164,7 @@ final otherAccountMobileDevicesProvider =
       }
     });
 
-/// Desktop setup steps. autoDispose so the device poll behind step 4 tears
+/// Desktop setup steps. autoDispose so the device poll tears
 /// down for good once the checklist is completed or dismissed.
 final desktopFirstRunStepsProvider = Provider.autoDispose<List<FirstRunStep>>((
   ref,
@@ -178,16 +179,29 @@ final desktopFirstRunStepsProvider = Provider.autoDispose<List<FirstRunStep>>((
   // Short-circuit BEFORE the watch, not inside done(): the latch can never
   // un-check, so subscribing past it would keep the account-device poll
   // running for the rest of the session (the sidebar section stays mounted
-  // while step 5 is open) to re-answer a question with no remaining effect.
+  // while another step is open) to re-answer a question with no remaining effect.
   final hasPhone =
       latched.contains(FirstRunStepIds.connectPhone) ||
       (ref.watch(otherAccountMobileDevicesProvider).value ?? const [])
           .isNotEmpty;
+  final tools = latched.contains(FirstRunStepIds.detectAgent)
+      ? null
+      : ref.watch(agentSetupToolsProvider);
+  final hasAgent =
+      tools != null &&
+      !tools.isLoading &&
+      !tools.hasError &&
+      (tools.value?.isNotEmpty ?? false);
   return [
     (
       id: FirstRunStepIds.signIn,
       label: 'Sign in',
       done: done(FirstRunStepIds.signIn, signedIn),
+    ),
+    (
+      id: FirstRunStepIds.detectAgent,
+      label: 'Detect a supported coding agent',
+      done: done(FirstRunStepIds.detectAgent, hasAgent),
     ),
     (
       id: FirstRunStepIds.openProject,
@@ -203,19 +217,6 @@ final desktopFirstRunStepsProvider = Provider.autoDispose<List<FirstRunStep>>((
       id: FirstRunStepIds.connectPhone,
       label: 'Connect your phone',
       done: done(FirstRunStepIds.connectPhone, hasPhone),
-    ),
-    // Desktop-only step: the mobile checklist's contract is "fill the
-    // Recent canvas's empty slot until the steps that make the rest of the
-    // UI exist are done" — arming happens inside an open session, after
-    // that canvas is gone. The flag is still global, so an arm performed on
-    // mobile checks this step too.
-    (
-      id: FirstRunStepIds.armHandler,
-      label: 'Arm Handler on a session',
-      done: done(
-        FirstRunStepIds.armHandler,
-        ref.watch(firstRunProvider.select((s) => s.handlerArmedOnce)),
-      ),
     ),
   ];
 });

@@ -4,6 +4,7 @@
 *.pyc
 *.swp
 .tmp/
+/artifacts/
 # antgrid-site sparse checkout read by web's lockstep tests in CI
 .antgrid-site/
 

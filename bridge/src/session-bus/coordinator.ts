@@ -44,8 +44,8 @@ import {
   pairKey,
   type PairBudgetState,
 } from "./pair-budget";
-import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
-import { refuse, type SessionBusRefusal } from "./errors";
+import { checkEnvelopeSize, stampEnvelope } from "./envelope";
+import { isRefusal, refuse, type SessionBusRefusal } from "./errors";
 import type { BusHeldReason, BusSendResult, TransportOutcome } from "./relay-transport";
 import {
   emptyHeld,
@@ -69,15 +69,6 @@ import {
   saveMessageLog,
   type MessageLogState,
 } from "./message-log";
-import {
-  appendPost,
-  emptyMailbox,
-  expireOldPosts,
-  loadMailbox,
-  markRead,
-  saveMailbox,
-  type MailboxState,
-} from "./mailbox";
 import {
   emptyThreads,
   expireThreads,
@@ -125,10 +116,8 @@ export type SessionBusSend = (
  *  it into a line an agent reads. Emitted AFTER the store is written, so a
  *  consumer that throws cannot cost the fold. */
 export type SessionBusEvent = {
-  /** The verb the sender chose, carried through unchanged: a post is read when
-   *  the target chooses and a notify interrupts, and only the sender knows
-   *  which it meant. */
-  kind: "post" | "notify";
+
+  kind: "notify";
   sessionId: string;
   threadId: string | null;
   /** Whether this arrival is the first one on its thread at THIS receiver, which
@@ -219,13 +208,7 @@ interface SessionState {
    *  held for a local target whose project is not loaded. Offered again until
    *  settled; the receiver's dedup is what makes that safe. */
   held: HeldState;
-  /** Posts parked for this session to read when it chooses. Loaded with
-   *  the log rather than lazily like artifacts: an inbound post writes it, and a
-   *  session that has one waiting is exactly the session a restart must find. */
-  mailbox: MailboxState;
-  /** Which exchange each thread this session is part of rides on — the only
-   *  thing that can tell a reply where to go, for a thread a peer opened over a
-   *  notify that left no mail. */
+  /** The peer and context needed to address replies on each thread. */
   threads: ThreadState;
   /** Read on the first fetch this session answers: most sessions publish nothing
    *  and never pay for the file. */
@@ -241,11 +224,8 @@ interface SessionState {
 
 export interface MessageInput {
   sessionId: string;
-  /** Which verb the caller chose. A post is parked in the target's
-   *  mailbox and interrupts nothing; a notify becomes a line at the target's
-   *  next turn boundary. Everything after the send decision is identical, which
-   *  is why the two travel as one shape. */
-  verb: "post" | "notify";
+
+  verb: "notify";
   /** The thread this turn belongs to, or null to open a new one. The coordinator
    *  MINTS an id when this is null and returns it, because an agent that was
    *  never told the id cannot reply on the thread. Correlation only — a
@@ -275,8 +255,7 @@ export interface MessageResult {
   heldReason?: BusHeldReason;
   /** Why it was refused, when `rung` is `refused`. */
   refusedCode?: string;
-  /** The target is a session on this machine, so `delivered` is its own
-   *  mailbox taking it rather than another machine's store. */
+
   local?: true;
   /** The target's labels as the caller addressed it, when it carried them. */
   machineLabel?: string;
@@ -454,38 +433,11 @@ export class SessionBusCoordinator {
     return this.stateFor(sessionId).log;
   }
 
-  /**
-   * Both getters age their store on the way out, not only their loader.
-   *
-   * `stateFor` loads once and caches for the life of the process, so a
-   * coordinator that never restarts would otherwise hand back mail and threads
-   * the TTL retired days ago — which makes "threads age out, so open a new one"
-   * a sentence that is only true across a restart, and leaves every argument
-   * bounded by `MAILBOX_TTL_MS` with no bound at all on a long-lived bridge.
-   * A thread row is one half of a send-path security bound, so this expiry is
-   * what makes that bound real rather than nominal.
-   */
-  mailbox(sessionId: string): MailboxState {
-    const s = this.stateFor(sessionId);
-    const mailbox = expireOldPosts(s.mailbox, this.now());
-    if (mailbox !== s.mailbox) this.commit(sessionId, { mailbox });
-    return mailbox;
-  }
-
   threads(sessionId: string): ThreadState {
     const s = this.stateFor(sessionId);
     const threads = expireThreads(s.threads, this.now());
     if (threads !== s.threads) this.commit(sessionId, { threads });
     return threads;
-  }
-
-  /** Mark what a reader was just handed. Separate from {@link mailbox} because
-   *  reading is what spends the unread flag, and a getter that marked would make
-   *  every incidental peek destroy the inbox. */
-  markMailboxRead(sessionId: string, messageIds: readonly string[]): void {
-    const s = this.stateFor(sessionId);
-    const mailbox = markRead(s.mailbox, messageIds);
-    if (mailbox !== s.mailbox) this.commit(sessionId, { mailbox });
   }
 
   /**
@@ -522,7 +474,7 @@ export class SessionBusCoordinator {
    * Logged before it is dispatched, so a receipt that comes back inside this
    * very call finds an entry to stamp.
    */
-  message(input: MessageInput): MessageResult | SessionBusRefusal {
+  private prepareMessage(input: MessageInput, preview = false) {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
     const to = keyOf(input.to);
@@ -541,7 +493,6 @@ export class SessionBusCoordinator {
     if (!namesMachine(to.machineId, self.key.machineId) && this.deps.addressable?.() === false) {
       return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it can only reach sessions on itself");
     }
-    const s = this.stateFor(input.sessionId);
 
     const now = this.now();
     // Both pair-budget ceilings, read BEFORE anything is stamped or logged: a
@@ -555,18 +506,32 @@ export class SessionBusCoordinator {
     // is bridge-owned except when replying, so an agent that is not told it
     // has no way to answer on the thread it just opened.
     const opensThread = input.threadId === null;
-    const threadId = input.threadId ?? this.newId();
-    const envelope = this.stamp(self, {
+    const threadId = input.threadId ?? (preview ? "00000000-0000-0000-0000-000000000000" : this.newId());
+    const envelope = stampEnvelope({
       threadId,
       contextId,
       parts: input.parts,
       summary: input.summary,
       ...(input.unexpected === undefined ? {} : { unexpected: input.unexpected }),
-    });
+    }, { messageId: preview ? "00000000-0000-0000-0000-000000000000" : this.newId(), peer: self.ref, now });
     const tooLarge = checkEnvelopeSize(envelope);
     if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
 
-    const frame = createMessage(input.verb === "notify" ? "session-bus:notify" : "session-bus:post", {
+    return { self, to, now, budget, contextId, opensThread, threadId, envelope };
+  }
+
+  /** Preflight before waking a stopped target; it records and charges nothing. */
+  messageRefusal(input: MessageInput): SessionBusRefusal | null {
+    const prepared = this.prepareMessage(input, true);
+    return isRefusal(prepared) ? prepared : null;
+  }
+
+  message(input: MessageInput): MessageResult | SessionBusRefusal {
+    const prepared = this.prepareMessage(input);
+    if (isRefusal(prepared)) return prepared;
+    const { self, to, now, budget, contextId, opensThread, threadId, envelope } = prepared;
+    const s = this.stateFor(input.sessionId);
+    const frame = createMessage("session-bus:notify", {
       from: self.key,
       to,
       contextId,
@@ -670,7 +635,7 @@ export class SessionBusCoordinator {
    * is `NOT_MEMBER` or `AGENT_NOT_READY` belongs to the caller's ladder, and
    * this method speaks only about the pair.
    */
-  pairRefusal(sessionId: string, to: SessionMemberKey, verb: "post" | "notify"): SessionBusRefusal | null {
+  pairRefusal(sessionId: string, to: SessionMemberKey, verb: "notify"): SessionBusRefusal | null {
     const self = this.deps.self(sessionId);
     if (!self) return null;
     return refusalForPair(this.pairBudgetFor(sessionId, self, to), verb, this.now());
@@ -697,7 +662,7 @@ export class SessionBusCoordinator {
   private spendBudget(
     sessionId: string,
     budget: PairBudgetState,
-    verb: "post" | "notify",
+    verb: "notify",
     progressed: boolean,
     now: number,
   ): void {
@@ -823,7 +788,6 @@ export class SessionBusCoordinator {
    */
   handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
-      case "session-bus:post":
       case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
@@ -850,13 +814,12 @@ export class SessionBusCoordinator {
     );
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
-      case "session-bus:post":
       case "session-bus:notify":
         this.onMessage(
           sessionId,
           self,
           msg.from,
-          msg.type === "session-bus:notify" ? "notify" : "post",
+          "notify",
           msg.threadId,
           msg.contextId,
           msg.envelope,
@@ -993,13 +956,12 @@ export class SessionBusCoordinator {
         // it being forgotten must not crash the coordinator over one message.
         // Kept in memory only — see the field's own doc on SessionState.
         log.warn("session-bus: no owning project for session %s — state kept in memory only, not persisted", sessionId);
-        s = { log: emptyLog(), held: emptyHeld(), mailbox: emptyMailbox(), threads: emptyThreads(), artifacts: null, projectId: null };
+        s = { log: emptyLog(), held: emptyHeld(), threads: emptyThreads(), artifacts: null, projectId: null };
       } else {
         const now = this.now();
         s = {
           log: loadMessageLog(this.deps.abDir, projectId, sessionId),
           held: loadHeld(this.deps.abDir, projectId, sessionId),
-          mailbox: loadMailbox(this.deps.abDir, projectId, sessionId, now),
           threads: loadThreads(this.deps.abDir, projectId, sessionId, now),
           artifacts: null,
           projectId,
@@ -1102,7 +1064,6 @@ export class SessionBusCoordinator {
     if (next.projectId !== null) {
       if (next.log !== s.log) saveMessageLog(this.deps.abDir, next.projectId, sessionId, next.log);
       if (next.held !== s.held) saveHeld(this.deps.abDir, next.projectId, sessionId, next.held);
-      if (next.mailbox !== s.mailbox) saveMailbox(this.deps.abDir, next.projectId, sessionId, next.mailbox);
       if (next.threads !== s.threads) saveThreads(this.deps.abDir, next.projectId, sessionId, next.threads);
     }
     this.ensureTimer();
@@ -1131,10 +1092,6 @@ export class SessionBusCoordinator {
       return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it has no bus address");
     }
     return notMember();
-  }
-
-  private stamp(self: SessionBusSelf, draft: EnvelopeDraft): BusEnvelope {
-    return stampEnvelope(draft, { messageId: this.newId(), peer: self.ref, now: this.now() });
   }
 
   /**
@@ -1218,7 +1175,7 @@ export class SessionBusCoordinator {
     sessionId: string,
     self: SessionBusSelf,
     from: SessionMemberKey,
-    verb: "post" | "notify",
+    verb: "notify",
     threadId: string | null,
     contextId: string,
     envelope: BusEnvelope,
@@ -1232,32 +1189,6 @@ export class SessionBusCoordinator {
     const opensThread = threadId === null || threadById(s.threads, threadId) === null;
     this.commit(sessionId, {
       log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
-      // A post is parked for the target to read when it chooses; a notify
-      // is rendered into its session instead, and a mailbox row for one would
-      // re-offer a message the agent has already been handed.
-      ...(verb === "post"
-        ? {
-            mailbox: appendPost(
-              s.mailbox,
-              {
-                kind: "post",
-                messageId: envelope.messageId,
-                threadId,
-                contextId,
-                at: now,
-                from,
-                summary: envelope.metadata.summary,
-                envelope,
-                read: false,
-              },
-              now,
-            ),
-          }
-        : {}),
-      // BOTH verbs, because a notify leaves no mailbox row and this is then the
-      // only record of the context a reply on that thread has to go back out on.
-      // Without it the reply falls back to this session's own id and answers on
-      // a context the peer never opened.
       ...(threadId === null
         ? {}
         : { threads: upsertThread(s.threads, { threadId, contextId, peer: from, lastAt: now, openedByPeer: true }) }),
@@ -1383,7 +1314,7 @@ function notMember(): SessionBusRefusal {
  */
 function refusalForPair(
   budget: PairBudgetState | null,
-  verb: "post" | "notify",
+  verb: "notify",
   now: number,
 ): SessionBusRefusal | null {
   if (!budget) return null;

@@ -257,7 +257,7 @@ async function bootReachable(remote: () => boolean = () => true): Promise<{
 }
 
 function inbound(sessionId: string, contextId: string, text: string, verb: "post" | "notify" = "post") {
-  return createMessage(verb === "notify" ? "session-bus:notify" : "session-bus:post", {
+  return createMessage(verb === "notify" ? "session-bus:notify" : "session-bus:notify", {
     from: REMOTE,
     to: { machineId: "m1", projectId: "label-only", sessionId },
     contextId,

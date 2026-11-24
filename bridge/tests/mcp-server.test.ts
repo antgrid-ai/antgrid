@@ -16,7 +16,7 @@ import {
   isSessionBusTool,
   scheduleBody,
 } from "../src/mcp/server";
-import { ReplyBodySchema, SendBodySchema } from "../src/session-bus/api";
+import { SendBodySchema } from "../src/session-bus/api";
 import { BUS_HELD_REASON_TEXT, refusalSentence } from "../src/session-bus/errors";
 
 const saved = {
@@ -129,10 +129,7 @@ describe("the session-bus tools", () => {
     expect(isSessionBusTool("antgrid_get_artifact")).toBe(true);
     expect(isSessionBusTool("antgrid_list_sessions")).toBe(true);
     expect(isSessionBusTool("antgrid_whoami")).toBe(true);
-    expect(isSessionBusTool("antgrid_post")).toBe(true);
     expect(isSessionBusTool("antgrid_notify")).toBe(true);
-    expect(isSessionBusTool("antgrid_reply")).toBe(true);
-    expect(isSessionBusTool("antgrid_inbox")).toBe(true);
     expect(isSessionBusTool("antgrid_thread")).toBe(true);
     expect(isSessionBusTool("antgrid_request")).toBe(true);
   });
@@ -249,7 +246,7 @@ describe("the session-bus tools", () => {
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const line = result.content[0]!.text.split("\n").find((l) => l.startsWith("- ["));
     expect(line).toBeDefined();
-    const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_post")!.inputSchema.properties.to as any;
+    const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_notify")!.inputSchema.properties.to as any;
     for (const key of to.required as string[]) {
       expect(line).toContain(String(row[key as keyof typeof row]));
     }
@@ -403,9 +400,7 @@ describe("the session-bus tools", () => {
       keysOf(schema).filter((k) => !shapeOf(schema)[k]!.safeParse(undefined).success);
 
     const pairs = [
-      ["antgrid_post", SendBodySchema],
       ["antgrid_notify", SendBodySchema],
-      ["antgrid_reply", ReplyBodySchema],
     ] as const;
 
     for (const [name, schema] of pairs) {
@@ -424,7 +419,7 @@ describe("the session-bus tools", () => {
     // The nested object is the easier half to get wrong, because nothing beside it
     // names the fields it has to match.
     test("the address a send carries is spelled the way the target schema spells it", () => {
-      const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_post")!.inputSchema.properties.to as any;
+      const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_notify")!.inputSchema.properties.to as any;
       expect(Object.keys(to.properties)).toEqual(keysOf(shapeOf(SendBodySchema).to));
       expect(to.required).toEqual(requiredOf(shapeOf(SendBodySchema).to));
     });
@@ -443,11 +438,11 @@ describe("the session-bus tools", () => {
 
     const view = (extra: Record<string, unknown>) =>
       Response.json({ ok: true, messageId: "m-1", threadId: "th-9", sent: true, held: false, opensThread: true, ...extra });
-    const tail = "Use antgrid_reply with that thread id to answer.";
+    const tail = "Use antgrid_notify with that thread id to answer.";
 
     test("a delivered cross-machine send says the other bridge stored it and nothing more", async () => {
       stub(() => view({ rung: "delivered", machineLabel: "laptop", sessionName: "codec" }));
-      const result = await callSessionBusTool("antgrid_post", {
+      const result = await callSessionBusTool("antgrid_notify", {
         to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" },
         summary: "the codec diff broke",
       });
@@ -458,13 +453,13 @@ describe("the session-bus tools", () => {
 
     test("a same-machine delivery is a mailbox row", async () => {
       stub(() => view({ rung: "delivered", local: true, sessionName: "codec" }));
-      const text = (await callSessionBusTool("antgrid_post", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
-      expect(text).toContain("codec has it in its mailbox.");
+      const text = (await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      expect(text).toContain("codec has it queued for automatic delivery.");
     });
 
     test("a relayed send says only that the relay has it", async () => {
       stub(() => view({ rung: "relayed", machineLabel: "laptop" }));
-      const text = (await callSessionBusTool("antgrid_post", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      const text = (await callSessionBusTool("antgrid_notify", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
       expect(text).toContain("The relay has it. It reaches laptop when that machine's bridge is online; nothing has read it yet.");
     });
 
@@ -478,7 +473,7 @@ describe("the session-bus tools", () => {
 
     test("a refused send names its code, says why, and delivered nothing", async () => {
       stub(() => view({ rung: "refused", refusedCode: "REMOTE_ACCESS_OFF" }));
-      const text = (await callSessionBusTool("antgrid_post", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
+      const text = (await callSessionBusTool("antgrid_notify", { to: { machineId: "peer", projectId: "p2", sessionId: "9c11de" }, summary: "s" })).content[0]!.text;
       expect(text).toContain(`Refused (REMOTE_ACCESS_OFF): ${refusalSentence("REMOTE_ACCESS_OFF")}. Nothing was delivered.`);
     });
 
@@ -486,10 +481,10 @@ describe("the session-bus tools", () => {
       const paths: string[] = [];
       sendStub((path) => paths.push(path));
       const to = { projectId: "p2", sessionId: "9c11de" };
-      await callSessionBusTool("antgrid_post", { to, summary: "s", text: "t" });
       await callSessionBusTool("antgrid_notify", { to, summary: "s", text: "t" });
-      await callSessionBusTool("antgrid_reply", { threadId: "th-1", summary: "s", text: "t" });
-      expect(paths).toEqual(["/session-bus/post", "/session-bus/notify", "/session-bus/reply"]);
+      await callSessionBusTool("antgrid_notify", { to, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { threadId: "th-1", summary: "s", text: "t" });
+      expect(paths).toEqual(["/session-bus/notify", "/session-bus/notify", "/session-bus/notify"]);
     });
 
     // The address is strict too, so one key inside it that the route does not name
@@ -497,7 +492,7 @@ describe("the session-bus tools", () => {
     test("the address is rebuilt from the fields the route names, not forwarded whole", async () => {
       let received: any = null;
       sendStub((path, body) => { received = body; });
-      await callSessionBusTool("antgrid_post", {
+      await callSessionBusTool("antgrid_notify", {
         to: { machineId: "peer", projectId: "p2", sessionId: "9c11de", machineLabel: "macbook-pro" },
         summary: "s",
         text: "t",
@@ -516,8 +511,8 @@ describe("the session-bus tools", () => {
     test("a null machine survives, and an absent one is simply not sent", async () => {
       const bodies: any[] = [];
       sendStub((path, body) => { bodies.push(body); });
-      await callSessionBusTool("antgrid_post", { to: { machineId: null, projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
-      await callSessionBusTool("antgrid_post", { to: { projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { to: { machineId: null, projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
+      await callSessionBusTool("antgrid_notify", { to: { projectId: "p1", sessionId: "s1" }, summary: "s", text: "t" });
       expect(bodies[0].to).toEqual({ machineId: null, projectId: "p1", sessionId: "s1" });
       expect(bodies[1].to).toEqual({ projectId: "p1", sessionId: "s1" });
     });
@@ -528,18 +523,18 @@ describe("the session-bus tools", () => {
     test("a reply names a thread and nothing else", async () => {
       let received: any = null;
       sendStub((path, body) => { received = body; });
-      await callSessionBusTool("antgrid_reply", { threadId: "th-1", summary: "answered", text: "the codec" });
+      await callSessionBusTool("antgrid_notify", { threadId: "th-1", summary: "answered", text: "the codec" });
       expect(received).toEqual({ threadId: "th-1", summary: "answered", text: "the codec" });
     });
 
     test("a send refusal reaches the caller with the code the bridge chose", async () => {
       stub(() => Response.json(
-        { error: "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_post lands in its mailbox instead", code: "NOT_RUNNING" },
+        { error: "that session is not running, so it will not reach the turn boundary a notify waits for; antgrid_notify lands in its mailbox instead", code: "NOT_RUNNING" },
         { status: 409 },
       ));
       const result = await callSessionBusTool("antgrid_notify", { to: { projectId: "p2", sessionId: "9c11de" }, summary: "s", text: "t" });
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).toContain("antgrid_post lands in its mailbox instead (NOT_RUNNING)");
+      expect(result.content[0]!.text).toContain("antgrid_notify lands in its mailbox instead (NOT_RUNNING)");
     });
   });
 
@@ -586,45 +581,6 @@ describe("the session-bus tools", () => {
   });
 
   describe("the mailbox and thread reads", () => {
-    test("a post is rendered with the address that answers it and the body under it", async () => {
-      stub(() => Response.json({
-        posts: [{
-          messageId: "m-1",
-          threadId: "th-1",
-          contextId: "c-1",
-          at: Date.now(),
-          from: { machineId: "peer", projectId: "p2", sessionId: "9c11de" },
-          summary: "the codec diff broke",
-          text: ["look at frame.ts"],
-          unexpected: "your lockfile is stale",
-          artifacts: [{ artifactId: "a-1", name: "diff.txt", mediaType: "text/plain", bytes: 120, sha256: "ab", summary: "the diff" }],
-        }],
-        dropped: 0,
-      }));
-      const text = (await callSessionBusTool("antgrid_inbox", {})).content[0]!.text;
-      expect(text).toContain("Unread posts (1). Reading them here marks them read:");
-      expect(text).toContain('- [peer/p2/9c11de] thread th-1 — the codec diff broke');
-      expect(text).toContain("  look at frame.ts");
-      expect(text).toContain("  Not asked about: your lockfile is stale");
-      expect(text).toContain("  - a-1 diff.txt (text/plain, 120 bytes): the diff");
-    });
-
-    // A bounded mailbox drops its oldest, and a drop the reader is never told
-    // about is a message that, as far as this session can tell, was never sent. It
-    // rides the header even when there is nothing left to read.
-    test("a dropped post is reported, including when the inbox is otherwise empty", async () => {
-      stub(() => Response.json({ posts: [], dropped: 1 }));
-      const text = (await callSessionBusTool("antgrid_inbox", {})).content[0]!.text;
-      expect(text).toBe(
-        "No unread posts; 1 post has been dropped unread from this mailbox since it was created.",
-      );
-    });
-
-    test("an empty mailbox that lost nothing says exactly that", async () => {
-      stub(() => Response.json({ posts: [], dropped: 0 }));
-      expect((await callSessionBusTool("antgrid_inbox", {})).content[0]!.text).toBe("No unread posts.");
-    });
-
     // The delivery stamp is the sender's whole knowledge of an outbound message:
     // each rung says what witnessed it, and none claims the peer's agent read it.
     test("a thread reads in both directions, with how far each sent message got", async () => {
@@ -706,7 +662,7 @@ describe("the server instructions", () => {
   });
 
   test("still carry the bus rules", () => {
-    for (const needle of ["antgrid_inbox", "antgrid_post", "antgrid_notify", "antgrid_reply", "not authority", "bridge stored it", "remote access is off"]) {
+    for (const needle of ["antgrid_notify", "antgrid_thread", "not authority", "bridge stored it", "remote access is off"]) {
       expect(SERVER_INSTRUCTIONS).toContain(needle);
     }
   });
@@ -716,11 +672,11 @@ describe("the server instructions", () => {
   // and that a refused cross-machine send must not be routed around.
   test("keep every rule the trim to the budget could lose", () => {
     for (const needle of [
-      "again before you report or hand off",
+      "Messages arrive automatically",
       "row titles suffice to judge",
       "never assemble one",
-      "not how to get an answer",
-      "idle or stopped session may never read it",
+      "threadId to reply",
+      "stopped peers can be started automatically",
       "returns a handle to name in a message",
       "never retry or route around it",
     ]) {
@@ -763,7 +719,7 @@ describe("the scheduler tools", () => {
       "antgrid_update_schedule", "antgrid_delete_schedule", "antgrid_run_schedule_now",
     ]);
     for (const tool of SCHEDULER_TOOLS) expect(isSchedulerTool(tool.name)).toBe(true);
-    expect(isSchedulerTool("antgrid_post")).toBe(false);
+    expect(isSchedulerTool("antgrid_notify")).toBe(false);
     expect(isSchedulerTool("antgrid_run_command")).toBe(false);
   });
 
@@ -963,4 +919,13 @@ describe("the scheduler tools", () => {
     expect((await callSchedulerTool("antgrid_run_schedule_now", { id: "sch-1" }, NOW)).content[0]!.text)
       .toContain("Skipped");
   });
+});
+
+test("removed messaging tools are neither advertised nor dispatched", async () => {
+  for (const name of ["antgrid_post", "antgrid_reply", "antgrid_inbox"]) {
+    expect(isSessionBusTool(name)).toBe(false);
+    expect(SERVER_INSTRUCTIONS).not.toContain(name);
+    expect(JSON.stringify(SESSION_BUS_TOOLS)).not.toContain(name);
+    expect((await callSessionBusTool(name, {})).isError).toBe(true);
+  }
 });

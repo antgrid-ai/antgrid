@@ -526,7 +526,7 @@ test(
     const sessionBus = (host as unknown as { sessionBus: SessionBusCoordinator }).sessionBus;
     const res = sessionBus.message({
       sessionId,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" },
       summary: "hi",
@@ -612,7 +612,7 @@ function busCoordinatorOf(host: HostServer): SessionBusCoordinator {
 }
 
 test(
-  "a local post reaches the target's mailbox with the desktop disconnected and remote access off",
+  "a local notify reaches the target's history with the desktop disconnected and remote access off",
   async () => {
     host = createHostPolicyFixture({}); // no remote config at all: no relay, no control plane
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
@@ -622,7 +622,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi from a",
@@ -635,10 +635,10 @@ test(
     expect(res.sent).toBe(true);
     expect(res.held).toBe(false);
 
-    const mailbox = sessionBus.mailbox(sessionB);
-    expect(mailbox.posts).toHaveLength(1);
-    expect(mailbox.posts[0]!.from.sessionId).toBe(sessionA);
-    expect(mailbox.posts[0]!.summary).toBe("hi from a");
+    const entries = sessionBus.messages(sessionB).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.peer.sessionId).toBe(sessionA);
+    expect(entries[0]!.envelope.metadata.summary).toBe("hi from a");
   },
   20_000,
 );
@@ -662,21 +662,14 @@ test(
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     expect(res.sent).toBe(true);
 
-    // A notify never parks in the mailbox — that is a post's own path
-    // (deliver-event.ts's `lineForEvent`: "a post owes none").
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(1);
 
     const cores = (host as unknown as {
       cores: Map<string, { core: { deliveries: { lines: readonly { sessionId: string; kind: string }[] } } }>;
     }).cores;
     const queued = cores.get(projectIdB)!.core.deliveries.lines;
-    // session-b was created but never started (no PTY), so `injectBusLine`
-    // finds nothing running to submit into and the rendered line stays
-    // queued rather than being delivered and removed. That a notify to a
-    // stopped session is REFUSED (§7.3) is the verb layer's own decision and
-    // is taken above this one — what the transport owes here is a rendered
-    // line parked where the session will read it when it next reaches a turn
-    // boundary, which is also what a session stopped after the send gets.
+    // Calling the coordinator directly bypasses API wake: without a PTY,
+    // the persistent queue must retain the line until the session starts.
     expect(queued).toHaveLength(1);
     expect(queued[0]!.sessionId).toBe(sessionB);
     expect(queued[0]!.kind).toBe("notify");
@@ -685,7 +678,7 @@ test(
 );
 
 test(
-  "a local post is stamped delivered on the spot, with no acknowledgement frame",
+  "a local notify is stamped delivered on the spot, with no acknowledgement frame",
   async () => {
     host = createHostPolicyFixture({});
     const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
@@ -694,7 +687,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi",
@@ -703,8 +696,6 @@ test(
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     expect(res.sent).toBe(true);
     expect(res.rung).toBe("delivered");
-    // What lets the agent be told "its mailbox has it" rather than that another
-    // machine stored it.
     expect(res.local).toBe(true);
     expect(res.retryUntil).toBeUndefined();
 
@@ -714,7 +705,7 @@ test(
     const entries = sessionBus.messages(sessionA).entries;
     expect(entries).toHaveLength(1);
     expect(entries[0]!.deliveredAt).toBeDefined();
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(1);
   },
   20_000,
 );
@@ -730,7 +721,7 @@ test(
     // session-b genuinely exists on this host under its real project id, so if
     // `dispatch` placed a frame by its target's SESSION rather than by the
     // machine named on it, deliverLocal would fold this straight into a
-    // mailbox the sender never addressed.
+    // session the sender never addressed.
     //
     // What must happen instead is a refusal, not a hold: the sentinel this
     // host names itself by buys the local path an address, not a network, and
@@ -738,7 +729,7 @@ test(
     // stamped `from: local` — an address no reply can be routed back to.
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: "some-other-machine", projectId: projectIdB, sessionId: sessionB },
       summary: "should not land locally",
@@ -746,7 +737,7 @@ test(
     });
     expect("ok" in res && res.ok).toBe(false);
     expect((res as { code?: string }).code).toBe("AGENT_NOT_READY");
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(0);
     // Refused before anything was stamped: no log entry, so nothing is held
     // and nothing will be retried.
     expect(sessionBus.messages(sessionA).entries).toHaveLength(0);
@@ -765,7 +756,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: "some-other-machine", projectId: projectIdB, sessionId: sessionB },
       summary: "should not land locally",
@@ -778,7 +769,7 @@ test(
     expect(res.held).toBe(true);
     expect(res.rung).toBe("held");
     expect(res.heldReason).toBe("remote-access-off");
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(0);
   },
   20_000,
 );
@@ -793,7 +784,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const first = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "before",
@@ -802,14 +793,14 @@ test(
     if (!("ok" in first) || !first.ok) throw new Error(`message refused: ${JSON.stringify(first)}`);
     // The sentinel is now on a DURABLE row: this is the address session-b's
     // reply reads back, and the machine is about to rename itself.
-    const stored = sessionBus.mailbox(sessionB).posts[0]!.from;
+    const stored = sessionBus.messages(sessionB).entries[0]!.peer;
     expect(stored.machineId).toBe(LOCAL_MACHINE_ID);
 
     withRegistration(host, "machine-registered");
 
     const back = sessionBus.message({
       sessionId: sessionB,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: stored,
       summary: "after",
@@ -817,7 +808,7 @@ test(
     });
     if (!("ok" in back) || !back.ok) throw new Error(`reply refused: ${JSON.stringify(back)}`);
     expect(back.sent).toBe(true);
-    expect(sessionBus.mailbox(sessionA).posts).toHaveLength(1);
+    expect(sessionBus.messages(sessionA).entries.filter((entry) => entry.direction === "in")).toHaveLength(1);
   },
   20_000,
 );
@@ -841,7 +832,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi",
@@ -864,7 +855,7 @@ test(
     // green.
     await host.open(projectIdB, folderB, "local");
     sessionBus.retryNow();
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(1);
     expect(loadHeld(abDir!, projectIdA, sessionA).held).toHaveLength(0);
   },
   20_000,
@@ -882,7 +873,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi",
@@ -901,8 +892,8 @@ test(
       "project B warmed by the held delivery",
     );
     await waitFor(
-      () => sessionBus.mailbox(sessionB).posts.length === 1,
-      "the held post delivered once project B was warm",
+      () => sessionBus.messages(sessionB).entries.length === 1,
+      "the held notification delivered once project B was warm",
     );
   },
   20_000,
@@ -925,7 +916,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi",
@@ -937,7 +928,7 @@ test(
     // Several retry ticks, so this is "never opened", not "not opened yet".
     await new Promise((r) => setTimeout(r, OUTBOX_TICK_MS * 3));
     expect(host.list().some((p) => p.projectId === projectIdB)).toBe(false);
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(0);
   },
   20_000,
 );
@@ -961,7 +952,7 @@ test(
     const sessionBus = busCoordinatorOf(host);
     const res = sessionBus.message({
       sessionId: sessionA,
-      verb: "post",
+      verb: "notify",
       threadId: null,
       to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
       summary: "hi",
@@ -969,7 +960,7 @@ test(
     });
     if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
     expect(res.sent).toBe(true);
-    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+    expect(sessionBus.messages(sessionB).entries).toHaveLength(1);
   },
   20_000,
 );
@@ -1084,7 +1075,7 @@ test("a bus request for a method outside the allowlist is refused and answered w
   for (const method of ["git.checkout", "sessions.delete", "scheduler.run", "scheduler.list", "state.snapshot", "machine.capability-card.x"]) {
     expect(await inbound(busRequest(method))).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
   }
-  const notARequest: VerifiedInbound = { ...busRequest("machine.capability-card"), body: { type: "session-bus:post" } };
+  const notARequest: VerifiedInbound = { ...busRequest("machine.capability-card"), body: { type: "session-bus:notify" } };
   expect(await inbound(notARequest)).toEqual({ outcome: "refused", code: "METHOD_NOT_ALLOWED" });
   expect(frames).toEqual([]);
   expect(cardCalls()).toBe(0);

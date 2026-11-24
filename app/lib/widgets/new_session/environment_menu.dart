@@ -57,7 +57,9 @@ class EnvironmentChip extends ConsumerWidget {
 /// MACHINES section with one row per remote machine. Live (ConsumerWidget) so
 /// an inventory refresh updates rows while open.
 class EnvironmentPanel extends ConsumerWidget {
-  const EnvironmentPanel({super.key});
+  const EnvironmentPanel({super.key, this.onSelected});
+
+  final void Function(PickerSource)? onSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -69,7 +71,8 @@ class EnvironmentPanel extends ConsumerWidget {
         .toList();
 
     void select(PickerSource s) {
-      ref.read(selectedSourceIdProvider.notifier).set(s.id);
+      selectNewSessionSource(ref.container, s);
+      onSelected?.call(s);
       Navigator.of(context).pop();
     }
 

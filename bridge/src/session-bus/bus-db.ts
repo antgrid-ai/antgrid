@@ -35,7 +35,7 @@ const log = logger.child({ component: "session-bus" });
  *  a schema check that quietly reads rows written under a shape this code no
  *  longer holds. Losing bus state costs the outbox and the log, which is what a
  *  pre-release schema change is allowed to cost. */
-export const BUS_DB_VERSION = 3;
+export const BUS_DB_VERSION = 4;
 
 /** See `prepare`: this is an event-loop stall, not a background wait. */
 const BUSY_TIMEOUT_MS = 250;
@@ -54,24 +54,8 @@ const TABLES = [
   "bus_pair_budget",
 ] as const;
 
-// Columns for what is QUERIED, one JSON blob for what is only ever read back
-// whole. `bus_seen` is looked up by (from_machine, id) and pruned by expiry, so
-// its fields are columns; every scoped store is always read for one session (or one project)
-// at a time and folded in memory, so their rows carry the record as
-// written and the Zod schema that already defines it stays the only definition
-// of shape — a field added there needs no DDL here.
-//
-// `seq` is the insertion order, and for most of these it IS the semantics: a
-// message log is a ring, a held queue goes out in the order it was written, a
-// mailbox spends its bound on the oldest post, and a delivery queue is FIFO per
-// session.
-//
-// EVERY SESSION-SCOPED TABLE CARRIES BOTH projectId AND sessionId, which is a
-// requirement and not a convention: `deleteScope` runs one
-// `WHERE projectId = ? AND sessionId = ?` across TABLES with hand-written skips
-// for the ones that are not session-scoped, so a table missing either column
-// raises "no such column", throws the transaction, and makes every session
-// delete on the machine fail.
+// Scoped tables need projectId and sessionId unless explicitly skipped by
+// deleteScope; a missing column would roll back every session deletion.
 const SCHEMA = `
 -- Machine-scoped, not session-scoped: a verdict belongs to the (sender, message
 -- id) pair, and deleting a session must not make a resend of its mail apply
@@ -111,14 +95,6 @@ CREATE TABLE IF NOT EXISTS bus_artifacts (
   record     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_artifacts_session ON bus_artifacts (projectId, sessionId, seq);
-
-CREATE TABLE IF NOT EXISTS bus_mailbox (
-  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
-  projectId TEXT NOT NULL,
-  sessionId TEXT NOT NULL,
-  item      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS bus_mailbox_session ON bus_mailbox (projectId, sessionId, seq);
 
 CREATE TABLE IF NOT EXISTS bus_threads (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -455,7 +431,7 @@ export function deleteScope(db: Database, scope: BusScope): void {
       // Neither of these is owned by a session: the delivery queue is per
       // project, and its lines belong to every other session in the project
       // too; `bus_seen` is per sending machine and carries no project at all.
-      if (table === "bus_routes" || table === "bus_seen") continue;
+      if (table === "bus_routes" || table === "bus_mailbox" || table === "bus_seen") continue;
       if (table === "bus_deliveries" && scope.sessionId !== undefined) continue;
       db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
     }

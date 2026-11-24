@@ -176,13 +176,13 @@ describe("sealBus / openBus", () => {
     }
   });
 
-  test("a quote-dense post frame at the envelope cap seals and opens", () => {
+  test("a quote-dense notify frame at the envelope cap seals and opens", () => {
     const envelope = { messageId: "m", threadId: null, contextId: "c", parts: [{ kind: "text", text: "" }], metadata: {} };
     const fixed = JSON.stringify(envelope).length;
     // Each quote costs two serialized bytes.
     envelope.parts[0]!.text = "\"".repeat(Math.floor((MAX_ENVELOPE_BYTES - fixed) / 2));
     expect(checkEnvelopeSize(envelope as unknown as BusEnvelope)).toBeNull();
-    const body = JSON.stringify({ type: "session-bus:post", id: randomUUID(), timestamp: 1, envelope });
+    const body = JSON.stringify({ type: "session-bus:notify", id: randomUUID(), timestamp: 1, envelope });
     const h = header();
     expect(open(h, seal(h, body))).toEqual({ ok: true, header: h, body });
   });

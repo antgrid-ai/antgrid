@@ -59,25 +59,9 @@ export const SESSION_BUS_ERRORS = {
    *  keyless caller before it has looked at the address at all. */
   NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
-  /** A `notify` addressed at a session that is not running. A stopped
-   *  session never reaches the turn boundary a notify waits for — but for a
-   *  SAME-MACHINE target this host can start on its own authority, `api.ts`
-   *  wakes it instead of refusing (see `SessionBusApiDeps.startSession`), and
-   *  this code never fires for that case. It still fires whenever waking is
-   *  not available: a cross-machine target (starting a process on someone
-   *  else's machine on the sender's behalf is not this host's call), a
-   *  same-machine target on a project this host has not warmed, or any caller
-   *  with no `startSession` hook wired at all. The text must name `post` as
-   *  the verb that still reaches: a post lands in the mailbox whether or not
-   *  anything is running to read it yet. */
+
   NOT_RUNNING: 409,
-  /** The two per-pair budget ceilings, and they stay two codes on purpose:
-   *  `NOTIFY_RATE` is a rolling-hour rate limit the pair simply waits out and
-   *  refuses one verb, naming `post` as the one that still reaches; `NO_PROGRESS`
-   *  is a halt that time does not clear — only a human does
-   *  (`SessionBusCoordinator.clearHalt`) — and it refuses every verb, not only
-   *  `notify`. Collapsing them into one code would tell a caller who only needs
-   *  to wait an hour that nothing but a human can free it. */
+
   NO_PROGRESS: 429,
   NOTIFY_RATE: 429,
   ENVELOPE_TOO_LARGE: 413,

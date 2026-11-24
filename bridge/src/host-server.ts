@@ -600,14 +600,8 @@ export class HostServer {
     // makes the failure cost one retry rather than a wrongly-failed,
     // already-applied send.
     //
-    // `"applied"` is the whole answer for every verb the coordinator ever hands
-    // this: the store commit it implies (mailbox for a post, the log/thread row
-    // for a notify) has already landed by the time `handleInbound` returns it,
-    // and what happens to a notify's rendered line downstream
-    // (`deliverBusEvent`/`lineForEvent`) is a separate, deliberately swallowed
-    // best-effort concern — `lineForEvent` returns null for every post ON
-    // PURPOSE, so answering "true iff a line was queued" here would read every
-    // local post as failed and retry it forever.
+    // The receipt witnesses the history/thread store commit. Rendering is
+    // downstream and cannot turn an already-applied frame into a retry.
     deliverLocal: (frame, to) => {
       const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
       if (projectId === null) return false;
@@ -1345,14 +1339,14 @@ export class HostServer {
    *  ride the sibling `agents` descriptor (buildAgentCatalog), because an app
    *  predating it would read a widened `tools[]` as "all of these are installed"
    *  and offer agents this machine cannot run. */
-  async buildToolsAdvertisement(opts: DetectOptions = {}) {
+  async buildToolsAdvertisement(opts: DetectOptions & { refresh?: boolean } = {}) {
     return (await detectAvailableTools(opts)).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
   }
 
-  private async sendToolsAdvertisement(bus: MessageBus): Promise<void> {
+  private async sendToolsAdvertisement(bus: MessageBus, refresh = false): Promise<void> {
     bus.publish(
       createMessage("agent:tools", {
-        tools: await this.buildToolsAdvertisement(),
+        tools: await this.buildToolsAdvertisement({ refresh }),
         agents: buildAgentCatalog(),
       }),
       "control",
@@ -1804,7 +1798,7 @@ export class HostServer {
       // payload is still a cheap no-op.
       if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:projects", "agent:tools"])) {
         this.sendProjectsAdvertisement(bus);
-        void this.sendToolsAdvertisement(bus)
+        void this.sendToolsAdvertisement(bus, true)
           .then(() => dispatchRpc(bus, msg))
           .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("state.snapshot discovery failed: %s", err));
@@ -2584,7 +2578,7 @@ export class HostServer {
           // Same builders as the remote `agent:tools` advert: the loopback and
           // relay pickers must describe a tool identically, and a second copy
           // of the entry shape is how they drift.
-          tools: await this.buildToolsAdvertisement(),
+          tools: await this.buildToolsAdvertisement({ refresh: true }),
           agents: buildAgentCatalog(),
         };
       case "project:open": {

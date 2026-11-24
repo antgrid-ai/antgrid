@@ -33,7 +33,67 @@ function compactionSummary(content: string): string | undefined {
   return text || undefined;
 }
 
+const UNIFIED_HISTORY = "vibe-history.jsonl";
+const UNIFIED_CONTEXT = "vibe-context.jsonl";
+
+/** A settled tool effect's result, read against the 3.1.4 projection: a
+ * completed one carries `outputText` and the serialized `output`, a failed one an
+ * `error`, a skipped or cancelled one a `reason`; a running one has none yet. */
+function effectResult(state: Rec): { output: string; isError: boolean } | undefined {
+  const status = state.status;
+  if (status === "completed") {
+    const text = str(state.outputText);
+    if (text) return { output: text, isError: false };
+    const output = state.output;
+    if (!isRec(output)) return { output: "", isError: false };
+    const parts = contentText(output.content);
+    if (parts) return { output: parts, isError: false };
+    const structured = output.structured_content;
+    const inner = isRec(structured) ? str(structured.content) : undefined;
+    return { output: inner ?? JSON.stringify(structured ?? output), isError: false };
+  }
+  if (status === "failed") return { output: (isRec(state.error) ? str(state.error.message) : undefined) ?? str(state.outputText) ?? "", isError: true };
+  if (status === "skipped" || status === "cancelled") return { output: str(state.reason) ?? "", isError: true };
+  return undefined;
+}
+
+/** Vibe 3: the projection history, with the summary for its latest compaction
+ * taken from the model context, which is the only place Vibe keeps it. */
+async function unifiedEvents(dir: string, manifest: Parameters<HandoffEventsFn>[1], sink: Parameters<HandoffEventsFn>[2], signal: AbortSignal): Promise<void> {
+  let summary: string | undefined;
+  if (manifest.files.some((file) => file.name === UNIFIED_CONTEXT)) {
+    await forEachJsonlLine(join(dir, UNIFIED_CONTEXT), (_lineNo, value) => {
+      if (!isRec(value) || !isRec(value.message) || value.message.role !== "user") return;
+      summary = compactionSummary(contentText(value.message.content)) ?? summary;
+    }, signal);
+  }
+  const file = join(dir, UNIFIED_HISTORY);
+  const isCompaction = (value: unknown) => isRec(value) && value.type === "checkpoint" && value.kind === "compaction";
+  let lastCompaction = 0;
+  await forEachJsonlLine(file, (lineNo, value) => { if (isCompaction(value)) lastCompaction = lineNo; }, signal);
+  await forEachJsonlLine(file, (lineNo, value) => {
+    if (!isRec(value)) return;
+    const at = `${UNIFIED_HISTORY}:${lineNo}`;
+    if (isCompaction(value)) {
+      const text = lineNo === lastCompaction ? summary : undefined;
+      sink({ kind: "compaction", ...(text ? { summary: capEventText(text) } : { note: "Vibe compacted here; only its latest summary is kept" }), at });
+    } else if (value.type === "message" && value.role === "user") {
+      const text = contentText(value.content).trim();
+      if (text) sink(userEvent(text, at));
+    } else if (value.type === "message" && value.role === "assistant") {
+      const text = contentText(value.content).trim();
+      if (text) sink({ kind: "assistant", text: capEventText(text), at });
+    } else if (value.type === "effect" && isRec(value.detail) && str(value.detail.toolName)) {
+      const name = str(value.detail.toolName)!;
+      sink({ kind: "tool_call", name, input: capEventText(JSON.stringify(value.detail.input ?? {})), at });
+      const result = isRec(value.state) ? effectResult(value.state) : undefined;
+      if (result) sink({ kind: "tool_result", name, output: capEventText(result.output), ...(result.isError ? { isError: true } : {}), at });
+    }
+  }, signal);
+}
+
 export const vibeEvents: HandoffEventsFn = async (dir, manifest, sink, signal) => {
+  if (manifest.primary === UNIFIED_HISTORY) return unifiedEvents(dir, manifest, sink, signal);
   const file = join(dir, manifest.primary);
   await forEachJsonlLine(file, (lineNo, value) => {
     if (!isRec(value)) return;

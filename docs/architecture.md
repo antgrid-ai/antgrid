@@ -110,6 +110,27 @@ on this path, and a phone never sees the traffic. There is no separate spec
 document: the host-side invariants are in `bridge/AGENTS.md`, and the rest is
 documented at its definitions under `bridge/src/session-bus/`.
 
+`antgrid_notify` is the only session-message send operation. A new exchange
+requires `to`; a reply supplies `threadId` and resolves its recipient from the
+thread. Messages enter the persistent delivery queue automatically, immediately
+when idle or at the next turn boundary. `antgrid_thread` retains exchange history
+and delivery receipts.
+
+Known stopped remote targets are started with the authenticated `session.start`
+request, without an initial prompt. Validation and pair-budget checks precede
+wake; concurrent starts for one target are coalesced, and membership, access and
+budget are checked again before each message is sent. The request retains its
+remote-access, agent-reach, orchestrator, project-catalog and session-eligibility
+checks, timeout and retries. Unknown liveness never triggers a speculative start.
+
+The notify-only rollout removes post, reply and inbox tools/routes and the app's
+Messages surface, without compatibility aliases. Legacy post frames are rejected.
+The bus database schema bump follows the pre-release reset policy: all versioned
+bus records are cleared, including history, threads, deliveries and artifact
+records; the old mailbox table is dropped rather than migrated. Ship bridge and
+app together and restart existing agent sessions to refresh cached MCP tools and
+instructions after upgrading.
+
 ## Checkout-scoped routing
 
 A session can run in a managed git worktree instead of the project root, so everything

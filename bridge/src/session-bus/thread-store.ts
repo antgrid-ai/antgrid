@@ -1,32 +1,9 @@
-// One row per thread this session is part of, and the only thing that can tell a
-// reply where to go.
-//
-// A thread id is a correlation id with no state machine — it is carried
-// and never validated — so this store exists for exactly one question: given a
-// thread id an agent wants to answer on, what `contextId` did that exchange
-// arrive under? Nothing else on the machine can answer it. A session that was
-// NOTIFIED holds no mailbox row at all, and without a row here a reply would
-// carry the replier's own session id as its context and land as a new exchange
-// rather than as the answer on the one it was asked on.
-//
-// A ROW HERE IS PART OF A SECURITY BOUND, not only a routing hint. The send
-// path lets a session answer an off-machine peer whose directory row this
-// machine cannot resolve, and a thread row is the whole of what it requires:
-// nothing bounds it in time beyond the row's own expiry, and the peer's half of
-// the repo-key scope is not checked. What makes that safe is that a row
-// is unforgeable by the agent that benefits from it: both mint sites run
-// post-admission — one on an outbound send this session itself made, one on an
-// inbound frame that already cleared `handleInbound`'s address check — and
-// `upsertThread` freezes `contextId`, `peer` and `openedByPeer` so no later
-// frame can re-point an existing row at somewhere else. Keep both properties.
-//
-// Aged on the mailbox's clock, because "a thread is garbage once both
-// sides stop writing" needs a moment to point at and `lastAt` is it. The
-// coordinator applies that expiry on the warm path too, so the TTL bounds a
-// long-lived bridge and not merely a restart.
-
+// Thread rows authorize replies even when a peer's directory row is absent.
+// Only admitted sends and inbound frames may mint them; upsertThread freezes
+// the peer and context so a later frame cannot redirect an existing exchange.
+// Expiry runs on warm reads too, bounding this authority without a restart.
 import { z } from "zod";
-import { MAILBOX_TTL_MS, MAX_THREADS_PER_SESSION } from "./constants";
+import { THREAD_TTL_MS, MAX_THREADS_PER_SESSION } from "./constants";
 import { SessionMemberKeySchema } from "../protocol";
 import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
@@ -74,7 +51,7 @@ export function upsertThread(s: ThreadState, row: ThreadRow): ThreadState {
 }
 
 export function expireThreads(s: ThreadState, now: number): ThreadState {
-  const threads = s.threads.filter((t) => now - t.lastAt < MAILBOX_TTL_MS);
+  const threads = s.threads.filter((t) => now - t.lastAt < THREAD_TTL_MS);
   return threads.length === s.threads.length ? s : { threads };
 }
 

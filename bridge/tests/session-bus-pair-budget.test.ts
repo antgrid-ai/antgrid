@@ -49,14 +49,14 @@ test("pairKey is order-independent: the same record whichever end calls it", () 
   expect(pairKey(A, B)).not.toBe(pairKey(A, { machineId: "m3", sessionId: "s3" }));
 });
 
-test("the notify ceiling refuses once spent, and names post as the verb that still reaches", () => {
+test("the notify ceiling refuses once spent and explains rolling-hour recovery", () => {
   const under = withNotifies(MAX_NOTIFIES_PER_PAIR_HOUR - 1);
   expect(checkNotify(under, T0)).toBeNull();
 
   const at = withNotifies(MAX_NOTIFIES_PER_PAIR_HOUR);
   const refusal = checkNotify(at, T0)!;
   expect(refusal.code).toBe("NOTIFY_RATE");
-  expect(refusal.error).toContain("post");
+  expect(refusal.error).toContain("rolling-hour");
 });
 
 test("the notify window is rolling, not lifetime — an hour-old notify drops off", () => {
@@ -83,17 +83,12 @@ test("NO_PROGRESS_EXCHANGES consecutive exchanges with no progress trip a halt",
   expect(noteExchange(s, T0 + 100)).toBe(s);
 });
 
-test("a halted pair refuses checkHalt regardless of which verb asks — post included", () => {
-  // checkHalt takes no verb: it is the one gate consulted before post, notify
-  // AND reply alike (§7.4/§8.2), so this single check IS the post-path refusal
-  // too — there is no separate notify-only halt to bypass by calling post.
+test("a no-progress halt is independent of the rolling-hour limit", () => {
   const halted = haltedState();
   const refusal = checkHalt(halted)!;
   expect(refusal).not.toBeNull();
   expect(refusal.code).toBe("NO_PROGRESS");
 
-  // An un-halted pair with the notify budget exhausted may still post — only
-  // checkNotify refuses it, never checkHalt.
   const notifyExhausted = withNotifies(MAX_NOTIFIES_PER_PAIR_HOUR);
   expect(checkHalt(notifyExhausted)).toBeNull();
 });
@@ -192,7 +187,7 @@ test("persisted records are scoped per session, and stale notify timestamps do n
 // while enforcing nothing. These drive `SessionBusCoordinator.message` and
 // assert on what it returns.
 
-function gatedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: Map<string, PairBudgetState[]> } {
+function gatedCoordinator(abDir: string, slow = false): { bus: SessionBusCoordinator; rows: Map<string, PairBudgetState[]> } {
   const rows = new Map<string, PairBudgetState[]>();
   let now = T0;
   const bus = new SessionBusCoordinator({
@@ -207,14 +202,14 @@ function gatedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: Ma
       recordsFor: (sessionId) => rows.get(sessionId) ?? [],
       write: (sessionId, next) => rows.set(sessionId, upsertPairBudget(rows.get(sessionId) ?? [], next)),
     },
-    now: () => (now += 1),
+    now: () => (now += slow ? HOUR_MS + 1 : 1),
   });
   return { bus, rows };
 }
 
 const TO = { machineId: B.machineId, projectId: "p2", sessionId: B.sessionId };
 
-function send(bus: SessionBusCoordinator, verb: "post" | "notify", over: { threadId?: string | null; artifact?: boolean } = {}) {
+function send(bus: SessionBusCoordinator, verb: "notify", over: { threadId?: string | null; artifact?: boolean } = {}) {
   return bus.message({
     sessionId: A.sessionId,
     verb,
@@ -235,9 +230,9 @@ function send(bus: SessionBusCoordinator, verb: "post" | "notify", over: { threa
   });
 }
 
-function withGate(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudgetState[]>) => void): void {
+function withGate(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudgetState[]>) => void, slow = false): void {
   const abDir = tmpAbDir();
-  const { bus, rows } = gatedCoordinator(abDir);
+  const { bus, rows } = gatedCoordinator(abDir, slow);
   try {
     run(bus, rows);
   } finally {
@@ -246,17 +241,15 @@ function withGate(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudget
   }
 }
 
-test("the notify ceiling refuses a real send, and post on the same pair still reaches", () => {
+test("the notify ceiling refuses repeated sends on the same pair", () => {
   withGate((bus) => {
     for (let i = 0; i < MAX_NOTIFIES_PER_PAIR_HOUR; i += 1) {
       expect(send(bus, "notify")).toMatchObject({ ok: true });
     }
     const refused = send(bus, "notify");
     expect(refused).toMatchObject({ ok: false, code: "NOTIFY_RATE" });
-    // Named in the refusal AND true in fact: the verb the reader is sent to
-    // has to actually work, or the advice is worse than no advice.
-    expect((refused as { error: string }).error).toContain("post");
-    expect(send(bus, "post")).toMatchObject({ ok: true });
+    expect((refused as { error: string }).error).toContain("rolling-hour");
+    expect(send(bus, "notify")).toMatchObject({ ok: false, code: "NOTIFY_RATE" });
   });
 });
 
@@ -271,51 +264,49 @@ test("a refused send leaves no trace of the message it refused", () => {
   });
 });
 
-test("a pair that talks without publishing or opening a thread is halted, and the halt refuses post too", () => {
+test("a pair that talks without publishing or opening a thread stays halted", () => {
   withGate((bus) => {
-    const opening = send(bus, "post");
+    const opening = send(bus, "notify");
     if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
     const thread = opening.threadId;
     // Replies on the SAME thread: no artifact, no new thread, which is exactly
     // what 7.4 counts as nothing moving.
     for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) {
-      expect(send(bus, "post", { threadId: thread })).toMatchObject({ ok: true });
+      expect(send(bus, "notify", { threadId: thread })).toMatchObject({ ok: true });
     }
-    const halted = send(bus, "post", { threadId: thread });
+    const halted = send(bus, "notify", { threadId: thread });
     expect(halted).toMatchObject({ ok: false, code: "NO_PROGRESS" });
-    // The halt is not the notify ceiling wearing another name: post is the
-    // unbudgeted verb and it is refused here all the same.
     expect(send(bus, "notify", { threadId: thread })).toMatchObject({ ok: false, code: "NO_PROGRESS" });
-  });
+  }, true);
 });
 
 test("a new thread and a published artifact each keep the counter from ever reaching the halt", () => {
   withGate((bus) => {
     for (let i = 0; i < NO_PROGRESS_EXCHANGES * 2; i += 1) {
-      expect(send(bus, "post")).toMatchObject({ ok: true });
+      expect(send(bus, "notify")).toMatchObject({ ok: true });
     }
-  });
+  }, true);
   withGate((bus) => {
-    const opening = send(bus, "post");
+    const opening = send(bus, "notify");
     if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
     for (let i = 0; i < NO_PROGRESS_EXCHANGES * 2; i += 1) {
-      expect(send(bus, "post", { threadId: opening.threadId, artifact: true })).toMatchObject({ ok: true });
+      expect(send(bus, "notify", { threadId: opening.threadId, artifact: true })).toMatchObject({ ok: true });
     }
-  });
+  }, true);
 });
 
 test("only a human clears a halt the gate tripped", () => {
   withGate((bus, rows) => {
-    const opening = send(bus, "post");
+    const opening = send(bus, "notify");
     if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
-    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) send(bus, "post", { threadId: opening.threadId });
-    expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: false, code: "NO_PROGRESS" });
+    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) send(bus, "notify", { threadId: opening.threadId });
+    expect(send(bus, "notify", { threadId: opening.threadId })).toMatchObject({ ok: false, code: "NO_PROGRESS" });
 
     // The coordinator delegates clearing to whoever holds the store, which is
     // the host in production; here that is the same map the gate reads.
     rows.set(A.sessionId, (rows.get(A.sessionId) ?? []).map(clearHalt));
-    expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: true });
-  });
+    expect(send(bus, "notify", { threadId: opening.threadId })).toMatchObject({ ok: true });
+  }, true);
 });
 
 // -- the read-only probe ----------------------------------------------------
@@ -328,28 +319,28 @@ test("only a human clears a halt the gate tripped", () => {
 
 test("pairRefusal answers null for a pair that has never spent anything", () => {
   withGate((bus) => {
-    expect(bus.pairRefusal(A.sessionId, TO, "post")).toBeNull();
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")).toBeNull();
     expect(bus.pairRefusal(A.sessionId, TO, "notify")).toBeNull();
   });
 });
 
-test("pairRefusal reports the halt for BOTH verbs — the ordering it exists to enable", () => {
+test("pairRefusal reports the halt without spending budget", () => {
   withGate((bus) => {
-    const opening = send(bus, "post");
+    const opening = send(bus, "notify");
     if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
-    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) send(bus, "post", { threadId: opening.threadId });
+    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) send(bus, "notify", { threadId: opening.threadId });
 
-    expect(bus.pairRefusal(A.sessionId, TO, "post")?.code).toBe("NO_PROGRESS");
     expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NO_PROGRESS");
-  });
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NO_PROGRESS");
+  }, true);
 });
 
-test("pairRefusal reports the notify ceiling for notify only; post still reads as reachable", () => {
+test("pairRefusal reports the notify ceiling without spending budget", () => {
   withGate((bus) => {
     for (let i = 0; i < MAX_NOTIFIES_PER_PAIR_HOUR; i += 1) send(bus, "notify");
 
     expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NOTIFY_RATE");
-    expect(bus.pairRefusal(A.sessionId, TO, "post")).toBeNull();
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NOTIFY_RATE");
   });
 });
 
@@ -361,19 +352,19 @@ test("a session with no address answers null rather than a refusal about the pai
 
 test("asking does not spend: pairRefusal leaves the store untouched and the send still lands", () => {
   withGate((bus, rows) => {
-    const opening = send(bus, "post");
+    const opening = send(bus, "notify");
     if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
     const spent = structuredClone(rows.get(A.sessionId));
 
     // Far more asks than the no-progress counter has room for: if any of them
     // charged, the pair would be halted before the send below.
     for (let i = 0; i < NO_PROGRESS_EXCHANGES * 4; i += 1) {
-      expect(bus.pairRefusal(A.sessionId, TO, i % 2 === 0 ? "post" : "notify")).toBeNull();
+      expect(bus.pairRefusal(A.sessionId, TO, i % 2 === 0 ? "notify" : "notify")).toBeNull();
     }
 
     expect(rows.get(A.sessionId)).toEqual(spent);
-    expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: true });
-  });
+    expect(send(bus, "notify", { threadId: opening.threadId })).toMatchObject({ ok: true });
+  }, true);
 });
 
 // -- the pair's two mirrors, kept in lockstep by charging BOTH halves --------
@@ -388,7 +379,7 @@ test("asking does not spend: pairRefusal leaves the store untouched and the send
 const LOCAL = "m1";
 const KEY_LOCAL = pairKey({ machineId: LOCAL, sessionId: "s1" }, { machineId: LOCAL, sessionId: "s2" });
 
-function pairedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: Map<string, PairBudgetState[]> } {
+function pairedCoordinator(abDir: string, slow = false): { bus: SessionBusCoordinator; rows: Map<string, PairBudgetState[]> } {
   const rows = new Map<string, PairBudgetState[]>();
   let now = T0;
   let self: SessionBusCoordinator;
@@ -406,16 +397,16 @@ function pairedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: M
       recordsFor: (sessionId) => rows.get(sessionId) ?? [],
       write: (sessionId, next) => rows.set(sessionId, upsertPairBudget(rows.get(sessionId) ?? [], next)),
     },
-    now: () => (now += 1),
+    now: () => (now += slow ? HOUR_MS + 1 : 1),
   });
   self = bus;
   return { bus, rows };
 }
 
-function post(bus: SessionBusCoordinator, from: string, to: string, threadId: string | null) {
+function notify(bus: SessionBusCoordinator, from: string, to: string, threadId: string | null) {
   return bus.message({
     sessionId: from,
-    verb: "post",
+    verb: "notify",
     threadId,
     to: { machineId: LOCAL, projectId: "p1", sessionId: to },
     summary: "s",
@@ -423,9 +414,9 @@ function post(bus: SessionBusCoordinator, from: string, to: string, threadId: st
   });
 }
 
-function withPair(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudgetState[]>) => void): void {
+function withPair(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudgetState[]>) => void, slow = false): void {
   const abDir = tmpAbDir();
-  const { bus, rows } = pairedCoordinator(abDir);
+  const { bus, rows } = pairedCoordinator(abDir, slow);
   try {
     run(bus, rows);
   } finally {
@@ -445,7 +436,7 @@ test("pairEnds is the inverse of pairKey, and refuses a key it cannot read", () 
 
 test("an arriving message charges the RECEIVER's mirror, not only the sender's", () => {
   withPair((bus, rows) => {
-    const opening = post(bus, "s1", "s2", null);
+    const opening = notify(bus, "s1", "s2", null);
     if (!("ok" in opening) || !opening.ok) throw new Error("send refused");
 
     // Both ends now hold a record for the same unordered pair, and both have
@@ -460,7 +451,7 @@ test("an arriving message charges the RECEIVER's mirror, not only the sender's",
 
 test("an alternating pair reaches the halt in NO_PROGRESS_EXCHANGES messages, not twice that, and both ends halt", () => {
   withPair((bus, rows) => {
-    const opening = post(bus, "s1", "s2", null);
+    const opening = notify(bus, "s1", "s2", null);
     if (!("ok" in opening) || !opening.ok) throw new Error("send refused");
     const thread = opening.threadId;
 
@@ -469,19 +460,19 @@ test("an alternating pair reaches the halt in NO_PROGRESS_EXCHANGES messages, no
     // runs out.
     let sender = "s2";
     for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) {
-      const answer = post(bus, sender, sender === "s1" ? "s2" : "s1", thread);
+      const answer = notify(bus, sender, sender === "s1" ? "s2" : "s1", thread);
       expect(answer).toMatchObject({ ok: true });
       sender = sender === "s1" ? "s2" : "s1";
     }
 
     // Charging only the outbound half would leave each side at three here, and
     // both of these sends would land.
-    expect(post(bus, "s1", "s2", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
-    expect(post(bus, "s2", "s1", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
+    expect(notify(bus, "s1", "s2", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
+    expect(notify(bus, "s2", "s1", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
     for (const sessionId of ["s1", "s2"]) {
       expect(budgetFor(rows.get(sessionId) ?? [], KEY_LOCAL).haltedAt).not.toBeNull();
     }
-  });
+  }, true);
 });
 
 test("the notify ceiling is spent by the pair, not by each sender in turn", () => {

@@ -47,6 +47,7 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
   expect(byKey["claude-code"]).toEqual({
     tool: "claude-code",
     label: "Claude Code",
+    installUrl: AGENTS["claude-code"].installUrl,
     chatCapable: true,
     judgeCapable: true,
     handler: { terminal: true, chat: true },
@@ -60,6 +61,7 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
   expect(byKey["kilo"]).toEqual({
     tool: "kilo",
     label: "Kilo",
+    installUrl: AGENTS.kilo.installUrl,
     chatCapable: false,
     judgeCapable: true,
     handler: { terminal: false, chat: false },
@@ -73,6 +75,7 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
   expect(byKey["cursor-agent"]).toEqual({
     tool: "cursor-agent",
     label: "Cursor",
+    installUrl: AGENTS["cursor-agent"].installUrl,
     chatCapable: false,
     judgeCapable: false,
     handler: { terminal: false, chat: false },

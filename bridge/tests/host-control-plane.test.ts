@@ -230,6 +230,32 @@ test("control-plane state.snapshot answers with both advert types (welcome-repla
   expect(types).toEqual(["agent:projects", "agent:tools"]);
 });
 
+test("control-plane retry refreshes tools after installation", async () => {
+  const standalone = standaloneForSnapshot({});
+  let installed = false;
+  let cached: Awaited<ReturnType<HostServer["buildToolsAdvertisement"]>> = [];
+  standalone.buildToolsAdvertisement = async (opts = {}) => {
+    if (opts.refresh) cached = installed
+      ? [{ tool: "codex", label: "Codex", path: "codex", chatCapable: true }]
+      : [];
+    return cached;
+  };
+  const bus = new MessageBus();
+  const replies: any[] = [];
+  bus.subscribe({ deliver: (m) => { if (m.type === "response") replies.push(m); } });
+  async function scan(id: string) {
+    standalone.dispatchControlPlaneInbound(createMessage("request", {
+      requestId: id, method: "state.snapshot", params: { types: ["agent:tools"] },
+    }) as any, "control", bus);
+    await new Promise((r) => setTimeout(r, 0));
+    return replies.find((r) => r.requestId === id).result.frames
+      .find((f: any) => f.type === "agent:tools").tools;
+  }
+  expect(await scan("before")).toEqual([]);
+  installed = true;
+  expect((await scan("after")).map((t: any) => t.tool)).toEqual(["codex"]);
+});
+
 // The app's second, tree-only pull cannot carry an advert, so it is not a
 // reason to re-derive the catalog.
 test("a control-plane pull that asks for no advert type recomputes nothing", async () => {

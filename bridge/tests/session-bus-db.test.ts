@@ -8,7 +8,6 @@ import { BUS_DB_VERSION, busDbPath, deleteScope, resetBusDbAnnouncements, tryBus
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { listSessionBusSessions, removeSessionBusProject, removeSessionBusSession } from "../src/session-bus/store-fs";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
-import { loadMailbox } from "../src/session-bus/mailbox";
 import { loadThreads } from "../src/session-bus/thread-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
 import { stampEnvelope } from "../src/session-bus/envelope";
@@ -71,7 +70,7 @@ test("a database written under another version is dropped, never read", () => {
   }
 });
 
-const SESSION_SCOPED = ["bus_messages", "bus_held", "bus_artifacts", "bus_mailbox", "bus_threads", "bus_pair_budget"] as const;
+const SESSION_SCOPED = ["bus_messages", "bus_held", "bus_artifacts", "bus_threads", "bus_pair_budget"] as const;
 
 function fillEverySessionTable(): void {
   withBusDb(
@@ -225,8 +224,8 @@ test("a bad row costs that row in every store built on this seam", () => {
   // left — emptying either store on one bad row loses work nothing can notice
   // is missing.
   saveHeld(abDir, "p1", "s1", holdMessage(
-    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 1, attempts: 1, nextAttemptAt: 0 }).state,
-    { messageId: "h-bad", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 2, attempts: 1, nextAttemptAt: 0 },
+    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:notify" }, heldAt: 1, attempts: 1, nextAttemptAt: 0 }).state,
+    { messageId: "h-bad", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:notify" }, heldAt: 2, attempts: 1, nextAttemptAt: 0 },
   ).state);
   saveDeliveries(abDir, "p1", enqueueLine(
     enqueueLine(emptyDeliveries(), { id: "l-good", sessionId: "s1", kind: "notify", text: "a", queuedAt: 1 }),
@@ -323,7 +322,6 @@ test("nothing that only reads or reclaims brings the database into being", () =>
   expect(loadHeld(abDir, "p1", "s1").held).toEqual([]);
   expect(loadDeliveries(abDir, "p1").lines).toEqual([]);
   expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
-  expect(loadMailbox(abDir, "p1", "s1").posts).toEqual([]);
   expect(loadThreads(abDir, "p1", "s1").threads).toEqual([]);
   expect(listSessionBusSessions(abDir)).toEqual([]);
   removeSessionBusProject(abDir, "p1");
@@ -335,13 +333,13 @@ test("nothing that only reads or reclaims brings the database into being", () =>
   saveHeld(abDir, "p1", "s1", holdMessage(emptyHeld(), {
     messageId: "h-1", contextId: "c",
     to: { machineId: "m", projectId: "p", sessionId: "s" },
-    frame: { type: "session-bus:post" }, heldAt: 1, attempts: 1, nextAttemptAt: 0,
+    frame: { type: "session-bus:notify" }, heldAt: 1, attempts: 1, nextAttemptAt: 0,
   }).state);
   expect(existsSync(busDbPath(abDir))).toBe(true);
 });
 
 test("the database is stamped at the version that carries the seen set", () => {
-  expect(BUS_DB_VERSION).toBe(3);
+  expect(BUS_DB_VERSION).toBe(BUS_DB_VERSION);
 });
 
 test("a version 2 database is dropped whole, its routes table with it", () => {
@@ -362,7 +360,7 @@ test("a version 2 database is dropped whole, its routes table with it", () => {
   try {
     const names = (check.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
     expect(names).not.toContain("bus_routes");
-    expect((check.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+    expect((check.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(BUS_DB_VERSION);
   } finally {
     check.close();
   }
@@ -375,4 +373,21 @@ test("a session or project delete leaves the seen set alone", () => {
   expect(tryBusDb(abDir, "a session delete", (db) => deleteScope(db, { projectId: "p1", sessionId: "s1" }))).toBe(true);
   expect(tryBusDb(abDir, "a project delete", (db) => deleteScope(db, { projectId: "p1" }))).toBe(true);
   expect(withBusDb(abDir, (db) => db.query("SELECT 1 FROM bus_seen").all().length, 0)).toBe(1);
+});
+
+test("the notify-only schema upgrade removes the mailbox and resets every versioned table", () => {
+  fillEverySessionTable();
+  withBusDb(abDir, (db) => {
+    db.exec("CREATE TABLE bus_mailbox (item TEXT)");
+    db.exec("INSERT INTO bus_mailbox VALUES ('old post')");
+    db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('old', 'id', 1, 2, 'applied')");
+    db.exec("INSERT INTO bus_deliveries (projectId, line) VALUES ('p1', '{}')");
+    db.exec(`PRAGMA user_version = ${BUS_DB_VERSION - 1}`);
+  }, null);
+  withBusDb(abDir, (db) => {
+    expect(db.query("SELECT name FROM sqlite_master WHERE name = 'bus_mailbox'").get()).toBeNull();
+    for (const table of [...SESSION_SCOPED, "bus_seen", "bus_deliveries"]) {
+      expect((db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n).toBe(0);
+    }
+  }, null);
 });

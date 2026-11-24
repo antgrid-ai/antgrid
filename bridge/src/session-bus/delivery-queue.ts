@@ -59,13 +59,6 @@ export const MAX_SUBMIT_ATTEMPTS = 2;
  *  at once is a worse prompt than the newest few. */
 export const MAX_QUEUED_LINES = 64;
 
-/** Which template produced the line. Recorded so a queue dumped after a restart
- *  says what is waiting without re-parsing the rendered text.
- *
- *  Only a notify produces a line at all — a post is read when the target
- *  chooses — and the two kinds split on whether the RECEIVER already held the
- *  thread when the message landed, which is what decides whether the reader is
- *  being introduced to an exchange or continued in one. */
 export const DeliveryKindSchema = z.enum(["notify", "reply"]);
 export type DeliveryKind = z.infer<typeof DeliveryKindSchema>;
 

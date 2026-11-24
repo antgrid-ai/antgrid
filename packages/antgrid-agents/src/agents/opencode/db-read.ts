@@ -2,6 +2,7 @@
 import { Database } from "bun:sqlite";
 import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import type { SessionMessageInfo } from "@opencode/client";
 import { hasOpencodeV2Store, readOpencodeV2Messages } from "./v2-store";
 
 // Rows fetched per read. Must stay comfortably wider than DECIDE_MAX_MSGS
@@ -39,9 +40,7 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
     db = new Database(dbPath ?? resolveOpencodeDbPath(), { readonly: true });
     db.exec("PRAGMA busy_timeout = 0");
     if (hasOpencodeV2Store(db)) {
-      const messages = readOpencodeV2Messages(db, sessionId, ROW_CAP);
-      const lastCompaction = messages.findLastIndex((message) => message.type === "compaction" && message.status === "completed");
-      return messages.slice(Math.max(0, lastCompaction)).flatMap((message) => {
+      return v2Context(db, sessionId, readOpencodeV2Messages(db, sessionId, ROW_CAP)).flatMap((message) => {
         if (message.type === "user") return [message.text];
         if (message.type === "compaction" && message.status === "completed") return [message.summary];
         if (message.type === "assistant") return [message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")];
@@ -85,6 +84,29 @@ export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: 
   } finally {
     db?.close();
   }
+}
+
+const completedCompaction = (message: SessionMessageInfo) => message.type === "compaction" && message.status === "completed";
+
+/**
+ * The rows OpenCode 2 still sends the model, in store order: from its newest
+ * completed compaction, or from the oldest turn that compaction kept verbatim
+ * (`metadata.keepID`), which OpenCode replays right after the summary. A keepID
+ * older than the row window keeps the whole window; one naming no earlier
+ * message of the session keeps nothing, as OpenCode does.
+ */
+function v2Context(db: Database, sessionId: string, messages: SessionMessageInfo[]): SessionMessageInfo[] {
+  const last = messages.findLastIndex(completedCompaction);
+  if (last < 0) return messages;
+  const compaction = messages[last]!;
+  const keepID = compaction.type === "compaction" ? compaction.metadata?.keepID : undefined;
+  if (typeof keepID !== "string") return messages.slice(last);
+  const kept = messages.findIndex((message) => message.id === keepID);
+  if (kept >= 0) return messages.slice(kept < last ? kept : last);
+  const olderThanWindow = db.query(
+    "SELECT 1 FROM session_message k JOIN session_message c ON c.session_id = k.session_id WHERE k.session_id = ? AND k.id = ? AND c.id = ? AND k.seq < c.seq",
+  ).get(sessionId, keepID, compaction.id);
+  return olderThanWindow ? messages : messages.slice(last);
 }
 
 /**

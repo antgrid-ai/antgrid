@@ -24,14 +24,19 @@ import type { NamingModelProbe } from "../types";
  * starts the user's shared background service, which outlives the probe and
  * inherits the naming spawn's `OPENCODE_DB=:memory:`: every later session the
  * user opens through that service would be written to memory and lost.
+ *
+ * Agents come from `debug agents`, not `api agent.list`: from 2.2.7 the agent
+ * registry loads after the location boots, and a one-shot `api agent.list`
+ * answers before it with no agents at all, title included. `debug agents`
+ * prints the same records as a bare array once they have loaded.
  */
 export async function resolveOpencodeNamingModel(probe: NamingModelProbe): Promise<string | undefined> {
   const [agentsText, defaultText, modelsText] = await Promise.all([
-    probe.run(["api", "--standalone", "agent.list"]),
+    probe.run(["debug", "agents", "--standalone"]),
     probe.run(["api", "--standalone", "model.default"]),
     probe.run(["api", "--standalone", "model.list"]),
   ]);
-  const agents = rec(parseJson(agentsText)).data;
+  const agents = parseJson(agentsText);
   const models = rec(parseJson(modelsText)).data;
   if (!Array.isArray(agents) || !Array.isArray(models)) return undefined;
   const title = agents.map(rec).find((agent) => agent.id === "title");

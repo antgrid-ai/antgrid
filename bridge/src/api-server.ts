@@ -16,7 +16,6 @@ import {
   PublishArtifactBodySchema,
   BusRequestBodySchema,
   SendBodySchema,
-  ReplyBodySchema,
   type SendResultView,
   type SessionBusApi,
 } from "./session-bus/api";
@@ -287,19 +286,16 @@ function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => u
   return sessionBusJson(run(parsed.data));
 }
 
-/** A send, answered with the rung it reached once the relay had a moment to
- *  receipt it. The receipt arrives asynchronously and the send itself is
- *  synchronous, so this is where the two meet: the wait is bounded by
- *  `BUS_RUNG_REPORT_WAIT_MS`, and a slower receipt still shows on the thread. */
+/** Report a receipt after the asynchronous send; later receipts remain visible on the thread. */
 async function sessionBusSend<T>(
   bus: SessionBusApi,
   schema: z.ZodType<T>,
   body: unknown,
-  run: (b: T) => SendResultView | SessionBusRefusal,
+  run: (b: T) => Promise<SendResultView | SessionBusRefusal>,
 ): Promise<Response> {
   const parsed = schema.safeParse(body);
   if (!parsed.success) return json({ error: "Invalid body" }, 400);
-  const result = run(parsed.data);
+  const result = await run(parsed.data);
   if (isRefusal(result)) return sessionBusJson(result);
   const reached = await bus.awaitRung(result.messageId, BUS_RUNG_REPORT_WAIT_MS);
   const { heldReason: _held, refusedCode: _refused, retryUntil, ...rest } = result;
@@ -778,7 +774,6 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (req.method === "GET") {
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
           if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
-          if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
           if (rest === "self") return sessionBusJson(bus.self(terminalId));
           if (rest === "thread") {
             // An absent id is passed through as "" rather than answered here:
@@ -810,9 +805,6 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (rest === "artifacts") {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
         }
-        if (rest === "post") {
-          return sessionBusSend(bus, SendBodySchema, body, (b) => bus.post(terminalId, b));
-        }
         if (rest === "notify") {
           return sessionBusSend(bus, SendBodySchema, body, (b) => bus.notify(terminalId, b));
         }
@@ -820,9 +812,6 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           const parsed = BusRequestBodySchema.safeParse(body);
           if (!parsed.success) return json({ error: "Invalid body" }, 400);
           return sessionBusJson(await bus.request(terminalId, parsed.data));
-        }
-        if (rest === "reply") {
-          return sessionBusSend(bus, ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
         }
         return json({ error: "Not found" }, 404);
       }
