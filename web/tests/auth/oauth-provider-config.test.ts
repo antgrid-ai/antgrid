@@ -3,6 +3,7 @@
 
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
 import { createAuth } from "../../src/auth/better-auth.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import type { Env } from "../../src/env.js";
 
@@ -33,7 +34,7 @@ function makeTestEnv(url: string): Env {
 describe("OAuth Provider plugin", () => {
   it("exposes JWKS at /api/auth/jwks with at least one Ed25519 key", async () => {
     const env = makeTestEnv(pg.url);
-    const auth = createAuth({ env, db: pg.db, sendEmail: async () => {} });
+    const auth = createAuth({ env, db: pg.db, sendEmail: async () => {}, mailDomain: acceptAllMailDomains });
     const res = await auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth/jwks`));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { keys: { kty: string; crv?: string }[] };
@@ -45,7 +46,7 @@ describe("OAuth Provider plugin", () => {
 
   it("exposes the OAuth token endpoint and refuses unknown clients", async () => {
     const env = makeTestEnv(pg.url);
-    const auth = createAuth({ env, db: pg.db, sendEmail: async () => {} });
+    const auth = createAuth({ env, db: pg.db, sendEmail: async () => {}, mailDomain: acceptAllMailDomains });
     const res = await auth.handler(
       new Request(`${env.BETTER_AUTH_URL}/api/auth/oauth2/token`, {
         method: "POST",

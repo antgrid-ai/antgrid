@@ -20,6 +20,14 @@ const baseSource = {
 };
 
 describe("loadEnv", () => {
+  test("a development stack refuses a provider token unless real sends are opted in", () => {
+    const withToken = { ...baseSource, ZEPTOMAIL_TOKEN: "token" };
+    expect(() => loadEnv(withToken)).toThrow(/EMAIL_DEV_SEND/);
+    expect(() => loadEnv({ ...withToken, NODE_ENV: "development" })).toThrow(/EMAIL_DEV_SEND/);
+    expect(loadEnv({ ...withToken, EMAIL_DEV_SEND: "true" }).ZEPTOMAIL_TOKEN).toBe("token");
+    expect(loadEnv({ ...withToken, NODE_ENV: "staging" }).ZEPTOMAIL_TOKEN).toBe("token");
+    expect(loadEnv(baseSource).ZEPTOMAIL_TOKEN).toBeUndefined();
+  });
   test("Iroh relay discovery is explicit HTTPS and private policy targets stay separate", () => {
     expect(loadEnv(baseSource).IROH_RELAY_URLS).toEqual([]);
     expect(loadEnv(baseSource).PEER_POLICY_TARGETS).toEqual([]);

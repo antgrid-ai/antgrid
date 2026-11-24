@@ -8,6 +8,7 @@ import { makeClientIpResolver } from "../../src/util/client-ip.js";
 import { oauthTokenRateLimit, OAUTH_TOKEN_BURST } from "../../src/auth/oauth-token-rate-limit.js";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { createAuth } from "../../src/auth/better-auth.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 import type { DB } from "../../src/db/index.js";
 import type { Env } from "../../src/env.js";
 
@@ -46,7 +47,7 @@ describe("OAuth token rate limit", () => {
     } as unknown as Env;
     const sendEmail = async () => {};
     const auth = createAuth({
-      env, db, sendEmail,
+      env, db, sendEmail, mailDomain: acceptAllMailDomains,
       databaseOverride: memoryAdapter({ oauthClient: [] }),
     });
     (await auth.$context).rateLimit.enabled = true;

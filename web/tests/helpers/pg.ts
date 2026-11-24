@@ -22,7 +22,7 @@ export type PgHandle = {
 };
 
 const APP_TABLES = [
-  "email_recipient_events", "email_jobs", "auth_flow_events", "auth_flows", "auth_journeys", "auth_rate_buckets", "auth_cohorts",
+  "email_suppressions", "email_recipient_events", "email_jobs", "auth_flow_events", "auth_flows", "auth_journeys", "auth_rate_buckets", "auth_cohorts",
   "peer_authorization_outbox",
   "peer_authorization_policies",
   "peer_endpoint_challenges",

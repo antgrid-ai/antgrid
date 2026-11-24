@@ -3,12 +3,15 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "../helpers/app.js";
+import type { MailDomainCheck } from "../../src/auth/mail-domain.js";
+import { parseTeamNotice } from "../../src/ui/team-notice.js";
 import {
   addTestMember,
   createTestSession,
   createTestSubscription,
   createTestUser,
+  suppressTestRecipient,
 } from "../helpers/fixtures.js";
 import { provisionProductAccountForUser } from "../../src/models/subscription.js";
 import type { SendEmail } from "../../src/auth/email.js";
@@ -495,5 +498,64 @@ describe("revoke and resend", () => {
       session.cookie
     );
     expect(fresh.headers.get("location")).toBe("/team?invite=accepted");
+  });
+});
+
+describe("undeliverable invite addresses", () => {
+  const suppress = (email: string) => suppressTestRecipient(pg.db, TEST_BETTER_AUTH_SECRET, email);
+  const deadDomain: MailDomainCheck = async () => "no_mail";
+
+  test("create is refused for a suppressed address and for a dead domain", async () => {
+    const { sendEmail, sent } = capture();
+    const { app } = buildTestApp(pg.db, pg.url, { sendEmail, mailDomain: async (email) => (email.endsWith("@dead.example") ? "no_mail" : "deliverable") });
+    const { cookie } = await ownerWithSeats(5);
+    await suppress("bounced@example.com");
+
+    for (const email of ["bounced@example.com", "who@dead.example"]) {
+      const res = await post(app, "/ui/team/invite", { email }, cookie);
+      expect(res.headers.get("location")).toBe("/team?invite=undeliverable");
+    }
+    expect(await pg.db.accountInvite.count()).toBe(0);
+    expect(sent).toHaveLength(0);
+  });
+
+  test("resend is refused without rotating the token or mailing", async () => {
+    const { sendEmail, sent } = capture();
+    const { app } = buildTestApp(pg.db, pg.url, { sendEmail });
+    const { cookie } = await ownerWithSeats(5);
+    await post(app, "/ui/team/invite", { email: "later@example.com" }, cookie);
+    const before = await pg.db.accountInvite.findFirstOrThrow();
+    await suppress("later@example.com");
+    await pg.db.authRateBucket.deleteMany();
+
+    const res = await post(app, `/ui/team/invite/${before.id}/resend`, {}, cookie);
+
+    expect(res.headers.get("location")).toBe("/team?invite=undeliverable");
+    const after = await pg.db.accountInvite.findUniqueOrThrow({ where: { id: before.id } });
+    expect(Buffer.from(after.tokenHash).equals(Buffer.from(before.tokenHash))).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("resend is refused for a dead domain", async () => {
+    const { sendEmail, sent } = capture();
+    const live = buildTestApp(pg.db, pg.url, { sendEmail });
+    const dead = buildTestApp(pg.db, pg.url, { sendEmail, mailDomain: deadDomain });
+    const { cookie } = await ownerWithSeats(5);
+    await post(live.app, "/ui/team/invite", { email: "later@example.com" }, cookie);
+    const invite = await pg.db.accountInvite.findFirstOrThrow();
+    await pg.db.authRateBucket.deleteMany();
+
+    const res = await post(dead.app, `/ui/team/invite/${invite.id}/resend`, {}, cookie);
+
+    expect(res.headers.get("location")).toBe("/team?invite=undeliverable");
+    expect(sent).toHaveLength(1);
+  });
+
+  test("the team page renders the notice, and the code parses", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const { cookie } = await ownerWithSeats(5);
+    expect(parseTeamNotice("undeliverable")).toBe("undeliverable");
+    const html = await (await app.request("/team?invite=undeliverable", { headers: { cookie } })).text();
+    expect(html).toContain("can&#39;t be delivered");
   });
 });

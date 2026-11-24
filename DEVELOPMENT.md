@@ -547,7 +547,8 @@ error, with nothing in the web service's logs to say why.
 `http://localhost:${PORT}` in development and test; it is required only in
 staging and production.
 
-**`web/.env` — optional:** `ZEPTOMAIL_TOKEN`, `ZEPTOMAIL_WEBHOOK_SECRET`,
+**`web/.env` — optional:** `ZEPTOMAIL_TOKEN` (in development it also needs
+`EMAIL_DEV_SEND=true`, which opts in to real sends), `ZEPTOMAIL_WEBHOOK_SECRET`,
 `RELAY_INTERNAL_URL`, `RELAY_INTERNAL_SECRET`, the Paddle and Razorpay keys,
 `IPINFO_TOKEN`, `DEV_BILLING_ENABLED`, `EXTRA_TOKEN_AUDIENCES`,
 `TRUSTED_PROXY_IPS`.

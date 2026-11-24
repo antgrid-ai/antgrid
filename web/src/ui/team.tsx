@@ -133,6 +133,7 @@ const NOTICE: Record<
   },
   not_a_member: { tone: "error", text: "That person is not on this team." },
   forbidden: { tone: "error", text: "Only the account owner can manage the team." },
+  undeliverable: { tone: "error", text: "Email to that address can't be delivered. Check the spelling." },
   throttled: { tone: "error", text: "Too many invitations just now. Wait a moment, then try again." },
   failed: { tone: "error", text: "That did not work. Try again." },
 };

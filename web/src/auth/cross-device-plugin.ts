@@ -47,6 +47,9 @@ export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => ({
         id: flow.id, journeyId: flow.journeyId, returnPath: safeReturnPath(ctx.body.returnPath),
         email, nonce, browserToken, secret: ctx.context.secret,
         requesterUa: hdr?.get("user-agent")?.slice(0, 512) ?? null, requesterIp: hdr?.get("x-forwarded-for")?.split(",").at(-1)?.trim() || null,
+        // The web form sets this header and app.ts strips it from every inbound
+        // /api/auth request, so "ui" cannot be claimed from outside.
+        requesterEntry: hdr?.get("x-antgrid-entry") === "ui" ? "ui" : "api",
       });
       const cookieOptions = { httpOnly: true, sameSite: "lax" as const,
         secure: opts.baseURL.startsWith("https://"), path: "/", maxAge: PENDING_TTL_SECONDS };

@@ -4,9 +4,10 @@
 import { createHmac } from "node:crypto";
 import type { Tx } from "../db/index.js";
 import { authScope } from "./transaction.js";
+import { recipientBucketKey } from "./recipient-key.js";
 
 export async function recipientLimit(db: Tx, secret: string, email: string): Promise<number> {
-  const key = createHmac("sha256", secret).update(email.trim().toLowerCase()).digest("hex");
+  const key = recipientBucketKey(secret, email);
   if (authScope.getStore()?.charged.has(key)) return 0;
   await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 714))`;
   const now = new Date();

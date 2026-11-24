@@ -9,6 +9,15 @@ import { AUTH_MEMORY_SCRIPT, type AuthMethod } from "./auth-memory.js";
 // absolute and unversioned. Same call as download-card.tsx.
 const SITE_TERMS_URL = "https://antgrid.ai/terms";
 const SITE_PRIVACY_URL = "https://antgrid.ai/privacy";
+
+// Hidden from people, tempting to form-filling bots. Only a non-empty value
+// counts, so a form that never carried the field passes unchanged.
+const HONEYPOT_FIELD = "ab_contact_ref";
+
+export function honeypotFilled(form: FormData): boolean {
+  return String(form.get(HONEYPOT_FIELD) ?? "") !== "";
+}
+
 const PROVIDERS = [
   { method: "github", label: "GitHub" },
   { method: "google", label: "Google" },
@@ -64,6 +73,10 @@ export function LoginPage({ error, notice, email, apple = false }: LoginPageProp
             {/* Filled from localStorage on submit. Empty is the honest default
                 and routes to the magic link — with JS off it always is. */}
             <input type="hidden" name="method" value="" />
+            {/* Bait for form-filling bots; people never see or reach it. */}
+            <div aria-hidden="true" style="position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden">
+              <input type="text" name={HONEYPOT_FIELD} tabindex={-1} autocomplete="off" />
+            </div>
             <div>
               <div class="mb-2 flex items-center justify-between gap-2">
                 <label class="block text-sm font-medium" for="login-email">
@@ -167,7 +180,7 @@ function LastUsedBadge({ method, floating = false }: { method: AuthMethod; float
 }
 
 // Simple Icons marks (CC0) keep provider recognition without adding another accent.
-function ProviderIcon({ provider }: { provider: "apple" | "github" | "google" }) {
+export function ProviderIcon({ provider }: { provider: "apple" | "github" | "google" }) {
   const paths = {
     apple: "M17.05 12.536c.031 3.25 2.852 4.331 2.883 4.345-.024.076-.451 1.541-1.486 3.054-.895 1.308-1.823 2.611-3.286 2.638-1.438.027-1.901-.852-3.545-.852-1.643 0-2.157.825-3.518.879-1.412.053-2.487-1.414-3.389-2.717C2.765 17.22.899 12.354 2.894 8.99c.99-1.67 2.761-2.727 4.684-2.754 1.465-.027 2.848.933 3.744.933.895 0 2.574-1.154 4.338-.984.739.031 2.813.298 4.144 2.248-.107.066-2.475 1.442-2.449 4.103M14.348 4.418c.749-.907 1.253-2.17 1.116-3.418-1.079.043-2.384.719-3.158 1.626-.693.803-1.299 2.088-1.135 3.316 1.203.093 2.428-.61 3.177-1.524",
     github: "M12 .297C5.37.297 0 5.67 0 12.297c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.043-1.61-4.043-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.418-1.305.762-1.605-2.665-.3-5.466-1.334-5.466-5.931 0-1.31.468-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.323 3.301 1.23a11.52 11.52 0 013.003-.404c1.02.005 2.047.138 3.003.404 2.291-1.553 3.297-1.23 3.297-1.23.654 1.652.243 2.873.12 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.628-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.015 2.898-.015 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
