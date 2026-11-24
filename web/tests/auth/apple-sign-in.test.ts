@@ -6,6 +6,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { decodeProtectedHeader, jwtVerify } from "jose";
 import { appleClientSecret } from "../../src/auth/apple-client-secret.js";
 import { createAuth } from "../../src/auth/better-auth.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 import { loadEnv, type Env } from "../../src/env.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -104,7 +105,7 @@ describe("Apple env", () => {
 
 describe("Apple provider", () => {
   async function providers(env: Env) {
-    const auth = createAuth({ env, db: {} as never, sendEmail: async () => {} });
+    const auth = createAuth({ env, db: {} as never, sendEmail: async () => {}, mailDomain: acceptAllMailDomains });
     return (await auth.$context).socialProviders;
   }
 
@@ -130,7 +131,7 @@ describe("Apple provider", () => {
 describe("Apple web callback", () => {
   test("trusts Apple's origin for the form_post return, only where Apple is offered", async () => {
     const trusted = async (source: Record<string, string>) =>
-      (await createAuth({ env: loadEnv(source), db: {} as never, sendEmail: async () => {} }).$context)
+      (await createAuth({ env: loadEnv(source), db: {} as never, sendEmail: async () => {}, mailDomain: acceptAllMailDomains }).$context)
         .trustedOrigins;
     expect(await trusted({ ...baseSource, ...apple })).toContain("https://appleid.apple.com");
     expect(await trusted(baseSource)).not.toContain("https://appleid.apple.com");

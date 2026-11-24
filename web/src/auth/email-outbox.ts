@@ -8,6 +8,9 @@ import { authScope, scopedAuthDb } from "./transaction.js";
 import { retainAuthHistory } from "../models/auth-report.js";
 import { recordStage } from "./flows.js";
 import { EmailProviderError, type SendEmail } from "./email.js";
+import { isSuppressed, sweepSuppressions } from "./email-suppression.js";
+import { recipientDigest } from "./recipient-key.js";
+import { markReferenceBounced } from "../models/account-invite.js";
 
 const Payload = z.object({ to: z.email(), subject: z.string().max(512), text: z.string().max(65536), html: z.string().max(65536).optional(), clientReference: z.string().max(128).optional() });
 export class EmailKeyring {
@@ -37,14 +40,17 @@ export class EmailKeyring {
   }
 }
 
-export function createOutboxSender(database: DB, keys: EmailKeyring): SendEmail {
+/** A suppressed address is still enqueued: refusing here would make the error depend on
+ *  whether an account exists. */
+export function createOutboxSender(database: DB, keys: EmailKeyring, opts: { recipientSecret: string }): SendEmail {
   const db = scopedAuthDb(database);
   return async (mail) => {
     const id = randomUUID();
     const payload = Payload.parse(mail);
     const flowId = authScope.getStore()?.flowId;
     const expiresAt = mail.expiresAt ?? new Date(Date.now() + 3600000);
-    await db.emailJob.create({ data: { id, flowId, reference: id, relatedReference: payload.clientReference,
+    const recipientHash = recipientDigest(opts.recipientSecret, payload.to);
+    await db.emailJob.create({ data: { id, flowId, reference: id, relatedReference: payload.clientReference, recipientHash,
       payload: keys.seal(id, payload), keyVersion: keys.active, expiresAt } });
     await recordStage(db, flowId, "mail_queued");
   };
@@ -64,6 +70,17 @@ export async function sendNextEmail(db: DB, keys: EmailKeyring, send: SendEmail)
   const job = await db.emailJob.findUniqueOrThrow({ where: { id: claimed[0].id } });
   const where = { id: job.id, leaseId: lease, state: "sending" };
   const clear = { payload: null, keyVersion: null, leaseUntil: null, leaseId: null };
+  // Checked before the expiry branch so a suppressed job is recorded as suppressed, and
+  // before decryption so a dead mailbox never reaches the provider.
+  if (job.recipientHash && await isSuppressed(db, job.recipientHash as Uint8Array<ArrayBuffer>)) {
+    await db.$transaction(async (tx) => {
+      const updated = await tx.emailJob.updateMany({ where, data: { ...clear, state: "failed", failure: "suppressed" } });
+      if (!updated.count) return;
+      await recordStage(tx, job.flowId ?? undefined, "mail_failed", "suppressed");
+      if (job.relatedReference) await markReferenceBounced(tx, job.relatedReference);
+    });
+    return true;
+  }
   if (job.expiresAt.getTime() - Date.now() < 60000 || job.attempts > 5) {
     const failure = job.attempts > 5 ? "attempts_exhausted" : "expired";
     await db.$transaction(async (tx) => {
@@ -125,7 +142,7 @@ export function startEmailOutbox(db: DB, keys: EmailKeyring, send: SendEmail, pa
     try {
       if (!paused) await Promise.all([sendNextEmail(db, keys, send), sendNextEmail(db, keys, send)]);
       await expireEmailPayloads(db);
-      if (Date.now() - lastRetention > 3600000) { await retainAuthHistory(db); lastRetention = Date.now(); }
+      if (Date.now() - lastRetention > 3600000) { await retainAuthHistory(db); await sweepSuppressions(db); lastRetention = Date.now(); }
       await db.emailJob.deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 30 * 86400000) } } });
       await db.authRateBucket.deleteMany({ where: { key: { not: "email-sender-paused" }, updatedAt: { lt: new Date(Date.now() - 86400000) } } });
     } catch { console.error("[email] outbox database operation failed"); }

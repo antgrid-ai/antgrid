@@ -379,6 +379,9 @@ model PendingSignIn {
   // Context surfaced to the approver on Browser B.
   requesterUa      String?   @map("requester_ua")
   requesterIp      String?   @map("requester_ip")
+  // Server-set tag for which entry point started the flow ("ui" or "api"); lets a later
+  // abuse wave be attributed to the web form or the raw API.
+  requesterEntry   String?   @map("requester_entry")
   // Once Browser B approves, we record the user that will be signed in.
   approvedAt       DateTime? @map("approved_at") @db.Timestamptz(6)
   // No FK to user.id by design: the sign-up-on-approve path may create the user
@@ -648,9 +651,23 @@ model EmailJob {
   expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   failure String?
+  recipientHash Bytes? @map("recipient_hash")
   events EmailRecipientEvent[]
   @@index([state, nextAt])
   @@map("email_jobs")
+}
+// Keyed digest of the recipient; no plaintext address and no FK, so mail-job and journey
+// retention never reaches it.
+model EmailSuppression {
+  recipientHash Bytes     @id @map("recipient_hash")
+  reason        String
+  events        Int       @default(1)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  liftedAt      DateTime? @map("lifted_at") @db.Timestamptz(6)
+  @@index([expiresAt])
+  @@map("email_suppressions")
 }
 model EmailRecipientEvent {
   id String @id

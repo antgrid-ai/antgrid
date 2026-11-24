@@ -43,6 +43,9 @@ const EnvSchema = z
     LEGACY_NATIVE_OAUTH: z.enum(["true", "false"]).optional().transform((v) => v !== "false"),
     EMAIL_REPLY_TO: z.email().default("contact@radhaai.com"),
     ZEPTOMAIL_TOKEN: z.string().optional(),
+    // A development stack holding the shared provider token would send real mail
+    // (and collect real bounces against the shared sender reputation), so it is opt-in.
+    EMAIL_DEV_SEND: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
     ZEPTOMAIL_WEBHOOK_SECRET: z.string().min(16).optional(),
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
     RELAY_INTERNAL_URL: z.string().url().optional(),
@@ -125,6 +128,10 @@ const EnvSchema = z
   .transform((raw, ctx) => {
     if (raw.NODE_ENV === "production" && (!raw.ZEPTOMAIL_TOKEN || !raw.EMAIL_OUTBOX_KEYS || !raw.EMAIL_OUTBOX_ACTIVE_KEY || !raw.ZEPTOMAIL_WEBHOOK_SECRET)) {
       ctx.addIssue({ code: "custom", message: "Production authentication mail requires provider, webhook and outbox encryption configuration" });
+      return z.NEVER;
+    }
+    if ((raw.NODE_ENV === "development" || raw.NODE_ENV === "test") && raw.ZEPTOMAIL_TOKEN && !raw.EMAIL_DEV_SEND) {
+      ctx.addIssue({ code: "custom", path: ["EMAIL_DEV_SEND"], message: "ZEPTOMAIL_TOKEN in development sends real mail through the shared provider account; set EMAIL_DEV_SEND=true to opt in" });
       return z.NEVER;
     }
     let authUrl = raw.BETTER_AUTH_URL;

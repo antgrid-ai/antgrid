@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Radha AI Products
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
+import { normalizePathname } from "@better-auth/core/utils/url";
 import { getOAuthState, isAPIError, createAuthMiddleware } from "better-auth/api";
 import { scopedAuthDb, authTransaction, authScope, lockAuthAccount } from "./transaction.js";
 import { createRequestFlow } from "./request-flow.js";
@@ -8,8 +11,12 @@ import { classifyJourney, createFlow, linkFlowUser, recordStage } from "./flows.
 import { jwtVerify } from "jose";
 import { FlowResultSchema, safeReturnPath, requestOrigin } from "./contracts.js";
 import { recipientLimit, sharedIpLimit } from "./recipient-limit.js";
+import { ADMISSION_REFUSAL, admitRecipient, liftSuppression } from "./email-suppression.js";
+import { isGmail, recipientDigest } from "./recipient-key.js";
+import { mailDomainOf, type MailDomainCheck, type MailDomainVerdict } from "./mail-domain.js";
 import { nativeAuth, digest } from "./native-plugin.js";
 import { authEmail } from "./templates.js";
+import { tokenBucket } from "../util/rate-limit.js";
 import { APIError } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { oneTimeToken } from "better-auth/plugins";
@@ -33,6 +40,9 @@ export type CreateAuthDeps = {
   env: Env;
   db: PrismaClient;
   sendEmail: SendEmail;
+  /** Required so a deployment cannot silently run without the domain check;
+   *  tests pass `acceptAllMailDomains`. */
+  mailDomain: MailDomainCheck;
   /** Test hook: inject an adapter (e.g. `memoryAdapter`) in place of the
    *  Prisma adapter. Production always uses the default. */
   databaseOverride?: Parameters<typeof betterAuth>[0]["database"];
@@ -119,6 +129,26 @@ function appleProvider(env: Env) {
   };
 }
 
+const EMAIL = z.email();
+
+/** Paths that send mail to a caller-chosen address. */
+const MAIL_PATHS = ["/sign-up/email", "/request-password-reset", "/send-verification-email", "/sign-in/cross-device/start"] as const;
+type MailPath = (typeof MAIL_PATHS)[number];
+const isMailPath = (path: unknown): path is MailPath => (MAIL_PATHS as readonly unknown[]).includes(path);
+
+/** Paths where a Gmail address is refused in favour of Google sign-in. Reset,
+ *  verification resend and password sign-in stay open so an existing Gmail
+ *  account keeps every recovery route. */
+const GOOGLE_ONLY_PATHS: ReadonlySet<MailPath> = new Set<MailPath>(["/sign-in/cross-device/start", "/sign-up/email"]);
+
+const PRE_STEP_MAX_BODY_BYTES = 16 * 1024;
+
+/** The DNS verdict is computed before the auth transaction opens so a slow
+ *  lookup never holds one of the few pooled connections; the before-hook reads
+ *  it back from here. It carries the domain it was computed for so the hook
+ *  never applies it to a different address. */
+const mailDomainScope = new AsyncLocalStorage<{ domain: string; verdict: MailDomainVerdict }>();
+
 export function createAuth(deps: CreateAuthDeps) {
   const send = deps.sendEmail;
   deps = { ...deps, sendEmail: async (mail) => {
@@ -178,8 +208,8 @@ export function createAuth(deps: CreateAuthDeps) {
           throw new APIError("FORBIDDEN", { code: "UPGRADE_REQUIRED", message: "Update Antgrid to continue signing in." });
         }
         const email = typeof ctx.body?.email === "string" ? normalizeEmail(ctx.body.email) : undefined;
-        const mailPaths = ["/sign-up/email", "/request-password-reset", "/send-verification-email", "/sign-in/cross-device/start"];
-        if (email && mailPaths.includes(ctx.path)) {
+        const mailPath = isMailPath(ctx.path) ? ctx.path : undefined;
+        if (email && mailPath) {
           const retry = await rateDb.$transaction((tx) => recipientLimit(tx as PrismaClient, deps.env.BETTER_AUTH_SECRET, email));
           if (retry) { authScope.getStore()!.retryAfter = retry; ctx.setHeader("Retry-After", String(retry)); throw new APIError("TOO_MANY_REQUESTS", { code: "EMAIL_THROTTLED", message: "Please wait before requesting another email" }); }
         }
@@ -192,6 +222,16 @@ export function createAuth(deps: CreateAuthDeps) {
           const ip = ctx.headers?.get("x-forwarded-for") ?? "unresolved";
           const retry = await rateDb.$transaction((tx) => sharedIpLimit(tx as PrismaClient, ip, ctx.path, ...rule));
           if (retry) { authScope.getStore()!.retryAfter = retry; ctx.setHeader("Retry-After", String(retry)); throw new APIError("TOO_MANY_REQUESTS"); }
+        }
+        // After both rate limits so probing the suppression list is IP-throttled;
+        // before any account lookup so the answer never depends on whether the
+        // address already has an account.
+        if (email && mailPath) {
+          const scoped = mailDomainScope.getStore();
+          const verdict = scoped && scoped.domain === mailDomainOf(email) ? scoped.verdict : "unknown";
+          const admission = await admitRecipient(deps.db, deps.env.BETTER_AUTH_SECRET, email,
+            verdict, { googleOnly: GOOGLE_ONLY_PATHS.has(mailPath) });
+          if (admission !== "ok") throw new APIError("BAD_REQUEST", ADMISSION_REFUSAL[admission]);
         }
 
         const accountEmails = new Set<string>();
@@ -223,7 +263,7 @@ export function createAuth(deps: CreateAuthDeps) {
         // Recovery may target a different account from the browser's current
         // session; a stable order prevents reciprocal requests from deadlocking.
         for (const accountEmail of [...accountEmails].sort()) await lockAuthAccount(deps.db, accountEmail);
-        if (email && mailPaths.includes(ctx.path)) {
+        if (email && mailPath) {
           if (ctx.path !== "/sign-in/cross-device/start") await createRequestFlow(deps.db,ctx.context.secret,email,
             ctx.path === "/sign-up/email" ? "password" : ctx.path === "/request-password-reset" ? "reset" : "verification",ctx.headers ?? null,
             (name) => ctx.getCookie(name),(name,value,maxAge) => { ctx.setCookie(name,value,{ httpOnly: true,secure: baseURL.startsWith("https:"),sameSite: "lax",path: "/",maxAge }); });
@@ -288,7 +328,14 @@ export function createAuth(deps: CreateAuthDeps) {
             if (user) await lockAuthAccount(deps.db, user.email);
             return { data: session };
           },
-          after: async (session) => {
+          after: async (session, ctx) => {
+            // A trusted social or ID-token sign-in proves the mailbox works, so
+            // it ends any bounce suppression. Password sign-in proves only the
+            // password, and the magic link cannot reach a suppressed address.
+            if (ctx?.path?.startsWith("/callback/") || ctx?.path === "/sign-in/social") {
+              const owner = await deps.db.user.findUnique({ where: { id: session.userId }, select: { email: true, emailVerified: true } });
+              if (owner?.emailVerified) await liftSuppression(deps.db, recipientDigest(deps.env.BETTER_AUTH_SECRET, owner.email));
+            }
             // Backfill billing account for users created before hooks or via
             // internalAdapter.createUser (cross-device), and on every sign-in.
             await linkFlowUser(deps.db, session.userId, "ownership_verified");
@@ -506,11 +553,44 @@ export function createAuth(deps: CreateAuthDeps) {
       return result;
     }); } catch (err) { if (err instanceof RejectedResponse) return err.response; throw err; }
   };
+  // Runs outside any transaction. Fails open: a bad address or a Gmail address
+  // (already decided by the Google-only rule) runs unscoped, and a throwing check
+  // yields "unknown"; both admit the request.
+  const withVerdict = async <T>(email: unknown, fn: () => Promise<T>): Promise<T> => {
+    if (typeof email !== "string" || !EMAIL.safeParse(email.trim()).success || isGmail(email)) return fn();
+    const domain = mailDomainOf(email);
+    if (domain === null) return fn();
+    const verdict = await deps.mailDomain(email.trim()).catch((): MailDomainVerdict => "unknown");
+    return mailDomainScope.run({ domain, verdict }, fn);
+  };
+  // The lookup and body parse run ahead of every before-hook limiter, so they get a
+  // cheap budget of their own. A spent budget yields no email, hence "unknown":
+  // the request is admitted to the hooks, whose limiters then answer it.
+  const preStepBudget = tokenBucket(20, 1);
+  const preStepEmail = async (request: Request): Promise<unknown> => {
+    const length = request.headers.get("content-length");
+    if (/chunked/i.test(request.headers.get("transfer-encoding") ?? "")) return undefined;
+    if (length !== null && !(Number(length) <= PRE_STEP_MAX_BODY_BYTES)) return undefined;
+    if (!preStepBudget(request.headers.get("x-forwarded-for") ?? "unknown")) return undefined;
+    const clone = request.clone();
+    if (/^application\/x-www-form-urlencoded/i.test(request.headers.get("content-type") ?? "")) {
+      const text = await clone.text().catch(() => "");
+      if (text.length > PRE_STEP_MAX_BODY_BYTES) return undefined;
+      return new URLSearchParams(text).get("email") ?? undefined;
+    }
+    return (await clone.json().catch(() => null) as { email?: unknown } | null)?.email;
+  };
   return new Proxy(auth, { get(target, key) {
-    if (key === "handler") return (request: Request) => invoke(() => target.handler(request));
+    if (key === "handler") return async (request: Request) => {
+      const email = request.method === "POST" && isMailPath(normalizePathname(request.url, "/api/auth"))
+        ? await preStepEmail(request) : undefined;
+      return withVerdict(email, () => invoke(() => target.handler(request)));
+    };
     if (key === "api") return new Proxy(target.api, { get(api, name) {
       const fn = Reflect.get(api, name);
-      return typeof fn === "function" ? (...args: unknown[]) => invoke(async () => {
+      return typeof fn === "function" ? (...args: unknown[]) => withVerdict(
+        isMailPath((fn as { path?: unknown }).path) ? (args[0] as { body?: { email?: unknown } } | undefined)?.body?.email : undefined,
+        () => invoke(async () => {
         try { return await fn(...args); }
         catch (error) {
           if ((args[0] as { asResponse?: boolean } | undefined)?.asResponse && isAPIError(error)) {
@@ -520,7 +600,7 @@ export function createAuth(deps: CreateAuthDeps) {
           }
           throw error;
         }
-      }) : fn;
+      })) : fn;
     } });
     return Reflect.get(target, key);
   } });

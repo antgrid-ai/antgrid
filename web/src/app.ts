@@ -32,6 +32,7 @@ import type { Auth } from "./auth/better-auth.js";
 import type { Env } from "./env.js";
 import type { RelayPushConfig } from "./relay/push.js";
 import type { SendEmail } from "./auth/email.js";
+import type { MailDomainCheck } from "./auth/mail-domain.js";
 import { makeClientIpResolver } from "./util/client-ip.js";
 import { hidePricingMiddleware } from "./ui/pricing-visibility.js";
 import { oauthTokenRateLimit } from "./auth/oauth-token-rate-limit.js";
@@ -46,6 +47,9 @@ export type AppDeps = {
    *  reference: invite mail is sent from a plain Hono handler, which has no
    *  `auth.api.*` endpoint behind it to borrow the sender from. */
   sendEmail: SendEmail;
+  /** Required so a stack can never ship with the domain check silently off; the
+   *  caller hands the same one to Better-Auth. */
+  mailDomain: MailDomainCheck;
   /** Replaces the client built from `env`, so tests need not reach Apple.
    *  An explicit undefined turns Apple's server calls off. */
   appleTokens?: AppleTokenClient;
@@ -147,6 +151,9 @@ export function buildApp(deps: AppDeps) {
     const ip = clientIp(c);
     if (ip) headers.set("x-forwarded-for", ip);
     else headers.delete("x-forwarded-for");
+    // Only the web UI's in-process calls set this, and they never cross this
+    // route; honouring it here would let a raw API caller claim the web form.
+    headers.delete("x-antgrid-entry");
     return deps.auth.handler(new Request(c.req.raw, { headers }));
   });
   app.route("/", health);
@@ -188,6 +195,7 @@ export function buildApp(deps: AppDeps) {
     relay: deps.relay,
     clientIp,
     sendEmail: deps.sendEmail,
+    mailDomain: deps.mailDomain,
     apple: appleTokens,
   }));
 

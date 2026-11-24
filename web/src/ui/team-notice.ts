@@ -31,6 +31,7 @@ export const TeamNoticeSchema = z.enum([
   "not_a_member",
   "forbidden",
   "throttled",
+  "undeliverable",
   "failed",
 ]);
 export type TeamNotice = z.infer<typeof TeamNoticeSchema>;

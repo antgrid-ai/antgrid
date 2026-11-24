@@ -3,6 +3,8 @@
 
 import { Layout } from "./layout.js";
 import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
+import { ProviderIcon } from "./login.js";
+
 
 export type SignUpPageProps = {
   /** Carried in from step 2's "create one" link, so deciding to sign up never
@@ -115,6 +117,22 @@ export function SignUpPage({
               Create account
             </button>
           </form>
+
+          {/* Gmail addresses are refused by the form above, so the door they are
+              sent to has to be on this page. */}
+          <div class="mt-4 mb-4 flex items-center gap-3 text-xs text-muted">
+            <span class="h-px flex-1 bg-edge" />
+            <span>or</span>
+            <span class="h-px flex-1 bg-edge" />
+          </div>
+          <a
+            href="/oauth/start?provider=google&callbackURL=/dashboard"
+            class="btn btn-quiet relative h-11 w-full gap-2 px-2 shadow-none text-sm font-medium"
+            data-ab-remember="google"
+          >
+            <ProviderIcon provider="google" />
+            <span>Continue with Google</span>
+          </a>
 
           <p class="text-xs text-muted mt-4 text-center">
             Already have an account?{" "}

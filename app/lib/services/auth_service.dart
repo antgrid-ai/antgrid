@@ -409,10 +409,30 @@ class AuthService {
         kind: AuthFailure.unavailable,
       );
     }
-    throw AuthException(
-      'Request was not accepted. Check your details and try again.',
-      kind: AuthFailure.validation,
-    );
+    throw _specificRejection(response) ??
+        AuthException(
+          'Request was not accepted. Check your details and try again.',
+          kind: AuthFailure.validation,
+        );
+  }
+
+  // The server refuses some addresses before any account lookup, with a code
+  // that says what the user can do about it. Unknown codes and unparseable
+  // bodies fall through to the caller's generic copy.
+  static const _rejectionCopy = {
+    'EMAIL_USE_GOOGLE':
+        'Gmail addresses sign in with Google. Choose Google on the sign-in screen.',
+    'EMAIL_UNDELIVERABLE':
+        "We can't send email to that address. Check the spelling, or use a different address.",
+    'EMAIL_DOMAIN_UNDELIVERABLE':
+        "That email domain can't receive mail. Check the part after the @.",
+  };
+
+  static AuthException? _specificRejection(http.Response response) {
+    final code = _errorCode(response);
+    final message = code == null ? null : _rejectionCopy[code];
+    if (message == null) return null;
+    return AuthException(message, kind: AuthFailure.validation);
   }
 
   static DateTime? _parseHttpDate(String value) {
@@ -1006,7 +1026,8 @@ class AuthService {
     });
     if (res.statusCode >= 200 && res.statusCode < 300) return _flowReceipt(res);
     if (res.statusCode == 429 || res.statusCode >= 500) _checkAccepted(res);
-    throw AuthException('Could not create the account. Try again.');
+    throw _specificRejection(res) ??
+        AuthException('Could not create the account. Try again.');
   }
 
   /// Ask the server to re-send the verification link for [email].

@@ -3,9 +3,10 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { buildTestApp, TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
 import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember } from "../helpers/fixtures.js";
 import { createAuth } from "../../src/auth/better-auth.js";
+import { acceptAllMailDomains } from "../../src/auth/mail-domain.js";
 import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount, TEAM_HAS_MEMBERS_MESSAGE } from "../../src/services/account.js";
 import { ensureFreeSubscription, provisionProductAccountForUser } from "../../src/models/subscription.js";
@@ -27,6 +28,7 @@ function authFor(db: typeof pg.db, url: string) {
            EMAIL_FROM: "Antgrid <no-reply@radhaai.org>", NODE_ENV: "test" } as never,
     db,
     sendEmail: createEmailSender({ zeptoToken: undefined, from: "x@y.z" }),
+    mailDomain: acceptAllMailDomains,
   });
 }
 
@@ -92,7 +94,7 @@ describe("deleteUserAccount", () => {
     await pg.db.user.update({ where: { id: user.id }, data: { registrationOrigin: origin, activationOrigin: origin } });
     const linked = await pg.db.authJourney.create({ data: { userId: user.id, origin } });
     const flow = await pg.db.authFlow.create({ data: { journeyId: linked.id, expiresAt: new Date(Date.now()+600000) } });
-    const sendEmail = createOutboxSender(pg.db, new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") }));
+    const sendEmail = createOutboxSender(pg.db, new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") }), { recipientSecret: TEST_BETTER_AUTH_SECRET });
     const { app, auth } = buildTestApp(pg.db, pg.url, { sendEmail });
     await sendEmail({ to: user.email, subject: "Review", text: "private token", expiresAt: flow.expiresAt });
     const orphan = await pg.db.emailJob.findFirstOrThrow();
