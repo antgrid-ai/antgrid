@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   ByteBudget, copyWholeLines, refusesRealStoreUnderTest, SAFE_NATIVE_ID, writeText,
-  type HandoffFile, type HandoffReference, type HandoffSnapshotFn,
+  type HandoffFile, type HandoffReference, type HandoffSnapshot, type HandoffSnapshotFn,
 } from "../handoff";
 
 // meta.json embeds the whole config, tool schemas and system prompt, so a few
@@ -89,6 +89,104 @@ async function uniqueDirectorySession(saveDir: string, sourceCwd: string, notBef
   return found;
 }
 
+// Vibe 3 replaced the per-session messages.jsonl with an event-sourced store at
+// <save dir>/unified/<id>: CURRENT names the latest settled generation, whose
+// manifest points at documents that keep their transcripts in a
+// content-addressed chunk pool (store format minor 4+; earlier minors keep them
+// inline). Read against mistralai_vibe_local_harness/vibe/_storage.py, 3.1.4.
+const UNIFIED_HISTORY = "vibe-history.jsonl";
+const UNIFIED_CONTEXT = "vibe-context.jsonl";
+const MAX_UNIFIED_DOCUMENT_BYTES = 64 * 1024 * 1024;
+const DIGEST = /^[0-9a-f]{64}$/;
+const StoredFile = z.object({
+  path: z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/),
+  chunks: z.array(z.string().regex(DIGEST)).nullish(),
+});
+const Current = z.object({ session_id: z.string(), generation: z.string().regex(/^[0-9]{1,32}$/) });
+const Manifest = z.object({
+  session_id: z.string(),
+  generation: z.string(),
+  checkpoint: StoredFile,
+  projection_state: StoredFile,
+  recovery_journal_segment: z.object({ path: z.string().regex(/^journal\/[0-9]{1,32}\.jsonl$/) }).nullish(),
+});
+
+const isRec = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+async function readUnifiedJson(path: string): Promise<unknown> {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.size > MAX_UNIFIED_DOCUMENT_BYTES) return undefined;
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** A chunked document holds an empty list where its transcript goes; the
+ * chunks, in order, are that list. */
+async function unifiedTranscript(
+  sessionDir: string,
+  generationDir: string,
+  file: z.infer<typeof StoredFile>,
+  container: readonly string[],
+): Promise<unknown[] | undefined> {
+  if (file.chunks) {
+    const items: unknown[] = [];
+    for (const digest of file.chunks) {
+      const run = await readUnifiedJson(join(sessionDir, "chunks", `${digest}.json`));
+      if (!Array.isArray(run)) return undefined;
+      items.push(...run);
+    }
+    return items;
+  }
+  let node = await readUnifiedJson(join(generationDir, file.path));
+  for (const key of container) node = isRec(node) ? node[key] : undefined;
+  return Array.isArray(node) ? node : undefined;
+}
+
+const jsonl = (items: unknown[]) => items.map((item) => `${JSON.stringify(item)}\n`).join("");
+
+/** The public projection's history is what Vibe's UI shows: messages, tool
+ * effects and compaction markers. The checkpoint's context is the model's
+ * window, and only it carries the compaction summary text. */
+async function snapshotUnified(dir: string, id: string, outDir: string, signal: AbortSignal | undefined): Promise<HandoffSnapshot | undefined> {
+  const current = Current.safeParse(await readUnifiedJson(join(dir, "CURRENT")));
+  if (!current.success || current.data.session_id !== id) return undefined;
+  const generationDir = join(dir, "generations", current.data.generation);
+  const parsed = Manifest.safeParse(await readUnifiedJson(join(generationDir, "manifest.json")));
+  if (!parsed.success || parsed.data.session_id !== id || parsed.data.generation !== current.data.generation) return undefined;
+  const manifest = parsed.data;
+  const history = await unifiedTranscript(dir, generationDir, manifest.projection_state, ["snapshot", "history", "entries"]);
+  if (!history) return undefined;
+  const context = await unifiedTranscript(dir, generationDir, manifest.checkpoint, ["context", "messages"]);
+
+  const budget = new ByteBudget(undefined, signal);
+  const files: HandoffFile[] = [await writeText(outDir, UNIFIED_HISTORY, jsonl(history), "transcript", budget)];
+  const warnings: string[] = [];
+  if (context) files.push(await writeText(outDir, UNIFIED_CONTEXT, jsonl(context), "sidecar", budget));
+  else warnings.push("Vibe's model context could not be read, so no compaction summary is included.");
+  const meta = await readMeta(dir);
+  if (meta) files.push(await writeText(outDir, "vibe-meta.json", `${JSON.stringify(allowlistedMeta(meta), null, 2)}\n`, "sidecar", budget));
+  // Records after the settled generation belong to a turn still in flight.
+  const segment = manifest.recovery_journal_segment?.path;
+  if (segment) {
+    const info = await lstat(join(dir, ...segment.split("/"))).catch(() => undefined);
+    if (info?.isFile() && info.size > 0) warnings.push("Vibe had not settled its latest turn, so its newest messages may be missing.");
+  }
+  return {
+    agent: "mistral-vibe",
+    agentSessionId: id,
+    method: "copy",
+    primary: UNIFIED_HISTORY,
+    files,
+    references: [],
+    redactions: ["meta.json (kept session_id, start_time, end_time, environment.working_directory, origin_directory; dropped the username, config and the rest)"],
+    warnings,
+  };
+}
+
 function allowlistedMeta(meta: Meta): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
   for (const key of ["session_id", "start_time", "end_time"] as const) if (meta[key] !== undefined) kept[key] = meta[key];
@@ -118,6 +216,10 @@ export const snapshotVibe: HandoffSnapshotFn = async (opts) => {
   let resolvedId = id;
   if (id) {
     dir = await hintedSessionDir(saveDir, opts.transcriptPath, id) ?? await idSessionDir(saveDir, id);
+    // The hook's transcript_path on 3.x is this same directory, so the id alone
+    // locates it.
+    const unified = join(saveDir, "unified", id);
+    if (!dir && await isDirectory(unified)) return snapshotUnified(unified, id, opts.outDir, opts.signal);
   } else {
     const match = await uniqueDirectorySession(saveDir, opts.sourceCwd, opts.sourceCreatedAt);
     dir = match?.dir;

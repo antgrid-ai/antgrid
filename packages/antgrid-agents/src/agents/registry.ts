@@ -53,6 +53,7 @@ import { antigravityFork } from "./antigravity/fork";
 import { kimiFork } from "./kimi/fork";
 import { vibeFork } from "./mistral-vibe/fork";
 import * as vibeHooks from "./mistral-vibe/hooks";
+import { normalizeVibeOscTitle } from "./mistral-vibe/title";
 import {
   readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
 } from "./usage-envelope";
@@ -596,6 +597,7 @@ const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
     hookDir: null,
     notificationSource: "osc",
     titleSource: "osc",
+    normalizeOscTitle: normalizeVibeOscTitle,
     resume: () => [],
     initialPrompt: () => [],
     // v2.24.5. The trust dialog (shown for a folder with AGENTS.md or .vibe/)

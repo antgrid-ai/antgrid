@@ -109,3 +109,63 @@ test("the instruction appended to a handoff prompt stays the user's own text", a
     [false, expect.stringContaining("antgrid-fork-transcript"), true],
   ]);
 });
+
+// Vibe 3 snapshots: the projection history entries and the model context
+// messages, in the shapes 3.1.4 writes them.
+async function parseUnified(history: readonly unknown[], context?: readonly unknown[]): Promise<HandoffEvent[]> {
+  const dir = mkdtempSync(join(tmpdir(), "vibe-events-"));
+  dirs.push(dir);
+  const lines = (items: readonly unknown[]) => items.map((item) => JSON.stringify(item)).join("\n") + "\n";
+  writeFileSync(join(dir, "vibe-history.jsonl"), lines(history));
+  const files: HandoffSnapshot["files"] = [{ name: "vibe-history.jsonl", role: "transcript", bytes: 0, sha256: "" }];
+  if (context) {
+    writeFileSync(join(dir, "vibe-context.jsonl"), lines(context));
+    files.push({ name: "vibe-context.jsonl", role: "sidecar", bytes: 0, sha256: "" });
+  }
+  const manifest: HandoffSnapshot = {
+    agent: "mistral-vibe", method: "copy", primary: "vibe-history.jsonl", files, references: [], redactions: [], warnings: [],
+  };
+  const events: HandoffEvent[] = [];
+  await vibeEvents(dir, manifest, (event) => events.push(event), new AbortController().signal);
+  return events;
+}
+
+const message = (role: string, text: string) => ({ type: "message", role, id: `${role}-${text}`, content: [{ type: "text", text }] });
+const effect = (toolName: string, input: unknown, state: unknown) => ({ type: "effect", id: `effect-${toolName}`, detail: { kind: "tool", toolName, input }, state });
+const compaction = (id: string) => ({ type: "checkpoint", kind: "compaction", id, message: "Context compacted", details: { trigger: "manual" } });
+const summaryContext = (summary: string) => ({
+  message: { role: "user", content: [{ type: "text", text: `</previous_user_messages>\n\nHere is a summary of what has happened so far:\n\n<compaction_summary>\n${summary}\n</compaction_summary>` }] },
+  source: "injection", turn_index: 0,
+});
+
+test("Vibe 3: messages, settled tool effects and hook notices", async () => {
+  const events = await parseUnified([
+    { type: "notice", id: "hook-notice-1", detail: { kind: "hook_run_started", scope: "pre_agent" }, message: "Running hooks" },
+    message("user", "read the readme"),
+    message("assistant", "looking"),
+    effect("file_system.read_file", { path: "README.md" }, {
+      status: "completed", outputText: "",
+      output: { content: [], structured_content: { content: "# Title\n", path: "/repo/README.md" }, type: "success" },
+    }),
+    effect("bash", { command: "false" }, { status: "failed", error: { message: "exit 1" }, outputText: "" }),
+    effect("bash", { command: "sleep 9" }, { status: "running", outputText: "" }),
+    message("assistant", "done"),
+  ]);
+  expect(events.map((event) => event.kind)).toEqual(["user", "assistant", "tool_call", "tool_result", "tool_call", "tool_result", "tool_call", "assistant"]);
+  expect(events[0]).toMatchObject({ text: "read the readme", genuine: true, at: "vibe-history.jsonl:2" });
+  expect(events[2]).toMatchObject({ name: "file_system.read_file", input: '{"path":"README.md"}' });
+  expect(events[3]).toMatchObject({ name: "file_system.read_file", output: "# Title\n" });
+  expect(events[5]).toMatchObject({ output: "exit 1", isError: true });
+});
+
+test("Vibe 3: only the latest compaction carries the summary from the model context", async () => {
+  const events = await parseUnified(
+    [message("user", "one"), compaction("c1"), message("user", "two"), compaction("c2"), message("user", "three")],
+    [summaryContext("OLDER SUMMARY"), summaryContext("LATEST SUMMARY"), { message: { role: "assistant", content: [{ type: "text", text: "x" }] }, source: "history" }],
+  );
+  const compactions = events.filter((event) => event.kind === "compaction");
+  expect(compactions).toHaveLength(2);
+  expect(compactions[0]).toMatchObject({ note: expect.any(String) });
+  expect(compactions[1]).toMatchObject({ summary: "LATEST SUMMARY", at: "vibe-history.jsonl:4" });
+  expect((await parseUnified([compaction("c1")]))[0]).toMatchObject({ note: expect.any(String) });
+});

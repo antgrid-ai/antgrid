@@ -28,7 +28,11 @@ export const resolveAgentEnv = (tool: string, abDir = agentRuntime.host.stateDir
 export const notificationSourceFor = (tool: string) => agentSpec(tool)?.notificationSource ?? "osc";
 export const titleSourceFor = (tool: string) => agentSpec(tool)?.titleSource ?? "osc";
 export const isOscTitleUnusable = (tool: string | undefined) => !!tool && agentSpec(tool)?.oscTitleUnusable === true;
-export const oscTitleForNaming = (tool: string | undefined, raw: string) => tool && isOscTitleUnusable(tool) ? agentSpec(tool)!.label : raw;
+export const oscTitleForNaming = (tool: string | undefined, raw: string) => {
+  const spec = tool ? agentSpec(tool) : undefined;
+  if (spec?.oscTitleUnusable) return spec.label;
+  return spec?.normalizeOscTitle?.(raw) ?? raw;
+};
 export const suppressesOscNotifications = (tool: string, available: boolean | TerminalObservationAvailability | undefined) =>
   notificationSourceFor(tool) === "plugin" && (typeof available === "object" ? available.notifications : available !== false);
 export const suppressesOscTitle = (tool: string, available: boolean | TerminalObservationAvailability | undefined) =>

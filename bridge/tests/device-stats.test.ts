@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
-import { availableFromVmStat, createDeviceStatsStore, type DeviceStatsStore } from "../src/device-stats";
+import { availableFromVmStat, createCpuPercentReader, createDeviceStatsStore, type DeviceStatsStore } from "../src/device-stats";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, parseMessage, type AbMessage } from "../src/protocol";
 import { loadPairedPhones } from "../src/paired-phones";
@@ -115,6 +115,16 @@ test("a remote app that asks is told this machine's RAM and CPU load", async () 
   expect(msg.ramAvailableBytes).toBeLessThanOrEqual(msg.ramTotalBytes!);
   expect(msg.cpuPercent).toBeGreaterThanOrEqual(0);
   expect(msg.cpuPercent).toBeLessThanOrEqual(100);
+});
+
+test("CPU load is reported before the first sampling window has elapsed", () => {
+  // Per-core times count from boot. A 4-core host asked 50 ms after start has
+  // accrued ~200 ms of CPU time, far short of a full window.
+  const samples = [{ busy: 250, total: 1000 }, { busy: 260, total: 1100 }, { busy: 1750, total: 3000 }];
+  const read = createCpuPercentReader(() => samples.shift()!);
+
+  expect(read()).toBe(25);
+  expect(read()).toBe(75);
 });
 
 test("device:stats from a known device is recorded on its row", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { safeJoin } from "../src/agents/handoff";
@@ -151,4 +152,99 @@ test("Vibe snapshot is refused under the test runner without a seam", async () =
 test("Vibe fork is a terminal-transcript fork that carries the snapshot", () => {
   expect(vibeFork.kind).toBe("terminal-transcript");
   expect(vibeFork.snapshot).toBe(snapshotVibe);
+});
+
+// Vibe 3's unified store, in the shape 3.1.4 writes (store format v1 minor 10):
+// CURRENT -> generations/<n>/manifest.json -> documents whose transcripts live in
+// chunks/<sha256>.json, plus meta.json and a journal segment for the next turn.
+const UNIFIED_ID = "0f1e2d3c-4b5a-1697-8899-aabbccddeeff";
+const HISTORY = [
+  { type: "notice", id: "hook-notice-1", detail: { kind: "hook_run_started", scope: "pre_agent" }, message: "Running hooks" },
+  { type: "message", role: "user", id: "rs-1", source: "turn_start", content: [{ type: "text", text: "first prompt" }] },
+  { type: "message", role: "assistant", id: "assistant-1", content: [{ type: "text", text: "first answer" }], outcome: { type: "committed" } },
+];
+const CONTEXT = [
+  { message: { role: "user", content: [{ type: "text", text: "first prompt" }] }, source: "history", turn_index: 0 },
+  { message: { role: "assistant", content: [{ type: "text", text: "first answer" }] }, source: "history", turn_index: 0 },
+];
+
+function unifiedSession(saveDir: string, id = UNIFIED_ID, journal = "") {
+  const dir = join(saveDir, "unified", id);
+  const generation = "0000000000000012";
+  mkdirSync(join(dir, "chunks"), { recursive: true });
+  mkdirSync(join(dir, "generations", generation), { recursive: true });
+  mkdirSync(join(dir, "journal"), { recursive: true });
+  const chunk = (items: unknown[]) => {
+    const body = JSON.stringify(items);
+    const digest = createHash("sha256").update(body).digest("hex");
+    writeFileSync(join(dir, "chunks", `${digest}.json`), body);
+    return digest;
+  };
+  const historyChunks = [chunk(HISTORY.slice(0, 2)), chunk(HISTORY.slice(2))];
+  const contextChunks = [chunk(CONTEXT)];
+  const gen = join(dir, "generations", generation);
+  writeFileSync(join(gen, "checkpoint.json"), JSON.stringify({ checkpoint_version: 1, compaction_count: 0, context: { messages: [] } }));
+  writeFileSync(join(gen, "projection-state.json"), JSON.stringify({
+    projection_state_version: 1, session_id: id,
+    snapshot: { format: "harness.public-session-state/v1", history: { cursor: { after: null, before: null }, entries: [], range: "latest" } },
+  }));
+  writeFileSync(join(gen, "runtime-state.json"), "{}");
+  writeFileSync(join(gen, "manifest.json"), JSON.stringify({
+    checkpoint: { checkpoint_version: 1, chunks: contextChunks, path: "checkpoint.json", sha256: "0".repeat(64) },
+    execution_state: "quiescent", generation, manifest_version: 1,
+    projection_state: { chunks: historyChunks, path: "projection-state.json", sha256: "0".repeat(64) },
+    recovery_journal_segment: { first_sequence: 13, path: "journal/0000000000000013.jsonl" },
+    runtime_state: { chunks: null, path: "runtime-state.json", sha256: "0".repeat(64) },
+    session_id: id, snapshot_sequence: 12,
+  }));
+  writeFileSync(join(dir, "journal", "0000000000000013.jsonl"), journal);
+  writeFileSync(join(dir, "CURRENT"), JSON.stringify({
+    generation, manifest_sha256: "0".repeat(64), session_id: id, snapshot_sequence: 12,
+    store_format: "mistral.vibe.unified-session-store/v1", store_format_minor: 10,
+  }));
+  writeFileSync(join(dir, "meta.json"), JSON.stringify({
+    session_id: id, parent_session_id: null, start_time: "2026-01-01T12:00:00+00:00", end_time: null,
+    environment: { working_directory: "/repo" }, origin_directory: "/repo", username: "someone",
+    title: "SECRET-TITLE", config: { active_model: "SECRET-MODEL" }, runtime_path: "session_api",
+  }, null, 2));
+  return dir;
+}
+
+test("Vibe 3 snapshot reassembles the projection history and model context from the chunk pool", async () => {
+  const { home, saveDir } = store();
+  const dir = unifiedSession(saveDir);
+  const outDir = temp("antgrid-vibe-out-");
+  const snapshot = await run(home, { outDir, agentSessionId: UNIFIED_ID, transcriptPath: dir });
+  expect(snapshot?.primary).toBe("vibe-history.jsonl");
+  expect(snapshot?.agentSessionId).toBe(UNIFIED_ID);
+  expect(snapshot?.files.map((file) => file.name)).toEqual(["vibe-history.jsonl", "vibe-context.jsonl", "vibe-meta.json"]);
+  expect(readFileSync(join(outDir, "vibe-history.jsonl"), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(HISTORY);
+  expect(readFileSync(join(outDir, "vibe-context.jsonl"), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line))).toEqual(CONTEXT);
+  expect(readFileSync(join(outDir, "vibe-meta.json"), "utf8")).not.toContain("SECRET");
+  expect(snapshot?.warnings).toEqual([]);
+  for (const file of snapshot!.files) expect(() => safeJoin(outDir, file.name)).not.toThrow();
+});
+
+test("Vibe 3 snapshot warns when the journal holds a turn after the settled generation", async () => {
+  const { home, saveDir } = store();
+  unifiedSession(saveDir, UNIFIED_ID, '{"sequence":13,"type":"command_reserved","payload":{}}\n');
+  const snapshot = await run(home, { agentSessionId: UNIFIED_ID });
+  expect(snapshot?.warnings).toHaveLength(1);
+});
+
+test("Vibe 3 snapshot refuses a store whose CURRENT names another session", async () => {
+  const { home, saveDir } = store();
+  const dir = unifiedSession(saveDir);
+  const current = JSON.parse(readFileSync(join(dir, "CURRENT"), "utf8"));
+  writeFileSync(join(dir, "CURRENT"), JSON.stringify({ ...current, session_id: "ffffffff-0000-0000-0000-000000000000" }));
+  expect(await run(home, { agentSessionId: UNIFIED_ID })).toBeUndefined();
+});
+
+test("Vibe 3 snapshot never follows a chunk name out of the pool", async () => {
+  const { home, saveDir } = store();
+  const dir = unifiedSession(saveDir);
+  const path = join(dir, "generations", "0000000000000012", "manifest.json");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...manifest, projection_state: { ...manifest.projection_state, chunks: ["../../meta"] } }));
+  expect(await run(home, { agentSessionId: UNIFIED_ID })).toBeUndefined();
 });
