@@ -16,20 +16,27 @@ function sampleCpuTimes(): { busy: number; total: number } {
  *  sampler and can ask within the same instant. */
 const MIN_CPU_WINDOW_MS = 1000;
 
-let lastCpu = sampleCpuTimes();
-let lastCpuPercent: number | undefined;
+const busyPercent = (busy: number, total: number) => Math.min(100, Math.max(0, Math.round((busy / total) * 100)));
 
-/** Whole-machine busy share since the last usable sample, 0-100. Primed at
- *  import, so the first report averages over the process's lifetime. */
-function readCpuPercent(): number | undefined {
-  const now = sampleCpuTimes();
-  const total = now.total - lastCpu.total;
-  if (total >= MIN_CPU_WINDOW_MS) {
-    lastCpuPercent = Math.min(100, Math.max(0, Math.round(((now.busy - lastCpu.busy) / total) * 100)));
-    lastCpu = now;
-  }
-  return lastCpuPercent;
+/** A reader of the whole-machine busy share since the last usable sample,
+ *  0-100. Per-core times count from boot, so until the first window has
+ *  elapsed the reader answers with the since-boot average: a host with few
+ *  cores can be asked well inside that window right after it starts. */
+export function createCpuPercentReader(sample = sampleCpuTimes): () => number | undefined {
+  let last = sample();
+  let lastPercent = last.total > 0 ? busyPercent(last.busy, last.total) : undefined;
+  return () => {
+    const now = sample();
+    const total = now.total - last.total;
+    if (total >= MIN_CPU_WINDOW_MS) {
+      lastPercent = busyPercent(now.busy - last.busy, total);
+      last = now;
+    }
+    return lastPercent;
+  };
 }
+
+const readCpuPercent = createCpuPercentReader();
 
 type MachineStats = { ramTotalBytes: number; ramAvailableBytes: number; cpuPercent?: number };
 
