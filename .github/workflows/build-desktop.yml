@@ -348,6 +348,9 @@ jobs:
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
+      - name: Smoke test compiled bridge leaves no pty library in temp
+        run: bun run bridge/scripts/smoke-pty-lib-binary.ts bridge/dist/antgrid-bridge
+
       - name: Smoke test compiled db serializer worker
         run: bun run bridge/scripts/smoke-db-serialize-binary.ts
 
@@ -795,6 +798,10 @@ jobs:
         shell: pwsh
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge.exe
 
+      - name: Smoke test compiled bridge leaves no pty library in temp
+        shell: pwsh
+        run: bun run bridge/scripts/smoke-pty-lib-binary.ts bridge/dist/antgrid-bridge.exe
+
       - name: Smoke test compiled db serializer worker
         shell: pwsh
         run: bun run bridge/scripts/smoke-db-serialize-binary.ts
@@ -1042,6 +1049,9 @@ jobs:
         run: bun run --filter antgrid-agents smoke:assets
       - name: Smoke test compiled bridge mcp
         run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled bridge leaves no pty library in temp
+        run: bun run bridge/scripts/smoke-pty-lib-binary.ts bridge/dist/antgrid-bridge
 
       - name: Smoke test compiled db serializer worker
         run: bun run bridge/scripts/smoke-db-serialize-binary.ts

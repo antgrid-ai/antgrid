@@ -14,7 +14,7 @@ export interface AtomicWriteOptions {
 // impersonate the App. Trust model on Windows is therefore "any process
 // running as the same user has full agent access". For multi-user Windows
 // hardening, restrict the containing dir via `icacls` to the current user.
-export function atomicWriteFile(path: string, content: string, opts: AtomicWriteOptions = {}): void {
+export function atomicWriteFile(path: string, content: string | Uint8Array, opts: AtomicWriteOptions = {}): void {
   mkdirSync(dirname(path), { recursive: true, mode: opts.dirMode });
   reapAbandonedScratch(path);
   // Scoped to the pid rather than shared: the `antgrid` CLI writes these same

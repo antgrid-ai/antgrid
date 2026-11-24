@@ -1,8 +1,8 @@
 import { resolveTerminalInvocation, type TerminalInvocationHost } from "./terminal-invocation";
 import { needsShellForAgentBinary, prepareAgentBinary, stripParentClaudeSession } from "antgrid-agents/terminal-platform";
 import { agentRuntime } from "./agent-host";
-import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
+import { loadBunPty } from "./pty-native-lib";
 import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
@@ -679,6 +679,7 @@ export class TerminalSession {
 
     prepareAgentBinary(this.command ?? "", env, agentRuntime.agents);
 
+    const { spawn: ptySpawn } = loadBunPty();
     this.pty = ptySpawn(invocation.command, invocation.args, {
       cols: this._cols,
       rows: this._rows,
