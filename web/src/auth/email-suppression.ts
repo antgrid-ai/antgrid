@@ -4,16 +4,16 @@
 import { z } from "zod";
 import type { Tx } from "../db/index.js";
 import type { MailDomainVerdict } from "./mail-domain.js";
-import { canonicalMailbox, recipientDigest } from "./recipient-key.js";
+import { isGmail, recipientDigest } from "./recipient-key.js";
 
 const DAY_MS = 86400000;
+const EMAIL = z.email();
 
 /** A recipient-side bounce is strong evidence the mailbox is dead; an unclassifiable
  *  one only earns a short pause so a misread reason cannot lock a real user out. */
-export const SUPPRESSION_TTL_MS = {
+const SUPPRESSION_TTL_MS = {
   recipient: 180 * DAY_MS,
   unclassified: 7 * DAY_MS,
-  complaint: 30 * DAY_MS,
 } as const;
 
 export type BounceClass = "recipient" | "unclassified" | "transient" | "sender";
@@ -78,7 +78,7 @@ export async function isSuppressed(db: Tx, hash: Uint8Array<ArrayBuffer>): Promi
 export async function suppressRecipient(
   tx: Tx,
   hash: Uint8Array<ArrayBuffer>,
-  reason: "recipient" | "unclassified" | "complaint",
+  reason: "recipient" | "unclassified",
   jobCreatedAt: Date,
 ): Promise<void> {
   const ttlMs = SUPPRESSION_TTL_MS[reason];
@@ -107,6 +107,12 @@ export async function sweepSuppressions(db: Tx): Promise<void> {
 
 export type Admission = "ok" | "google" | "domain" | "suppressed";
 
+export const ADMISSION_REFUSAL: Record<Exclude<Admission, "ok">, { code: string; message: string }> = {
+  google: { code: "EMAIL_USE_GOOGLE", message: "Gmail addresses sign in with Google. Use Continue with Google." },
+  domain: { code: "EMAIL_DOMAIN_UNDELIVERABLE", message: "That email domain can't receive mail. Check the part after the @." },
+  suppressed: { code: "EMAIL_UNDELIVERABLE", message: "We can't send email to that address. Check the spelling, or use a different address." },
+};
+
 /** The single existence-blind admission decision for outbound sign-in mail: it looks
  *  only at the address, never at whether an account exists. */
 export async function admitRecipient(
@@ -116,8 +122,8 @@ export async function admitRecipient(
   domain: MailDomainVerdict,
   opts: { googleOnly: boolean },
 ): Promise<Admission> {
-  if (!z.email().safeParse(email).success) return "ok";
-  if (opts.googleOnly && canonicalMailbox(email).endsWith("@gmail.com")) return "google";
+  if (!EMAIL.safeParse(email).success) return "ok";
+  if (opts.googleOnly && isGmail(email)) return "google";
   if (domain === "no_mail") return "domain";
   if (await isSuppressed(db, recipientDigest(secret, email))) return "suppressed";
   return "ok";

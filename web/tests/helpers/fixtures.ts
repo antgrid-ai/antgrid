@@ -5,7 +5,11 @@ import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import type { DeviceKind, Platform } from "../../src/models/device.js";
 import { PLAN_UUID } from "../../src/models/plan.js";
-import { TEST_BETTER_AUTH_SECRET } from "./app.js";
+import { EmailKeyring, createOutboxSender } from "../../src/auth/email-outbox.js";
+import { recipientDigest } from "../../src/auth/recipient-key.js";
+import { liftSuppression, suppressRecipient } from "../../src/auth/email-suppression.js";
+import type { MailDomainCheck } from "../../src/auth/mail-domain.js";
+import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "./app.js";
 
 /** HMAC-SHA-256 signature using the same algorithm Hono's serializeSigned uses. */
 async function makeSignature(value: string, secret: string): Promise<string> {
@@ -159,4 +163,44 @@ export async function createTestDevice(
     select: { id: true, deviceId: true, publicKey: true },
   });
   return { id: row.id, deviceId: row.deviceId, publicKey: new Uint8Array(row.publicKey) };
+}
+
+/** Suppresses an address through the production writer so rows carry the same
+ *  shape and merge semantics the webhook produces. `expiresAt` and `lifted` are
+ *  applied afterwards because the writer only ever stamps a fresh TTL. */
+export async function suppressTestRecipient(
+  db: PrismaClient,
+  secret: string,
+  email: string,
+  over: { expiresAt?: Date; lifted?: boolean } = {}
+): Promise<void> {
+  const hash = recipientDigest(secret, email);
+  await suppressRecipient(db, hash, "recipient", new Date());
+  if (over.expiresAt) await db.emailSuppression.update({ where: { recipientHash: hash }, data: { expiresAt: over.expiresAt } });
+  if (over.lifted) await liftSuppression(db, hash);
+}
+
+/** Gives a user a credential account, hashed with the app's own password hasher. */
+export async function addTestPassword(
+  db: PrismaClient,
+  auth: { $context: Promise<{ password: { hash(password: string): Promise<string> } }> },
+  userId: string,
+  password: string
+): Promise<void> {
+  await db.account.create({
+    data: {
+      id: crypto.randomUUID(), accountId: userId, providerId: "credential", userId,
+      password: await (await auth.$context).password.hash(password),
+    },
+  });
+}
+
+/** Test app whose mail goes through the real outbox, so admission refusals and
+ *  queued jobs are observable in the database. */
+export function buildOutboxTestApp(db: PrismaClient, url: string, mailDomain?: MailDomainCheck) {
+  const keys = new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") });
+  return buildTestApp(db, url, {
+    sendEmail: createOutboxSender(db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET }),
+    mailDomain,
+  });
 }

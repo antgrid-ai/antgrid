@@ -4,7 +4,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "../helpers/app.js";
-import { recipientDigest } from "../../src/auth/recipient-key.js";
 import type { MailDomainCheck } from "../../src/auth/mail-domain.js";
 import { parseTeamNotice } from "../../src/ui/team-notice.js";
 import {
@@ -12,6 +11,7 @@ import {
   createTestSession,
   createTestSubscription,
   createTestUser,
+  suppressTestRecipient,
 } from "../helpers/fixtures.js";
 import { provisionProductAccountForUser } from "../../src/models/subscription.js";
 import type { SendEmail } from "../../src/auth/email.js";
@@ -502,9 +502,7 @@ describe("revoke and resend", () => {
 });
 
 describe("undeliverable invite addresses", () => {
-  const suppress = (email: string) => pg.db.emailSuppression.create({
-    data: { recipientHash: recipientDigest(TEST_BETTER_AUTH_SECRET, email), reason: "recipient", expiresAt: new Date(Date.now() + 86400000) },
-  });
+  const suppress = (email: string) => suppressTestRecipient(pg.db, TEST_BETTER_AUTH_SECRET, email);
   const deadDomain: MailDomainCheck = async () => "no_mail";
 
   test("create is refused for a suppressed address and for a dead domain", async () => {

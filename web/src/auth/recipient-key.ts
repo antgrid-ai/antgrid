@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Elastic-2.0
 
 import { domainToASCII } from "node:url";
+import { createHmac } from "node:crypto";
 import { hmacBytes } from "../util/hmac.js";
 
 const GMAIL_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
@@ -37,4 +38,13 @@ export function canonicalMailbox(email: string): string {
  *  rate-bucket key derived from the same address. */
 export function recipientDigest(secret: string, email: string): Uint8Array<ArrayBuffer> {
   return hmacBytes(secret, "email-suppression:" + canonicalMailbox(email));
+}
+
+export function isGmail(email: string): boolean {
+  return canonicalMailbox(email).endsWith("@gmail.com");
+}
+
+/** Per-recipient hourly send-bucket key. Hex and unprefixed: it indexes stored rows. */
+export function recipientBucketKey(secret: string, email: string): string {
+  return createHmac("sha256", secret).update(canonicalMailbox(email)).digest("hex");
 }

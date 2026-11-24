@@ -429,15 +429,10 @@ class AuthService {
   };
 
   static AuthException? _specificRejection(http.Response response) {
-    try {
-      final body = jsonDecode(response.body);
-      final code = body is Map ? body['code'] : null;
-      final message = code is String ? _rejectionCopy[code] : null;
-      if (message == null) return null;
-      return AuthException(message, kind: AuthFailure.validation);
-    } catch (_) {
-      return null;
-    }
+    final code = _errorCode(response);
+    final message = code == null ? null : _rejectionCopy[code];
+    if (message == null) return null;
+    return AuthException(message, kind: AuthFailure.validation);
   }
 
   static DateTime? _parseHttpDate(String value) {
@@ -1031,9 +1026,8 @@ class AuthService {
     });
     if (res.statusCode >= 200 && res.statusCode < 300) return _flowReceipt(res);
     if (res.statusCode == 429 || res.statusCode >= 500) _checkAccepted(res);
-    final specific = _specificRejection(res);
-    if (specific != null) throw specific;
-    throw AuthException('Could not create the account. Try again.');
+    throw _specificRejection(res) ??
+        AuthException('Could not create the account. Try again.');
   }
 
   /// Ask the server to re-send the verification link for [email].

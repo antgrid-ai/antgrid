@@ -10,8 +10,7 @@ import { recordStage } from "./flows.js";
 import { EmailProviderError, type SendEmail } from "./email.js";
 import { isSuppressed, sweepSuppressions } from "./email-suppression.js";
 import { recipientDigest } from "./recipient-key.js";
-import { markDelivery } from "../models/pending-sign-in.js";
-import { INVITE_REFERENCE_PREFIX, markInviteDelivery } from "../models/account-invite.js";
+import { markReferenceBounced } from "../models/account-invite.js";
 
 const Payload = z.object({ to: z.email(), subject: z.string().max(512), text: z.string().max(65536), html: z.string().max(65536).optional(), clientReference: z.string().max(128).optional() });
 export class EmailKeyring {
@@ -41,17 +40,16 @@ export class EmailKeyring {
   }
 }
 
-/** Without `recipientSecret` jobs carry no recipient digest and are never suppressed.
- *  A suppressed address is still enqueued: refusing here would make the error depend on
+/** A suppressed address is still enqueued: refusing here would make the error depend on
  *  whether an account exists. */
-export function createOutboxSender(database: DB, keys: EmailKeyring, opts: { recipientSecret?: string } = {}): SendEmail {
+export function createOutboxSender(database: DB, keys: EmailKeyring, opts: { recipientSecret: string }): SendEmail {
   const db = scopedAuthDb(database);
   return async (mail) => {
     const id = randomUUID();
     const payload = Payload.parse(mail);
     const flowId = authScope.getStore()?.flowId;
     const expiresAt = mail.expiresAt ?? new Date(Date.now() + 3600000);
-    const recipientHash = opts.recipientSecret ? recipientDigest(opts.recipientSecret, payload.to) : undefined;
+    const recipientHash = recipientDigest(opts.recipientSecret, payload.to);
     await db.emailJob.create({ data: { id, flowId, reference: id, relatedReference: payload.clientReference, recipientHash,
       payload: keys.seal(id, payload), keyVersion: keys.active, expiresAt } });
     await recordStage(db, flowId, "mail_queued");
@@ -79,9 +77,7 @@ export async function sendNextEmail(db: DB, keys: EmailKeyring, send: SendEmail)
       const updated = await tx.emailJob.updateMany({ where, data: { ...clear, state: "failed", failure: "suppressed" } });
       if (!updated.count) return;
       await recordStage(tx, job.flowId ?? undefined, "mail_failed", "suppressed");
-      const ref = job.relatedReference;
-      if (ref?.startsWith(INVITE_REFERENCE_PREFIX)) await markInviteDelivery(tx, ref.slice(INVITE_REFERENCE_PREFIX.length), "bounced");
-      else if (ref) await markDelivery(tx, ref, "bounced");
+      if (job.relatedReference) await markReferenceBounced(tx, job.relatedReference);
     });
     return true;
   }

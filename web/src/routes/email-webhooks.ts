@@ -6,10 +6,9 @@ import { bodyLimit } from "hono/body-limit";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
-import { markDelivery } from "../models/pending-sign-in.js";
-import { INVITE_REFERENCE_PREFIX, markInviteDelivery } from "../models/account-invite.js";
+import { markReferenceBounced } from "../models/account-invite.js";
 import { recordStage } from "../auth/flows.js";
-import { classifyBounce, suppressRecipient, type BounceClass } from "../auth/email-suppression.js";
+import { classifyBounce, suppressRecipient } from "../auth/email-suppression.js";
 
 const Info = z.object({ client_reference: z.string().max(128).optional(), request_id: z.string().max(128).optional() }).passthrough();
 const Message = z.object({ email_info: Info.optional(), request_id: z.string().max(128).optional() }).passthrough();
@@ -58,7 +57,7 @@ export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
             const inserted = await tx.emailRecipientEvent.createMany({ data: [{ id, jobId: job.id, kind }], skipDuplicates: true });
             if (kind === "hard_bounce") await recordStage(tx, job.flowId ?? undefined, "mail_bounced");
             if (inserted.count && kind === "hard_bounce") {
-              const cls: BounceClass = classifyBounce(message);
+              const cls = classifyBounce(message);
               console.info(JSON.stringify({ evt: "email.bounce", kind, class: cls, reason: reasonOf(message) }));
               // Sender-side and transient bounces describe our reputation or the provider
               // link, not the mailbox, so they must not lock a real user out.
@@ -74,8 +73,7 @@ export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
             // must not overwrite delivery feedback for the current token.
             const latest = await tx.emailJob.findFirst({ where: { relatedReference: legacyRef }, orderBy: { createdAt: "desc" }, select: { id: true } });
             if (latest && latest.id !== job?.id) return;
-            if (legacyRef.startsWith(INVITE_REFERENCE_PREFIX)) await markInviteDelivery(tx, legacyRef.slice(INVITE_REFERENCE_PREFIX.length), "bounced");
-            else await markDelivery(tx, legacyRef, "bounced");
+            await markReferenceBounced(tx, legacyRef);
           }
         });
       }

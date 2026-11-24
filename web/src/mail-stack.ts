@@ -8,12 +8,6 @@ import { EmailKeyring, createOutboxSender } from "./auth/email-outbox.js";
 import { createEmailSender, type SendEmail } from "./auth/email.js";
 import { acceptAllMailDomains, createMailDomainCheck, type MailDomainCheck } from "./auth/mail-domain.js";
 
-/** Keyed on the token, not NODE_ENV: any stack that can really send must refuse dead
- *  domains, while console-mail dev stacks keep signing in as reserved-TLD fixtures. */
-export function mailDomainFor(env: Env): MailDomainCheck {
-  return env.ZEPTOMAIL_TOKEN ? createMailDomainCheck() : acceptAllMailDomains;
-}
-
 /** One composition point so a test can pin that the outbox writes recipient digests
  *  and that the real domain check is wired. */
 export function composeMail(env: Env, db: DB): { keys: EmailKeyring; providerSend: SendEmail; sendEmail: SendEmail; mailDomain: MailDomainCheck } {
@@ -25,5 +19,8 @@ export function composeMail(env: Env, db: DB): { keys: EmailKeyring; providerSen
     ? (mail) => sender({ ...mail, subject: `[${env.NODE_ENV}] ${mail.subject}` })
     : sender;
   const sendEmail = createOutboxSender(db, keys, { recipientSecret: env.BETTER_AUTH_SECRET });
-  return { keys, providerSend, sendEmail, mailDomain: mailDomainFor(env) };
+  // Keyed on the token, not NODE_ENV: any stack that can really send must refuse dead
+  // domains, while console-mail dev stacks keep signing in as reserved-TLD fixtures.
+  const mailDomain = env.ZEPTOMAIL_TOKEN ? createMailDomainCheck() : acceptAllMailDomains;
+  return { keys, providerSend, sendEmail, mailDomain };
 }

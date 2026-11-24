@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Tx } from "../db/index.js";
 import { hmacBytes, hmacMatches } from "../util/hmac.js";
 import { AccountMemberRoleSchema, type AccountMemberRole } from "./account-member.js";
-import type { DeliveryStatus } from "./pending-sign-in.js";
+import { markDelivery, type DeliveryStatus } from "./pending-sign-in.js";
 
 export const AccountInviteStatusSchema = z.enum(["pending", "accepted", "revoked", "expired"]);
 export type AccountInviteStatus = z.infer<typeof AccountInviteStatusSchema>;
@@ -239,6 +239,13 @@ export const INVITE_REFERENCE_PREFIX = "invite:";
 
 export function inviteEmailReference(id: string): string {
   return `${INVITE_REFERENCE_PREFIX}${id}`;
+}
+
+/** Routes a job's related reference to the pending sign-in or invite it was sent for. */
+export async function markReferenceBounced(tx: Tx, reference: string): Promise<number> {
+  return reference.startsWith(INVITE_REFERENCE_PREFIX)
+    ? markInviteDelivery(tx, reference.slice(INVITE_REFERENCE_PREFIX.length), "bounced")
+    : markDelivery(tx, reference, "bounced");
 }
 
 /** Record a bounce against the invite. Mirrors `markDelivery`: the UUID guard

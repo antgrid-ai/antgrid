@@ -3,6 +3,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
+import { normalizePathname } from "@better-auth/core/utils/url";
 import { getOAuthState, isAPIError, createAuthMiddleware } from "better-auth/api";
 import { scopedAuthDb, authTransaction, authScope, lockAuthAccount } from "./transaction.js";
 import { createRequestFlow } from "./request-flow.js";
@@ -10,9 +11,9 @@ import { classifyJourney, createFlow, linkFlowUser, recordStage } from "./flows.
 import { jwtVerify } from "jose";
 import { FlowResultSchema, safeReturnPath, requestOrigin } from "./contracts.js";
 import { recipientLimit, sharedIpLimit } from "./recipient-limit.js";
-import { admitRecipient, liftSuppression } from "./email-suppression.js";
-import { canonicalMailbox, recipientDigest } from "./recipient-key.js";
-import type { MailDomainCheck, MailDomainVerdict } from "./mail-domain.js";
+import { ADMISSION_REFUSAL, admitRecipient, liftSuppression } from "./email-suppression.js";
+import { isGmail, recipientDigest } from "./recipient-key.js";
+import { mailDomainOf, type MailDomainCheck, type MailDomainVerdict } from "./mail-domain.js";
 import { nativeAuth, digest } from "./native-plugin.js";
 import { authEmail } from "./templates.js";
 import { tokenBucket } from "../util/rate-limit.js";
@@ -128,26 +129,25 @@ function appleProvider(env: Env) {
   };
 }
 
-/** Paths that send mail to a caller-chosen address, keyed by the Better-Auth
- *  endpoint name `auth.api` callers use. */
-const MAIL_PATH_BY_API_NAME: Record<string, string> = {
-  signUpEmail: "/sign-up/email",
-  requestPasswordReset: "/request-password-reset",
-  sendVerificationEmail: "/send-verification-email",
-  crossDeviceStart: "/sign-in/cross-device/start",
-};
-const MAIL_PATHS = Object.values(MAIL_PATH_BY_API_NAME);
+const EMAIL = z.email();
+
+/** Paths that send mail to a caller-chosen address. */
+const MAIL_PATHS = ["/sign-up/email", "/request-password-reset", "/send-verification-email", "/sign-in/cross-device/start"] as const;
+type MailPath = (typeof MAIL_PATHS)[number];
+const isMailPath = (path: unknown): path is MailPath => (MAIL_PATHS as readonly unknown[]).includes(path);
 
 /** Paths where a Gmail address is refused in favour of Google sign-in. Reset,
  *  verification resend and password sign-in stay open so an existing Gmail
  *  account keeps every recovery route. */
-const GOOGLE_ONLY_PATHS = new Set(["/sign-in/cross-device/start", "/sign-up/email"]);
+const GOOGLE_ONLY_PATHS: ReadonlySet<MailPath> = new Set<MailPath>(["/sign-in/cross-device/start", "/sign-up/email"]);
+
+const PRE_STEP_MAX_BODY_BYTES = 16 * 1024;
 
 /** The DNS verdict is computed before the auth transaction opens so a slow
  *  lookup never holds one of the few pooled connections; the before-hook reads
- *  it back from here. */
-const PRE_STEP_MAX_BODY_BYTES = 16 * 1024;
-const mailDomainScope = new AsyncLocalStorage<MailDomainVerdict>();
+ *  it back from here. It carries the domain it was computed for so the hook
+ *  never applies it to a different address. */
+const mailDomainScope = new AsyncLocalStorage<{ domain: string; verdict: MailDomainVerdict }>();
 
 export function createAuth(deps: CreateAuthDeps) {
   const send = deps.sendEmail;
@@ -208,8 +208,8 @@ export function createAuth(deps: CreateAuthDeps) {
           throw new APIError("FORBIDDEN", { code: "UPGRADE_REQUIRED", message: "Update Antgrid to continue signing in." });
         }
         const email = typeof ctx.body?.email === "string" ? normalizeEmail(ctx.body.email) : undefined;
-        const mailPaths = MAIL_PATHS;
-        if (email && mailPaths.includes(ctx.path)) {
+        const mailPath = isMailPath(ctx.path) ? ctx.path : undefined;
+        if (email && mailPath) {
           const retry = await rateDb.$transaction((tx) => recipientLimit(tx as PrismaClient, deps.env.BETTER_AUTH_SECRET, email));
           if (retry) { authScope.getStore()!.retryAfter = retry; ctx.setHeader("Retry-After", String(retry)); throw new APIError("TOO_MANY_REQUESTS", { code: "EMAIL_THROTTLED", message: "Please wait before requesting another email" }); }
         }
@@ -226,12 +226,12 @@ export function createAuth(deps: CreateAuthDeps) {
         // After both rate limits so probing the suppression list is IP-throttled;
         // before any account lookup so the answer never depends on whether the
         // address already has an account.
-        if (email && mailPaths.includes(ctx.path)) {
+        if (email && mailPath) {
+          const scoped = mailDomainScope.getStore();
+          const verdict = scoped && scoped.domain === mailDomainOf(email) ? scoped.verdict : "unknown";
           const admission = await admitRecipient(deps.db, deps.env.BETTER_AUTH_SECRET, email,
-            mailDomainScope.getStore() ?? "unknown", { googleOnly: GOOGLE_ONLY_PATHS.has(ctx.path) });
-          if (admission === "google") throw new APIError("BAD_REQUEST", { code: "EMAIL_USE_GOOGLE", message: "Gmail addresses sign in with Google. Use Continue with Google." });
-          if (admission === "domain") throw new APIError("BAD_REQUEST", { code: "EMAIL_DOMAIN_UNDELIVERABLE", message: "That email domain can't receive mail. Check the part after the @." });
-          if (admission === "suppressed") throw new APIError("BAD_REQUEST", { code: "EMAIL_UNDELIVERABLE", message: "We can't send email to that address. Check the spelling, or use a different address." });
+            verdict, { googleOnly: GOOGLE_ONLY_PATHS.has(mailPath) });
+          if (admission !== "ok") throw new APIError("BAD_REQUEST", ADMISSION_REFUSAL[admission]);
         }
 
         const accountEmails = new Set<string>();
@@ -263,7 +263,7 @@ export function createAuth(deps: CreateAuthDeps) {
         // Recovery may target a different account from the browser's current
         // session; a stable order prevents reciprocal requests from deadlocking.
         for (const accountEmail of [...accountEmails].sort()) await lockAuthAccount(deps.db, accountEmail);
-        if (email && mailPaths.includes(ctx.path)) {
+        if (email && mailPath) {
           if (ctx.path !== "/sign-in/cross-device/start") await createRequestFlow(deps.db,ctx.context.secret,email,
             ctx.path === "/sign-up/email" ? "password" : ctx.path === "/request-password-reset" ? "reset" : "verification",ctx.headers ?? null,
             (name) => ctx.getCookie(name),(name,value,maxAge) => { ctx.setCookie(name,value,{ httpOnly: true,secure: baseURL.startsWith("https:"),sameSite: "lax",path: "/",maxAge }); });
@@ -553,17 +553,15 @@ export function createAuth(deps: CreateAuthDeps) {
       return result;
     }); } catch (err) { if (err instanceof RejectedResponse) return err.response; throw err; }
   };
-  // Runs outside any transaction. Fails open: a bad address, a Gmail address
-  // (already decided by the Google-only rule) or a throwing check all yield
-  // "unknown", which admits the request.
-  const verdictFor = async (email: unknown): Promise<MailDomainVerdict> => {
-    if (typeof email !== "string" || !z.email().safeParse(email.trim()).success) return "unknown";
-    if (canonicalMailbox(email).endsWith("@gmail.com")) return "unknown";
-    return deps.mailDomain(email.trim()).catch((): MailDomainVerdict => "unknown");
-  };
+  // Runs outside any transaction. Fails open: a bad address or a Gmail address
+  // (already decided by the Google-only rule) runs unscoped, and a throwing check
+  // yields "unknown"; both admit the request.
   const withVerdict = async <T>(email: unknown, fn: () => Promise<T>): Promise<T> => {
-    const verdict = await verdictFor(email);
-    return mailDomainScope.run(verdict, fn);
+    if (typeof email !== "string" || !EMAIL.safeParse(email.trim()).success || isGmail(email)) return fn();
+    const domain = mailDomainOf(email);
+    if (domain === null) return fn();
+    const verdict = await deps.mailDomain(email.trim()).catch((): MailDomainVerdict => "unknown");
+    return mailDomainScope.run({ domain, verdict }, fn);
   };
   // The lookup and body parse run ahead of every before-hook limiter, so they get a
   // cheap budget of their own. A spent budget yields no email, hence "unknown":
@@ -584,14 +582,14 @@ export function createAuth(deps: CreateAuthDeps) {
   };
   return new Proxy(auth, { get(target, key) {
     if (key === "handler") return async (request: Request) => {
-      const path = new URL(request.url).pathname.replace(/^\/api\/auth/, "");
-      const email = request.method === "POST" && MAIL_PATHS.includes(path) ? await preStepEmail(request) : undefined;
+      const email = request.method === "POST" && isMailPath(normalizePathname(request.url, "/api/auth"))
+        ? await preStepEmail(request) : undefined;
       return withVerdict(email, () => invoke(() => target.handler(request)));
     };
     if (key === "api") return new Proxy(target.api, { get(api, name) {
       const fn = Reflect.get(api, name);
       return typeof fn === "function" ? (...args: unknown[]) => withVerdict(
-        typeof name === "string" && Object.hasOwn(MAIL_PATH_BY_API_NAME, name) ? (args[0] as { body?: { email?: unknown } } | undefined)?.body?.email : undefined,
+        isMailPath((fn as { path?: unknown }).path) ? (args[0] as { body?: { email?: unknown } } | undefined)?.body?.email : undefined,
         () => invoke(async () => {
         try { return await fn(...args); }
         catch (error) {

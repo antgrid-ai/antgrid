@@ -196,7 +196,7 @@ test("late bounce records the old job without overwriting a resent invitation", 
   const account = await ensureProductAccount(pg.db,owner.id);
   const invite = await createInvite(pg.db,{ accountId: account.id, createdBy: owner.id, email: "invite@example.com", role: "member", token: "token", secret: TEST_BETTER_AUTH_SECRET });
   const keys = new EmailKeyring("v1",{ v1: Buffer.alloc(32,3).toString("base64") });
-  const enqueue = createOutboxSender(pg.db,keys);
+  const enqueue = createOutboxSender(pg.db,keys,{ recipientSecret: TEST_BETTER_AUTH_SECRET });
   const mail = { to: invite.email, subject: "Invitation", text: "private", clientReference: inviteEmailReference(invite.id) };
   await enqueue(mail);
   const old = await pg.db.emailJob.findFirstOrThrow();
@@ -211,7 +211,7 @@ test("late bounce records the old job without overwriting a resent invitation", 
 test("distinct provider webhook events survive deduplication and mismatched identifiers are ignored", async () => {
   const { app } = appWithSecret();
   const keys = new EmailKeyring("v1",{ v1: Buffer.alloc(32,3).toString("base64") });
-  await createOutboxSender(pg.db,keys)({ to: "mail@example.com", subject: "Review", text: "private" });
+  await createOutboxSender(pg.db,keys,{ recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com", subject: "Review", text: "private" });
   const job = await pg.db.emailJob.findFirstOrThrow();
   await pg.db.emailJob.update({ where: { id: job.id }, data: { providerId: "provider-current" } });
   const submit = (providerId: string, webhookRequestId: string) => app.request(`/webhooks/zeptomail/${KEY}`,{ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event_name: "softbounce", webhook_request_id: webhookRequestId, event_message: { request_id: providerId, email_info: { client_reference: job.reference } } }) });
@@ -228,8 +228,10 @@ describe("bounce suppression", () => {
   const keys = new EmailKeyring("v1", { v1: Buffer.alloc(32, 3).toString("base64") });
   const digest = (email: string) => recipientDigest(SECRET, email);
   async function job(to = "dead@example.com", withSecret = true) {
-    await createOutboxSender(pg.db, keys, withSecret ? { recipientSecret: SECRET } : {})({ to, subject: "s", text: "t" });
-    return pg.db.emailJob.findFirstOrThrow({ orderBy: { createdAt: "desc" } });
+    await createOutboxSender(pg.db, keys, { recipientSecret: SECRET })({ to, subject: "s", text: "t" });
+    const created = await pg.db.emailJob.findFirstOrThrow({ orderBy: { createdAt: "desc" } });
+    if (withSecret) return created;
+    return pg.db.emailJob.update({ where: { id: created.id }, data: { recipientHash: null } });
   }
   const post = (body: unknown) => appWithSecret().app.request(`/webhooks/zeptomail/${KEY}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const bounce = (ref: string, reason?: string, extra: Record<string, unknown> = {}) => ({

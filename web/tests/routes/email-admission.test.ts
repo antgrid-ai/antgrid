@@ -3,10 +3,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "../helpers/app.js";
-import { createTestUser } from "../helpers/fixtures.js";
-import { EmailKeyring, createOutboxSender } from "../../src/auth/email-outbox.js";
-import { recipientDigest } from "../../src/auth/recipient-key.js";
+import { TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
+import { addTestPassword, buildOutboxTestApp, createTestUser, suppressTestRecipient } from "../helpers/fixtures.js";
 import { authScope } from "../../src/auth/transaction.js";
 import type { MailDomainCheck, MailDomainVerdict } from "../../src/auth/mail-domain.js";
 
@@ -15,7 +13,6 @@ beforeAll(async () => { pg = await startTestPg(); });
 afterAll(async () => { await pg.stop(); });
 beforeEach(async () => { await pg.truncate(); });
 
-const keys = new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") });
 const PASSWORD = "first-password-one";
 
 type Mail = { path: string; body: (email: string) => Record<string, string> };
@@ -25,15 +22,13 @@ const MAIL_PATHS: Mail[] = [
   { path: "/api/auth/request-password-reset", body: (email) => ({ email }) },
   { path: "/api/auth/send-verification-email", body: (email) => ({ email }) },
 ];
+const SIGN_IN: Mail = { path: "/api/auth/sign-in/email", body: (email) => ({ email, password: PASSWORD }) };
 const START = MAIL_PATHS[0];
 const SIGN_UP = MAIL_PATHS[1];
 const RESET = MAIL_PATHS[2];
 
 function appWith(mailDomain?: MailDomainCheck) {
-  return buildTestApp(pg.db, pg.url, {
-    sendEmail: createOutboxSender(pg.db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET }),
-    mailDomain,
-  });
+  return buildOutboxTestApp(pg.db, pg.url, mailDomain);
 }
 
 async function send(app: ReturnType<typeof appWith>["app"], mail: Mail, email: string) {
@@ -49,9 +44,7 @@ async function send(app: ReturnType<typeof appWith>["app"], mail: Mail, email: s
   return { status: response.status, text, code: (JSON.parse(text || "null") as { code?: string } | null)?.code };
 }
 
-const suppress = (email: string) => pg.db.emailSuppression.create({
-  data: { recipientHash: recipientDigest(TEST_BETTER_AUTH_SECRET, email), reason: "recipient", expiresAt: new Date(Date.now() + 86400000) },
-});
+const suppress = (email: string) => suppressTestRecipient(pg.db, TEST_BETTER_AUTH_SECRET, email);
 
 describe("suppressed recipients", () => {
   test("every mail path refuses a suppressed address and queues nothing", async () => {
@@ -98,19 +91,11 @@ describe("suppressed recipients", () => {
   test("password sign-in never returns an admission code", async () => {
     const { app, auth } = appWith();
     const user = await createTestUser(pg.db, "owner@example.com");
-    await pg.db.account.create({ data: {
-      id: crypto.randomUUID(), accountId: user.id, providerId: "credential", userId: user.id,
-      password: await (await auth.$context).password.hash(PASSWORD),
-    } });
+    await addTestPassword(pg.db, auth, user.id, PASSWORD);
     await suppress("owner@example.com");
-    await pg.db.authRateBucket.deleteMany();
-    const response = await app.request("/api/auth/sign-in/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://localhost:8787" },
-      body: JSON.stringify({ email: "owner@example.com", password: PASSWORD }),
-    });
+    const response = await send(app, SIGN_IN, "owner@example.com");
     expect(response.status).toBe(200);
-    expect(await response.text()).not.toContain("EMAIL_UNDELIVERABLE");
+    expect(response.text).not.toContain("EMAIL_UNDELIVERABLE");
   });
 });
 
@@ -207,14 +192,9 @@ describe("domain check", () => {
   test("password sign-in does not consult the check", async () => {
     const stub = verdict("no_mail");
     const { app } = appWith(stub.check);
-    await pg.db.authRateBucket.deleteMany();
-    const response = await app.request("/api/auth/sign-in/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://localhost:8787" },
-      body: JSON.stringify({ email: "x@dead.example", password: PASSWORD }),
-    });
+    const response = await send(app, SIGN_IN, "x@dead.example");
     expect(stub.calls).toHaveLength(0);
-    expect(await response.text()).not.toContain("EMAIL_DOMAIN_UNDELIVERABLE");
+    expect(response.text).not.toContain("EMAIL_DOMAIN_UNDELIVERABLE");
   });
 });
 
@@ -270,16 +250,8 @@ describe("Gmail addresses use Google sign-in", () => {
   test("an existing Gmail user's password sign-in still works", async () => {
     const { app, auth } = appWith();
     const user = await createTestUser(pg.db, "known@gmail.com");
-    await pg.db.account.create({ data: {
-      id: crypto.randomUUID(), accountId: user.id, providerId: "credential", userId: user.id,
-      password: await (await auth.$context).password.hash(PASSWORD),
-    } });
-    await pg.db.authRateBucket.deleteMany();
-    const response = await app.request("/api/auth/sign-in/email", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "http://localhost:8787" },
-      body: JSON.stringify({ email: "known@gmail.com", password: PASSWORD }),
-    });
+    await addTestPassword(pg.db, auth, user.id, PASSWORD);
+    const response = await send(app, SIGN_IN, "known@gmail.com");
     expect(response.status).toBe(200);
   });
 });

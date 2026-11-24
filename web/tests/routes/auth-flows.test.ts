@@ -3,7 +3,7 @@
 
 import { beforeAll, afterAll, beforeEach, describe, test, expect } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { buildTestApp } from "../helpers/app.js";
+import { buildTestApp, TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
 import { createTestUser, createTestSession } from "../helpers/fixtures.js";
 import { EmailKeyring, createOutboxSender, sendNextEmail } from "../../src/auth/email-outbox.js";
 import { digest } from "../../src/auth/native-plugin.js";
@@ -84,7 +84,7 @@ describe("authentication flow boundaries", () => {
   });
 
   test("signup enqueues atomically, review requires CSRF and verification alone creates no session", async () => {
-    const { app } = buildTestApp(pg.db, pg.url, { sendEmail: createOutboxSender(pg.db, keys) });
+    const { app } = buildTestApp(pg.db, pg.url, { sendEmail: createOutboxSender(pg.db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET }) });
     const result = await app.request("/api/auth/sign-up/email", json({ email: "owner@example.com", name: "Owner", password: "safe-password-123" }));
     expect(result.status).toBe(200);
     expect(await pg.db.productAccount.count()).toBe(0);
@@ -171,7 +171,7 @@ describe("authentication flow boundaries", () => {
 
 describe("durable email execution", () => {
   test("retry keeps ciphertext and reference; acceptance deletes sensitive payload", async () => {
-    await createOutboxSender(pg.db, keys)({ to: "mail@example.com", subject: "Review", text: "https://antgrid.ai/secret", expiresAt: new Date(Date.now() + 600000) });
+    await createOutboxSender(pg.db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com", subject: "Review", text: "https://antgrid.ai/secret", expiresAt: new Date(Date.now() + 600000) });
     const job = await pg.db.emailJob.findFirstOrThrow();
     await sendNextEmail(pg.db, keys, async () => { throw new EmailProviderError("transient"); });
     const retry = await pg.db.emailJob.findFirstOrThrow();
@@ -185,7 +185,7 @@ describe("durable email execution", () => {
   });
 
   test("expired leases recover and configuration failure pauses every worker", async () => {
-    await createOutboxSender(pg.db, keys)({ to: "mail@example.com", subject: "Review", text: "link" });
+    await createOutboxSender(pg.db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com", subject: "Review", text: "link" });
     const job = await pg.db.emailJob.findFirstOrThrow();
     await pg.db.emailJob.update({ where: { id: job.id }, data: { state: "sending", leaseUntil: new Date(0) } });
     await sendNextEmail(pg.db, keys, async () => { throw new EmailProviderError("configuration"); });
@@ -209,7 +209,7 @@ test("return destinations reject encoding, backslashes and auth loops", () => {
 test("webhook batches deduplicate recipient events without changing authentication state", async () => {
   const secret = "webhook-secret-long-enough";
   const { app } = buildTestApp(pg.db,pg.url,{ envOverrides: { ZEPTOMAIL_WEBHOOK_SECRET: secret } as never });
-  await createOutboxSender(pg.db,keys)({ to: "mail@example.com",subject: "Review",text: "private" });
+  await createOutboxSender(pg.db,keys,{ recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com",subject: "Review",text: "private" });
   const job = await pg.db.emailJob.findFirstOrThrow();
   await pg.db.emailJob.update({ where: { id: job.id },data: { state: "provider_accepted",providerId: "provider-id",payload: null,keyVersion: null } });
   const events = [{ event_name: ["softbounce","fbl_complaint"],event_message: [{ request_id: "provider-id" }] },
@@ -222,11 +222,11 @@ test("webhook batches deduplicate recipient events without changing authenticati
 
 test("permanent rejection and expiry erase payloads without generating replacement links", async () => {
   let sent = 0;
-  await createOutboxSender(pg.db,keys)({ to: "mail@example.com",subject: "Review",text: "same-link" });
+  await createOutboxSender(pg.db,keys,{ recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com",subject: "Review",text: "same-link" });
   await sendNextEmail(pg.db,keys,async () => { sent++; throw new EmailProviderError("permanent"); });
   expect((await pg.db.emailJob.findFirstOrThrow()).state).toBe("failed");
   expect((await pg.db.emailJob.findFirstOrThrow()).payload).toBeNull();
-  await createOutboxSender(pg.db,keys)({ to: "mail@example.com",subject: "Review",text: "expired-link",expiresAt: new Date(Date.now()+30000) });
+  await createOutboxSender(pg.db,keys,{ recipientSecret: TEST_BETTER_AUTH_SECRET })({ to: "mail@example.com",subject: "Review",text: "expired-link",expiresAt: new Date(Date.now()+30000) });
   await sendNextEmail(pg.db,keys,async () => { sent++; });
   expect(sent).toBe(1);
   expect(await pg.db.emailJob.count({ where: { state: "expired",payload: null } })).toBe(1);

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { runWithEndpointContext } from "@better-auth/core/context";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "../helpers/app.js";
-import { createTestUser } from "../helpers/fixtures.js";
+import { createTestUser, suppressTestRecipient } from "../helpers/fixtures.js";
 import { recipientDigest } from "../../src/auth/recipient-key.js";
 
 let pg: PgHandle;
@@ -18,7 +18,7 @@ async function sessionVia(path: string, opts: { verified: boolean }) {
   const user = await createTestUser(pg.db, "owner@example.com");
   if (!opts.verified) await pg.db.user.update({ where: { id: user.id }, data: { emailVerified: false } });
   const hash = recipientDigest(TEST_BETTER_AUTH_SECRET, user.email);
-  await pg.db.emailSuppression.create({ data: { recipientHash: hash, reason: "recipient", expiresAt: new Date(Date.now() + 86400000) } });
+  await suppressTestRecipient(pg.db, TEST_BETTER_AUTH_SECRET, user.email);
   const context = await auth.$context;
   await runWithEndpointContext({ path } as never, () => context.internalAdapter.createSession(user.id));
   return pg.db.emailSuppression.findUniqueOrThrow({ where: { recipientHash: hash } });

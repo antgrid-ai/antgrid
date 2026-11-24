@@ -3,9 +3,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
-import { TEST_BETTER_AUTH_SECRET, buildTestApp } from "../helpers/app.js";
-import { EmailKeyring, createOutboxSender } from "../../src/auth/email-outbox.js";
-import { recipientDigest } from "../../src/auth/recipient-key.js";
+import { TEST_BETTER_AUTH_SECRET } from "../helpers/app.js";
+import { addTestPassword, buildOutboxTestApp, suppressTestRecipient } from "../helpers/fixtures.js";
 import type { MailDomainCheck, MailDomainVerdict } from "../../src/auth/mail-domain.js";
 
 let pg: PgHandle;
@@ -14,17 +13,13 @@ afterAll(async () => { await pg.stop(); });
 beforeEach(async () => { await pg.truncate(); });
 
 const ORIGIN = "http://localhost:8787";
-const keys = new EmailKeyring("v1", { v1: Buffer.alloc(32, 1).toString("base64") });
 const DOMAIN_COPY = "That email domain can't receive mail. Check the part after the @.";
 const ADDRESS_COPY = "We can't send email to that address. Check the spelling, or sign in another way.";
 const GMAIL_COPY = "Gmail addresses sign in with Google. Use Continue with Google.";
 
 function appWith(verdict: MailDomainVerdict = "deliverable") {
   const mailDomain: MailDomainCheck = async () => verdict;
-  return buildTestApp(pg.db, pg.url, {
-    sendEmail: createOutboxSender(pg.db, keys, { recipientSecret: TEST_BETTER_AUTH_SECRET }),
-    mailDomain,
-  });
+  return buildOutboxTestApp(pg.db, pg.url, mailDomain);
 }
 type TestApp = ReturnType<typeof appWith>["app"];
 
@@ -38,9 +33,7 @@ async function post(app: TestApp, path: string, body: Record<string, string> = {
   });
 }
 const where = (res: Response) => new URL(res.headers.get("location") ?? "", ORIGIN);
-const suppress = (email: string) => pg.db.emailSuppression.create({
-  data: { recipientHash: recipientDigest(TEST_BETTER_AUTH_SECRET, email), reason: "recipient", expiresAt: new Date(Date.now() + 86400000) },
-});
+const suppress = (email: string) => suppressTestRecipient(pg.db, TEST_BETTER_AUTH_SECRET, email);
 
 describe("magic link entry points", () => {
   for (const path of ["/ui/login/continue", "/ui/login/start"]) {
@@ -183,10 +176,7 @@ describe("verification resend", () => {
     const email = "unverified@corp.example";
     const id = crypto.randomUUID();
     await pg.db.user.create({ data: { id, email, name: email, emailVerified: false } });
-    await pg.db.account.create({ data: {
-      id: crypto.randomUUID(), accountId: id, providerId: "credential", userId: id,
-      password: await (await auth.$context).password.hash("first-password-one"),
-    } });
+    await addTestPassword(pg.db, auth, id, "first-password-one");
     await suppress(email);
     const res = await post(app, "/ui/login/password", { email, password: "first-password-one" });
     const url = where(res);

@@ -6,7 +6,7 @@ ALTER TABLE pending_sign_in ADD COLUMN requester_entry text;
 
 CREATE TABLE email_suppressions (
   recipient_hash bytea PRIMARY KEY CHECK (octet_length(recipient_hash) = 32),
-  reason         text NOT NULL CHECK (reason IN ('recipient', 'unclassified', 'complaint')),
+  reason         text NOT NULL CHECK (reason IN ('recipient', 'unclassified')),
   events         integer NOT NULL DEFAULT 1,
   created_at     timestamptz(6) NOT NULL DEFAULT now(),
   updated_at     timestamptz(6) NOT NULL DEFAULT now(),

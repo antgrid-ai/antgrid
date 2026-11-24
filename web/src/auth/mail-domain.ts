@@ -54,23 +54,27 @@ const DELIVERABLE_TTL_MS = 6 * 3600000;
 const NO_MAIL_TTL_MS = 15 * 60000;
 const CANARY_HEALTHY_MS = 60000;
 const CANARY_UNHEALTHY_MS = 10000;
+const CANARY_DOMAIN = "gmail.com";
+
+// RFC 7505 null MX: a lone "." (or empty) exchange says the domain accepts no mail.
+const isNullMx = (exchange: string) => exchange === "" || exchange === ".";
 
 /** Checks that a domain can receive mail. It only ever answers `no_mail` for proof of
  *  absence, and fails open to `unknown` on every resolver fault, so a DNS outage can
  *  degrade the check but never block sign-in. */
 export function createMailDomainCheck(opts: {
   resolver?: MailResolver; deadlineMs?: number; maxInFlight?: number;
-  canaryDomain?: string; now?: () => number;
+  now?: () => number;
 } = {}): MailDomainCheck {
   const resolver = opts.resolver ?? systemResolver();
   const deadlineMs = opts.deadlineMs ?? 1500;
   const maxInFlight = opts.maxInFlight ?? 16;
-  const canaryDomain = opts.canaryDomain ?? "gmail.com";
   const now = opts.now ?? Date.now;
   const cache = new Map<string, Cached>();
   const pending = new Map<string, Promise<MailDomainVerdict>>();
   let inFlight = 0;
   let canary: { healthy: boolean; until: number } | null = null;
+  let canaryProbe: Promise<boolean> | null = null;
 
   const remember = (domain: string, verdict: MailDomainVerdict) => {
     if (verdict === "unknown") return;
@@ -83,13 +87,17 @@ export function createMailDomainCheck(opts: {
   // domain, so a no_mail finding is believed only while a known-good domain resolves.
   const canaryHealthy = async (): Promise<boolean> => {
     if (canary && canary.until > now()) return canary.healthy;
-    let healthy = false;
-    try {
-      const records = await resolver.resolveMx(canaryDomain);
-      healthy = records.some((r) => r.exchange !== "" && r.exchange !== ".");
-    } catch { healthy = false; }
-    canary = { healthy, until: now() + (healthy ? CANARY_HEALTHY_MS : CANARY_UNHEALTHY_MS) };
-    return healthy;
+    // Concurrent lookups that all find a domain absent share one probe.
+    canaryProbe ??= (async () => {
+      let healthy = false;
+      try {
+        const records = await resolver.resolveMx(CANARY_DOMAIN);
+        healthy = records.some((r) => !isNullMx(r.exchange));
+      } catch { healthy = false; }
+      canary = { healthy, until: now() + (healthy ? CANARY_HEALTHY_MS : CANARY_UNHEALTHY_MS) };
+      return healthy;
+    })().finally(() => { canaryProbe = null; });
+    return canaryProbe;
   };
 
   const lookup = async (domain: string): Promise<MailDomainVerdict> => {
@@ -100,7 +108,7 @@ export function createMailDomainCheck(opts: {
       if (!ABSENT_CODES.has(errorCode(err) ?? "")) return "unknown";
       records = [];
     }
-    if (records.length === 1 && (records[0].exchange === "" || records[0].exchange === ".")) return "no_mail";
+    if (records.length === 1 && isNullMx(records[0].exchange)) return "no_mail";
     if (records.length > 0) return "deliverable";
     // Bun reports NODATA as ENOTFOUND, so absence of MX alone proves nothing: a domain
     // with only an address record is still deliverable (implicit MX).
