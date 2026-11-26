@@ -5,8 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
-/// Persists the machine scope's explicit choices. A machine the user never
-/// touched is absent from both sets and follows the default rule (see
+/// Persists the machines the user unchecked from the scope. A machine never
+/// touched is absent and follows the default rule (see
 /// `MachineScope.includes`), so a machine added to the account later needs no
 /// migration here.
 class MachineScopeStore {
@@ -18,39 +18,23 @@ class MachineScopeStore {
   static Future<MachineScopeStore> open() async =>
       MachineScopeStore._(await openScopedPrefs({_key}));
 
-  ({Set<String> included, Set<String> excluded, bool hideOffline}) read() {
+  /// The excluded machine ids. Fields other builds wrote under the same key
+  /// (`included`, `hideOffline`) are ignored.
+  Set<String> read() {
     final raw = _prefs.getString(_key);
-    const empty = (
-      included: <String>{},
-      excluded: <String>{},
-      hideOffline: false,
-    );
-    if (raw == null) return empty;
+    if (raw == null) return {};
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is! Map) return empty;
-      Set<String> ids(Object? v) =>
-          v is List ? {for (final e in v) if (e is String) e} : <String>{};
-      return (
-        included: ids(decoded['included']),
-        excluded: ids(decoded['excluded']),
-        hideOffline: decoded['hideOffline'] == true,
-      );
+      if (decoded is! Map) return {};
+      final v = decoded['excluded'];
+      return v is List ? {for (final e in v) if (e is String) e} : {};
     } catch (_) {
-      return empty;
+      return {};
     }
   }
 
-  Future<void> write({
-    required Set<String> included,
-    required Set<String> excluded,
-    required bool hideOffline,
-  }) => _prefs.setString(
+  Future<void> write({required Set<String> excluded}) => _prefs.setString(
     _key,
-    jsonEncode({
-      'included': included.toList()..sort(),
-      'excluded': excluded.toList()..sort(),
-      'hideOffline': hideOffline,
-    }),
+    jsonEncode({'excluded': excluded.toList()..sort()}),
   );
 }

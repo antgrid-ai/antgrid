@@ -45,7 +45,7 @@ void main() {
           agent('a', seenAgo: const Duration(seconds: 5)),
           agent('b', seenAgo: const Duration(seconds: 5)),
         ],
-        scope: const MachineScope().toggled('b', online: true),
+        scope: const MachineScope().toggled('b'),
       ),
       {'a'},
     );

@@ -228,39 +228,29 @@ final scopedMachineIdsProvider = Provider<Set<String>>((ref) {
   };
 });
 
-/// The machines a scope can include on this device. A phone cannot drive a
-/// machine whose remote-access switch is off — its advert is empty and every
-/// verb is refused — so there such a machine is shown locked, never in scope.
+/// The machines a scope can include on this device — the only ones a scope
+/// list offers. Never an offline machine: nothing can be started there. On a
+/// phone, never one whose remote-access switch is off either — its advert is
+/// empty and every verb is refused.
 List<MachineInfo> scopeCandidates(List<MachineInfo> machines, {bool? mobile}) {
-  if (!(mobile ?? isMobilePlatform)) return machines;
+  final phone = mobile ?? isMobilePlatform;
   return [
     for (final m in machines)
-      if (m.remoteAccessEnabled != false) m,
+      if (m.online && !(phone && m.remoteAccessEnabled == false)) m,
   ];
 }
 
-/// What the scope button says, e.g. "All machines" / "MacBook Pro" /
-/// "3 of 5 machines".
-///
-/// Every online machine in scope reads as "All machines" too, offline ones
-/// left out: the default scope hides what is offline, and the button's own
-/// subline already counts what is online.
-String machineScopeLabel(List<MachineInfo> machines, MachineScope scope) {
+/// What the scope button says over [candidates] (see [scopeCandidates]), e.g.
+/// "All machines" / "MacBook Pro" / "3 of 5 machines".
+String machineScopeLabel(List<MachineInfo> candidates, MachineScope scope) {
   final inScope = [
-    for (final m in machines)
+    for (final m in candidates)
       if (scope.includes(m.id, online: m.online)) m,
   ];
   if (inScope.isEmpty) return 'No machines';
-  if (inScope.length == machines.length) return 'All machines';
-  final online = [
-    for (final m in machines)
-      if (m.online) m,
-  ];
-  final onlyOnline =
-      inScope.length == online.length && inScope.every((m) => m.online);
-  if (onlyOnline) return 'All machines';
+  if (inScope.length == candidates.length) return 'All machines';
   if (inScope.length == 1) return inScope.single.name;
-  return '${inScope.length} of ${machines.length} machines';
+  return '${inScope.length} of ${candidates.length} machines';
 }
 
 /// The inventory's platform tag as people write it, e.g. "macOS".

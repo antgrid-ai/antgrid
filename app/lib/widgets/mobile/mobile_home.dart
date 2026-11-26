@@ -83,10 +83,7 @@ class MobileHomeList extends ConsumerWidget {
                     action: AbButton(
                       label: 'Show all machines',
                       onTap: () =>
-                          ref.read(machineScopeProvider.notifier).selectAll([
-                            for (final m in ref.read(machineDirectoryProvider))
-                              if (m.remoteAccessEnabled != false) m.id,
-                          ]),
+                          ref.read(machineScopeProvider.notifier).selectAll(),
                     ),
                   )
                 : const AbEmptyState(

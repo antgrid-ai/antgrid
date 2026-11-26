@@ -412,9 +412,7 @@ class ScopeHidesEverything extends ConsumerWidget {
             AbButton(
               label: 'Show all machines',
               compact: true,
-              onTap: () => ref.read(machineScopeProvider.notifier).selectAll([
-                for (final m in ref.read(machineDirectoryProvider)) m.id,
-              ]),
+              onTap: () => ref.read(machineScopeProvider.notifier).selectAll(),
             ),
           ],
         ],

@@ -35,10 +35,13 @@ class MachineScopeButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final machines = ref.watch(machineDirectoryProvider);
+    final machines = scopeCandidates(
+      ref.watch(machineDirectoryProvider),
+      mobile: false,
+    );
     final scope = ref.watch(machineScopeProvider);
     final inScope = ref.watch(scopedMachineIdsProvider);
-    final online = machines.where((m) => inScope.contains(m.id) && m.online);
+    final online = machines.where((m) => inScope.contains(m.id));
     final running = ref
         .watch(projectViewsProvider)
         .fold<int>(0, (n, v) => n + v.liveCount);
@@ -100,14 +103,18 @@ class MachineScopeButton extends ConsumerWidget {
   }
 }
 
-/// One checkbox row per machine, then the scope-wide toggles. Live, so a
-/// machine coming online while the menu is open moves without reopening it.
+/// One checkbox row per online machine, then the scope-wide actions. Live, so
+/// a machine coming online while the menu is open appears without reopening
+/// it.
 class MachineScopePanel extends ConsumerWidget {
   const MachineScopePanel({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final machines = ref.watch(machineDirectoryProvider);
+    final machines = scopeCandidates(
+      ref.watch(machineDirectoryProvider),
+      mobile: false,
+    );
     final scope = ref.watch(machineScopeProvider);
     final rows = ref.watch(recentSessionsProvider);
     final statuses = ref.watch(recentSessionStatusesProvider);
@@ -123,11 +130,10 @@ class MachineScopePanel extends ConsumerWidget {
           _ScopeMachineRow(
             key: ValueKey(m.id),
             machine: m,
-            checked: scope.isChecked(m.id, online: m.online),
-            hiddenAsOffline: scope.hideOffline && !m.online,
+            checked: scope.isChecked(m.id),
             status: machineStatusLine(m, rows, statuses),
             entry: entries.firstWhereOrNull((e) => e.machineUuid == m.id),
-            onToggle: () => notifier.toggle(m.id, online: m.online),
+            onToggle: () => notifier.toggle(m.id),
           ),
         const Padding(
           padding: EdgeInsets.symmetric(vertical: AbTokens.space4),
@@ -138,14 +144,7 @@ class MachineScopePanel extends ConsumerWidget {
           label: 'Select all',
           mono: false,
           selected: false,
-          onTap: () => notifier.selectAll([for (final m in machines) m.id]),
-        ),
-        PanelRow(
-          icon: AbIcons.eyeClosed,
-          label: 'Hide offline machines',
-          mono: false,
-          selected: scope.hideOffline,
-          onTap: () => notifier.setHideOffline(!scope.hideOffline),
+          onTap: notifier.selectAll,
         ),
         PanelRow(
           icon: AbIcons.settings,
@@ -230,7 +229,6 @@ class _ScopeMachineRow extends StatefulWidget {
     super.key,
     required this.machine,
     required this.checked,
-    required this.hiddenAsOffline,
     required this.status,
     required this.entry,
     required this.onToggle,
@@ -238,7 +236,6 @@ class _ScopeMachineRow extends StatefulWidget {
 
   final MachineInfo machine;
   final bool checked;
-  final bool hiddenAsOffline;
   final String status;
 
   /// The drawer entry behind a remote machine, which is what "forget" acts on.
@@ -270,11 +267,7 @@ class _ScopeMachineRowState extends State<_ScopeMachineRow> {
       child: MouseRegion(
         onEnter: (_) => setState(() => _hovered = true),
         onExit: (_) => setState(() => _hovered = false),
-        child: Opacity(
-          // Still choosable — the box is the user's pick — but visibly not
-          // what the scope shows while "Hide offline" is on.
-          opacity: widget.hiddenAsOffline ? AbTokens.opacityDisabled : 1,
-          child: AbListRow(
+        child: AbListRow(
             leading: AbStatusDot(
               tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
               style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
@@ -345,7 +338,6 @@ class _ScopeMachineRowState extends State<_ScopeMachineRow> {
             contentFloor: AbRowContentFloor.iconButton,
             onFocusChange: (v) => setState(() => _focused = v),
             onTap: widget.onToggle,
-          ),
         ),
       ),
     );

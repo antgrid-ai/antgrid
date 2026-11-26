@@ -24,7 +24,6 @@ import '../../providers/mobile_connection.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
-import '../../util/relative_time.dart';
 import '../machine_scope_menu.dart' show machineActivityLine;
 import '../project_sidebar.dart' show SidebarSectionLabel;
 
@@ -68,19 +67,12 @@ String _machineName(WidgetRef ref, String id) =>
     'this machine';
 
 /// Machines a phone can be pointed at: never this device, which runs no
-/// bridge of its own.
+/// bridge of its own, and never an offline one — it could not be picked, so a
+/// row for it would only be noise.
 List<MachineInfo> _remoteMachines(WidgetRef ref) => [
   for (final m in ref.watch(machineDirectoryProvider))
-    if (!m.isLocal) m,
+    if (!m.isLocal && m.online) m,
 ];
-
-String _offlineLine(MachineInfo m) {
-  final seen = m.lastSeenAt;
-  return [
-    ?platformLabel(m.platform),
-    seen == null ? 'offline' : 'seen ${relativeTime(seen)}',
-  ].join(' · ');
-}
 
 void _refreshInventory(ProviderContainer c) => detached(
   'MobileConnect',
@@ -108,16 +100,15 @@ class MobileMachinePicker extends ConsumerWidget {
     final online =
         [
           for (final m in machines)
-            if (m.online && m.remoteAccessEnabled != false) m,
+            if (m.remoteAccessEnabled != false) m,
         ]..sort((a, b) {
           final last = connection.lastMachineId;
           return (b.id == last ? 1 : 0) - (a.id == last ? 1 : 0);
         });
-    final offline = [
-      for (final m in machines)
-        if (!m.online && m.remoteAccessEnabled != false) m,
-    ];
     final loading = ref.watch(accountAgentsProvider).isLoading;
+    final anyOffline = ref
+        .watch(machineDirectoryProvider)
+        .any((m) => !m.isLocal && !m.online);
     final container = ref.container;
 
     Widget list;
@@ -129,6 +120,11 @@ class MobileMachinePicker extends ConsumerWidget {
             hasScrollBody: false,
             child: loading
                 ? const Center(child: AbLoading(message: 'Loading machines'))
+                : anyOffline
+                ? const AbEmptyState(
+                    title: 'No machines online',
+                    subtitle: 'Open Antgrid on a computer, then refresh.',
+                  )
                 : const AbEmptyState(
                     title: 'No machines yet',
                     subtitle:
@@ -143,19 +139,8 @@ class MobileMachinePicker extends ConsumerWidget {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
         children: [
-          SidebarSectionLabel(label: 'ONLINE', count: online.length),
-          if (online.isEmpty)
-            Padding(
-              padding: const EdgeInsets.all(AbTokens.space8),
-              child: Text(
-                'None of your machines are online. Open Antgrid on one, '
-                'then refresh.',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: p.textMuted,
-                ),
-              ),
-            ),
+          if (online.isNotEmpty)
+            SidebarSectionLabel(label: 'ONLINE', count: online.length),
           for (final m in online)
             MobileMachineRow(
               key: ValueKey('pick:${m.id}'),
@@ -167,15 +152,6 @@ class MobileMachinePicker extends ConsumerWidget {
               ].join(' · '),
               onTap: () => chooseMobileMachine(container, m.id),
             ),
-          if (offline.isNotEmpty) ...[
-            SidebarSectionLabel(label: 'OFFLINE', count: offline.length),
-            for (final m in offline)
-              MobileMachineRow(
-                key: ValueKey('pick:${m.id}'),
-                machine: m,
-                subtitle: _offlineLine(m),
-              ),
-          ],
           if (locked.isNotEmpty) ...[
             SidebarSectionLabel(
               label: 'REMOTE ACCESS OFF',
@@ -262,8 +238,8 @@ class MobileMachinePicker extends ConsumerWidget {
 }
 
 /// One machine in the picker or the switch sheet. Tappable only when
-/// [onTap] is given: an offline or locked machine is listed so the user sees
-/// it is known, not missing.
+/// [onTap] is given: a machine with remote access off is listed so the user
+/// sees it is known, not missing.
 class MobileMachineRow extends StatelessWidget {
   const MobileMachineRow({
     super.key,
@@ -756,18 +732,17 @@ class SwitchMachineSheet extends ConsumerWidget {
       if (m.remoteAccessEnabled == false) {
         return 'Remote access is off on this machine';
       }
-      if (!m.online) return _offlineLine(m);
       final activity = machineActivityLine(m, rows, statuses) ?? 'idle';
       return m.id == current ? 'Connected · $activity' : 'Online · $activity';
     }
 
     final reachable = [
       for (final m in machines)
-        if (m.online && m.remoteAccessEnabled != false) m,
+        if (m.remoteAccessEnabled != false) m,
     ];
     final unreachable = [
       for (final m in machines)
-        if (!m.online || m.remoteAccessEnabled == false) m,
+        if (m.remoteAccessEnabled == false) m,
     ];
 
     return SafeArea(

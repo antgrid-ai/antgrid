@@ -112,7 +112,9 @@ void main() {
 
       expect(find.text('Choose a machine'), findsOneWidget);
       expect(find.text('ONLINE'), findsOneWidget);
-      expect(find.text('OFFLINE'), findsOneWidget);
+      // Offline machines are never listed.
+      expect(find.text('OFFLINE'), findsNothing);
+      expect(find.text('ThinkPad'), findsNothing);
       expect(find.text('REMOTE ACCESS OFF'), findsOneWidget);
       expect(find.text('last used'), findsOneWidget);
       expect(find.text('Linux · online'), findsOneWidget);
@@ -131,13 +133,6 @@ void main() {
       );
     },
   );
-
-  testWidgets('an offline machine cannot be picked', (tester) async {
-    final c = await pump(tester);
-    await tester.tap(find.text('ThinkPad'));
-    await tester.pump();
-    expect(c.read(mobileConnectionProvider).machineId, isNull);
-  });
 
   testWidgets('picking a machine connects to it, and Cancel goes back', (
     tester,

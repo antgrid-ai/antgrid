@@ -10,71 +10,40 @@ import 'demo_mode.dart';
 /// machine pickers and the mobile home all filter through [includes], so no two
 /// of them can disagree about what is in scope.
 ///
-/// Stores explicit choices only. A machine absent from both sets follows the
-/// default — online machines are in, offline ones out — so a machine coming
-/// back online rejoins on its own unless the user unchecked it, and one added
-/// to the account later is in scope without a migration.
+/// An offline machine is never in scope and is not offered as a choice:
+/// nothing can be started there. Stores only the online machines the user
+/// unchecked, so a machine coming back online rejoins on its own unless it was
+/// unchecked, and one added to the account later is in scope without a
+/// migration.
 @immutable
 class MachineScope {
-  const MachineScope({
-    this.included = const {},
-    this.excluded = const {},
-    this.hideOffline = false,
-  });
+  const MachineScope({this.excluded = const {}});
 
-  final Set<String> included;
   final Set<String> excluded;
 
-  /// Drops offline machines even when picked. Separate from the checkboxes so
-  /// turning it off restores exactly what was picked before.
-  final bool hideOffline;
-
-  /// Whether the machine's checkbox is ticked — the user's choice, before
-  /// [hideOffline] is applied.
-  bool isChecked(String machineId, {required bool online}) {
-    if (excluded.contains(machineId)) return false;
-    return included.contains(machineId) || online;
-  }
+  /// Whether the machine's checkbox is ticked.
+  bool isChecked(String machineId) => !excluded.contains(machineId);
 
   /// Whether the machine is in scope.
-  bool includes(String machineId, {required bool online}) {
-    if (!online && hideOffline) return false;
-    return isChecked(machineId, online: online);
+  bool includes(String machineId, {required bool online}) =>
+      online && isChecked(machineId);
+
+  /// Flips the checkbox.
+  MachineScope toggled(String machineId) {
+    final excluded = {...this.excluded};
+    if (!excluded.remove(machineId)) excluded.add(machineId);
+    return MachineScope(excluded: Set.unmodifiable(excluded));
   }
 
-  /// Flips the checkbox, recording the result as an explicit choice.
-  MachineScope toggled(String machineId, {required bool online}) {
-    final checked = isChecked(machineId, online: online);
-    final included = {...this.included}..remove(machineId);
-    final excluded = {...this.excluded}..remove(machineId);
-    (checked ? excluded : included).add(machineId);
-    return MachineScope(
-      included: Set.unmodifiable(included),
-      excluded: Set.unmodifiable(excluded),
-      hideOffline: hideOffline,
-    );
-  }
-
-  /// Every listed machine checked, offline ones included, and nothing hidden.
-  MachineScope selectAll(Iterable<String> machineIds) =>
-      MachineScope(included: Set.unmodifiable(machineIds.toSet()));
-
-  MachineScope withHideOffline(bool hide) =>
-      MachineScope(included: included, excluded: excluded, hideOffline: hide);
+  /// Every online machine checked.
+  MachineScope selectAll() => const MachineScope();
 
   @override
   bool operator ==(Object other) =>
-      other is MachineScope &&
-      setEquals(other.included, included) &&
-      setEquals(other.excluded, excluded) &&
-      other.hideOffline == hideOffline;
+      other is MachineScope && setEquals(other.excluded, excluded);
 
   @override
-  int get hashCode => Object.hash(
-    Object.hashAllUnordered(included),
-    Object.hashAllUnordered(excluded),
-    hideOffline,
-  );
+  int get hashCode => Object.hashAllUnordered(excluded);
 }
 
 /// Null — in memory only — wherever `main()` did not open one, which keeps the
@@ -98,21 +67,13 @@ class MachineScopeNotifier extends Notifier<MachineScope> {
     // inherit the real scope, which could hide the sample project.
     if (_demo) return const MachineScope();
     final saved = _store?.read();
-    if (saved == null) return const MachineScope();
-    return MachineScope(
-      included: Set.unmodifiable(saved.included),
-      excluded: Set.unmodifiable(saved.excluded),
-      hideOffline: saved.hideOffline,
-    );
+    if (saved == null || saved.isEmpty) return const MachineScope();
+    return MachineScope(excluded: Set.unmodifiable(saved));
   }
 
-  void toggle(String machineId, {required bool online}) =>
-      _set(state.toggled(machineId, online: online));
+  void toggle(String machineId) => _set(state.toggled(machineId));
 
-  void selectAll(Iterable<String> machineIds) =>
-      _set(state.selectAll(machineIds));
-
-  void setHideOffline(bool hide) => _set(state.withHideOffline(hide));
+  void selectAll() => _set(state.selectAll());
 
   void _set(MachineScope next) {
     if (next == state) return;
@@ -124,11 +85,7 @@ class MachineScopeNotifier extends Notifier<MachineScope> {
     detached(
       'MachineScope',
       'persist failed',
-      () => store.write(
-        included: next.included,
-        excluded: next.excluded,
-        hideOffline: next.hideOffline,
-      ),
+      () => store.write(excluded: next.excluded),
     );
   }
 }

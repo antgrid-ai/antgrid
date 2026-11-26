@@ -16,6 +16,7 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/providers/machine_scope.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart' show DrawerRemoveButton;
@@ -219,33 +220,30 @@ void main() {
     expect(find.text('MB'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
-  testWidgets('an offline machine is out of scope until picked in the menu', (
+  testWidgets('an offline machine is out of scope and not offered in the menu', (
     tester,
   ) async {
     await seedRemoteCopy([_session('remote')]);
     await tester.pumpWidget(buildDrawer(machineOnline: false));
     await tester.pumpAndSettle();
 
-    // Its only project is on a machine the default scope leaves out.
+    // Its only project is on a machine that is never in scope while offline.
     expect(find.text('antgrid'), findsNothing);
     expect(find.text('No projects on the machines in scope.'), findsOneWidget);
 
     await tester.tap(find.byType(MachineScopeButton));
     await tester.pumpAndSettle();
-    await tester.tap(find.text(_machineName).last);
-    await tester.pumpAndSettle();
-    // Close the menu.
-    await tester.tapAt(const Offset(1, 1));
-    await tester.pumpAndSettle();
-
-    expect(find.text('antgrid'), findsOneWidget);
-    expect(find.text('offline'), findsOneWidget);
+    expect(find.text(_machineName), findsNothing);
+    expect(find.text('Hide offline machines'), findsNothing);
   });
 
   testWidgets('Show all machines brings a hidden project back', (tester) async {
     await seedRemoteCopy([_session('remote')]);
-    await tester.pumpWidget(buildDrawer(machineOnline: false));
+    await tester.pumpWidget(buildDrawer());
     await tester.pumpAndSettle();
+    containerOf(tester).read(machineScopeProvider.notifier).toggle(_machineUuid);
+    await tester.pumpAndSettle();
+    expect(find.text('antgrid'), findsNothing);
 
     await tester.tap(find.text('Show all machines'));
     await tester.pumpAndSettle();

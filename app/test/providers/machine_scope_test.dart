@@ -24,32 +24,20 @@ void main() {
       expect(scope.includes('b', online: false), isFalse);
     });
 
-    test('an unchecked online machine stays out; a checked offline one is in', () {
-      final scope = const MachineScope()
-          .toggled('a', online: true)
-          .toggled('b', online: false);
+    test('an unchecked machine stays out, and toggling again restores it', () {
+      final scope = const MachineScope().toggled('a');
       expect(scope.includes('a', online: true), isFalse);
-      expect(scope.includes('b', online: false), isTrue);
-      // Coming back online does not undo an explicit uncheck.
-      expect(scope.isChecked('a', online: true), isFalse);
+      expect(scope.isChecked('a'), isFalse);
+      expect(scope.toggled('a'), const MachineScope());
     });
 
-    test('hide offline drops even a picked offline machine, and restores it when turned off', () {
-      final picked = const MachineScope().toggled('b', online: false);
-      final hidden = picked.withHideOffline(true);
-      expect(hidden.includes('b', online: false), isFalse);
-      expect(hidden.isChecked('b', online: false), isTrue);
-      expect(hidden.withHideOffline(false).includes('b', online: false), isTrue);
+    test('an offline machine is never in scope, checked or not', () {
+      expect(const MachineScope().includes('b', online: false), isFalse);
     });
 
-    test('select all checks every machine, offline ones included', () {
-      final scope = const MachineScope()
-          .toggled('a', online: true)
-          .withHideOffline(true)
-          .selectAll(['a', 'b']);
+    test('select all checks every machine', () {
+      final scope = const MachineScope().toggled('a').selectAll();
       expect(scope.includes('a', online: true), isTrue);
-      expect(scope.includes('b', online: false), isTrue);
-      expect(scope.hideOffline, isFalse);
     });
   });
 
@@ -59,9 +47,7 @@ void main() {
       final first = ProviderContainer(
         overrides: [machineScopeStoreProvider.overrideWithValue(store)],
       );
-      first.read(machineScopeProvider.notifier)
-        ..toggle('a', online: true)
-        ..setHideOffline(true);
+      first.read(machineScopeProvider.notifier).toggle('a');
       first.dispose();
       // Let the detached write land.
       await Future<void>.delayed(Duration.zero);
@@ -76,43 +62,39 @@ void main() {
       addTearDown(second.dispose);
       final scope = second.read(machineScopeProvider);
       expect(scope.excluded, {'a'});
-      expect(scope.hideOffline, isTrue);
     });
 
     test('with no store it still works, in memory', () {
       final c = ProviderContainer();
       addTearDown(c.dispose);
-      c.read(machineScopeProvider.notifier).toggle('a', online: true);
+      c.read(machineScopeProvider.notifier).toggle('a');
       expect(c.read(machineScopeProvider).excluded, {'a'});
     });
   });
 
   group('machineScopeLabel', () {
-    final machines = [
-      machine('mbp'),
-      machine('stu'),
-      machine('old', online: false),
-    ];
+    final machines = [machine('mbp'), machine('stu'), machine('mini')];
 
-    test('default scope over a mix of online and offline reads all machines', () {
+    test('default scope reads all machines', () {
       expect(machineScopeLabel(machines, const MachineScope()), 'All machines');
     });
 
-    test('everything in scope reads all machines', () {
-      final scope = const MachineScope().selectAll(['mbp', 'stu', 'old']);
-      expect(machineScopeLabel(machines, scope), 'All machines');
-    });
-
     test('a single machine is named', () {
-      final scope = const MachineScope().toggled('stu', online: true);
+      final scope = const MachineScope().toggled('stu').toggled('mini');
       expect(machineScopeLabel(machines, scope), 'mbp');
     });
 
     test('otherwise a count', () {
-      final scope = const MachineScope()
-          .toggled('stu', online: true)
-          .toggled('old', online: false);
+      final scope = const MachineScope().toggled('stu');
       expect(machineScopeLabel(machines, scope), '2 of 3 machines');
+    });
+
+    test('nothing checked reads no machines', () {
+      final scope = const MachineScope()
+          .toggled('mbp')
+          .toggled('stu')
+          .toggled('mini');
+      expect(machineScopeLabel(machines, scope), 'No machines');
     });
   });
 

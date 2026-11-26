@@ -373,7 +373,7 @@ void main() {
   test('the machine scope neither inherits nor persists a choice in demo mode', () async {
     useInMemoryPrefs();
     final store = await MachineScopeStore.open();
-    await store.write(included: const {}, excluded: {'real'}, hideOffline: true);
+    await store.write(excluded: {'real'});
     final container = ProviderContainer(
       overrides: [machineScopeStoreProvider.overrideWithValue(store)],
     );
@@ -381,11 +381,10 @@ void main() {
     container.read(demoModeProvider.notifier).set(true);
 
     expect(container.read(machineScopeProvider), const MachineScope());
-    container.read(machineScopeProvider.notifier).toggle('real', online: true);
+    container.read(machineScopeProvider.notifier).toggle('real');
     await Future<void>.delayed(Duration.zero);
 
-    expect(store.read().excluded, {'real'});
-    expect(store.read().hideOffline, isTrue);
+    expect(store.read(), {'real'});
   });
 
   test('the phone neither reads nor writes its chosen machine in demo mode', () async {

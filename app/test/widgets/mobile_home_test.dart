@@ -89,6 +89,16 @@ void main() {
       );
       expect(scopeCandidates(machines, mobile: false), hasLength(3));
     });
+
+    test('offline machines are never candidates', () {
+      final machines = [_machine('up'), _machine('down', online: false)];
+      for (final mobile in [true, false]) {
+        expect(
+          scopeCandidates(machines, mobile: mobile).map((m) => m.id),
+          ['up'],
+        );
+      }
+    });
   });
 
   late TestStoreOverrides stores;
@@ -169,18 +179,19 @@ void main() {
     expect(container.read(composerProjectViewProvider)?.group.key, 'git:r/antgrid');
   });
 
-  testWidgets('the scope sheet locks a machine whose remote access is off', (
+  testWidgets('the scope sheet lists no offline machine and no toggle for one', (
     tester,
   ) async {
     await tester.pumpWidget(
       host(
         const MachineScopeSheet(),
-        machines: [_machine('mbp', remote: true), _machine('win', remote: false)],
+        machines: [_machine('mbp'), _machine('old', online: false)],
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Remote access is off on this machine'), findsOneWidget);
-    expect(find.bySemanticsLabel(RegExp('win, locked')), findsOneWidget);
+    expect(find.text('mbp'), findsOneWidget);
+    expect(find.text('old'), findsNothing);
+    expect(find.text('Hide offline machines'), findsNothing);
   });
 }
