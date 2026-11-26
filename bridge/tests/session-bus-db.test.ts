@@ -8,6 +8,7 @@ import { BUS_DB_VERSION, busDbPath, deleteScope, resetBusDbAnnouncements, tryBus
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { listSessionBusSessions, removeSessionBusProject, removeSessionBusSession } from "../src/session-bus/store-fs";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
+import { loadMailbox } from "../src/session-bus/mailbox";
 import { loadThreads } from "../src/session-bus/thread-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
 import { stampEnvelope } from "../src/session-bus/envelope";
@@ -30,8 +31,8 @@ test("a fresh abDir gets a stamped database, and the tables it names", () => {
   const rows = withBusDb(
     abDir,
     (db) => {
-      db.query("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES (?, 'i', ?, ?, 'applied')").run("c1", 1, 1);
-      return db.query("SELECT from_machine AS contextId FROM bus_seen").all() as { contextId: string }[];
+      db.query("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES (?, ?, ?, ?)").run("c1", "p1", "proj", 1);
+      return db.query("SELECT contextId FROM bus_routes").all() as { contextId: string }[];
     },
     [],
   );
@@ -49,9 +50,9 @@ test("a fresh abDir gets a stamped database, and the tables it names", () => {
 test("a database written under another version is dropped, never read", () => {
   // The whole of the no-migration decision, made observable. Reading a row
   // written under a shape this bridge no longer holds is the failure; losing it
-  // costs a redelivered message, which the at-least-once contract already
-  // tolerates.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('old', 'i', 1, 1, 'applied')"), null);
+  // costs a relearned route and a redelivered message, both of which the
+  // protocol already tolerates.
+  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES ('old', 'p', 'proj', 1)"), null);
   const raw = new Database(busDbPath(abDir));
   try {
     raw.exec("PRAGMA user_version = 99");
@@ -59,7 +60,7 @@ test("a database written under another version is dropped, never read", () => {
     raw.close();
   }
 
-  const found = withBusDb(abDir, (db) => db.query("SELECT from_machine AS contextId FROM bus_seen").all(), null);
+  const found = withBusDb(abDir, (db) => db.query("SELECT contextId FROM bus_routes").all(), null);
   expect(found).toEqual([]);
 
   const db = new Database(busDbPath(abDir), { readonly: true });
@@ -70,7 +71,7 @@ test("a database written under another version is dropped, never read", () => {
   }
 });
 
-const SESSION_SCOPED = ["bus_messages", "bus_held", "bus_artifacts", "bus_threads", "bus_pair_budget"] as const;
+const SESSION_SCOPED = ["bus_messages", "bus_held", "bus_artifacts", "bus_mailbox", "bus_threads", "bus_pair_budget"] as const;
 
 function fillEverySessionTable(): void {
   withBusDb(
@@ -134,7 +135,7 @@ test("a database that cannot be opened answers the fallback rather than throwing
   // Identity, not equality: a fallback that merely LOOKS like the query's own
   // empty answer would prove nothing about which of the two came back.
   const fallback = { fellBack: true };
-  const answer = withBusDb<unknown>(abDir, (db) => db.query("SELECT from_machine AS contextId FROM bus_seen").all(), fallback);
+  const answer = withBusDb<unknown>(abDir, (db) => db.query("SELECT contextId FROM bus_routes").all(), fallback);
 
   expect(answer).toBe(fallback);
 });
@@ -153,17 +154,17 @@ test("a failure does not take the next operation with it", () => {
 
 test("a database this build cannot read at all is moved aside, not kept forever", () => {
   // Every store on the machine is in this one file, so a truncated write from a
-  // power cut would otherwise cost this abDir its seen set, held messages, logs,
+  // power cut would otherwise cost this abDir its routes, held messages, logs,
   // artifact handles and delivery queue for the life of the install — the JSON
   // stores recovered on their next write without anyone deciding they should.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('c', 'i', 1, 1, 'applied')"), null);
+  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES ('c', 'p', 'proj', 1)"), null);
   writeFileSync(busDbPath(abDir), "this is not a database".repeat(20));
 
   const rows = withBusDb(
     abDir,
     (db) => {
-      db.query("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES (?, 'i', ?, ?, 'applied')").run("after", 2, 2);
-      return db.query("SELECT from_machine AS contextId FROM bus_seen").all() as { contextId: string }[];
+      db.query("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES (?, ?, ?, ?)").run("after", "p", "proj", 2);
+      return db.query("SELECT contextId FROM bus_routes").all() as { contextId: string }[];
     },
     [],
   );
@@ -178,13 +179,13 @@ test("a lock we merely lost is NOT treated as corruption", () => {
   // The other half of the rule above, and the one that costs rows if it is
   // wrong: a sibling host holding the write lock is the documented setup, and
   // moving the file aside there would throw away everything it had written.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('kept', 'i', 1, 1, 'applied')"), null);
+  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES ('kept', 'p', 'proj', 1)"), null);
 
   const blocker = new Database(busDbPath(abDir));
   try {
     blocker.exec("BEGIN EXCLUSIVE");
     expect(tryBusDb(abDir, "a write under a sibling's lock", (db) =>
-      db.query("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES (?, 'i', ?, ?, 'applied')").run("blocked", 2, 2),
+      db.query("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES (?, ?, ?, ?)").run("blocked", "p", "proj", 2),
     )).toBe(false);
   } finally {
     blocker.exec("ROLLBACK");
@@ -192,7 +193,7 @@ test("a lock we merely lost is NOT treated as corruption", () => {
   }
 
   expect(existsSync(`${busDbPath(abDir)}.corrupt`)).toBe(false);
-  expect(withBusDb(abDir, (db) => (db.query("SELECT from_machine AS contextId FROM bus_seen").all() as { contextId: string }[]).map((r) => r.contextId), []))
+  expect(withBusDb(abDir, (db) => (db.query("SELECT contextId FROM bus_routes").all() as { contextId: string }[]).map((r) => r.contextId), []))
     .toEqual(["kept"]);
 });
 
@@ -212,7 +213,7 @@ test.skipIf(process.platform === "win32")("the database is owner-only, like ever
   // One file now holds every message body, held frame, rendered delivery line
   // and peer relay slot id on the machine. SQLite gives `-wal` and `-shm` the
   // mode of the database file, so the whole set rides on this one chmod.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('c', 'i', 1, 1, 'applied')"), null);
+  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES ('c', 'p', 'proj', 1)"), null);
   expect(statSync(busDbPath(abDir)).mode & 0o777).toBe(0o600);
 });
 
@@ -224,9 +225,9 @@ test("a bad row costs that row in every store built on this seam", () => {
   // left — emptying either store on one bad row loses work nothing can notice
   // is missing.
   saveHeld(abDir, "p1", "s1", holdMessage(
-    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:notify" }, heldAt: 1, attempts: 1, nextAttemptAt: 0 }).state,
-    { messageId: "h-bad", contextId: "c", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:notify" }, heldAt: 2, attempts: 1, nextAttemptAt: 0 },
-  ).state);
+    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 1 }),
+    { messageId: "h-bad", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 2 },
+  ));
   saveDeliveries(abDir, "p1", enqueueLine(
     enqueueLine(emptyDeliveries(), { id: "l-good", sessionId: "s1", kind: "notify", text: "a", queuedAt: 1 }),
     { id: "l-bad", sessionId: "s1", kind: "notify", text: "b", queuedAt: 2 },
@@ -322,6 +323,7 @@ test("nothing that only reads or reclaims brings the database into being", () =>
   expect(loadHeld(abDir, "p1", "s1").held).toEqual([]);
   expect(loadDeliveries(abDir, "p1").lines).toEqual([]);
   expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
+  expect(loadMailbox(abDir, "p1", "s1").posts).toEqual([]);
   expect(loadThreads(abDir, "p1", "s1").threads).toEqual([]);
   expect(listSessionBusSessions(abDir)).toEqual([]);
   removeSessionBusProject(abDir, "p1");
@@ -331,63 +333,9 @@ test("nothing that only reads or reclaims brings the database into being", () =>
 
   // And a write still creates it, or none of the above would mean anything.
   saveHeld(abDir, "p1", "s1", holdMessage(emptyHeld(), {
-    messageId: "h-1", contextId: "c",
+    messageId: "h-1", contextId: "c", role: "lead",
     to: { machineId: "m", projectId: "p", sessionId: "s" },
-    frame: { type: "session-bus:notify" }, heldAt: 1, attempts: 1, nextAttemptAt: 0,
-  }).state);
+    frame: { type: "session-bus:post" }, heldAt: 1,
+  }));
   expect(existsSync(busDbPath(abDir))).toBe(true);
-});
-
-test("the database is stamped at the version that carries the seen set", () => {
-  expect(BUS_DB_VERSION).toBe(BUS_DB_VERSION);
-});
-
-test("a version 2 database is dropped whole, its routes table with it", () => {
-  // Version 2 held `bus_routes`, which nothing reads any more. It has to leave
-  // with the version bump rather than linger beside tables that replaced it.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('m', 'i', 1, 1, 'applied')"), null);
-  const raw = new Database(busDbPath(abDir));
-  try {
-    raw.exec("CREATE TABLE IF NOT EXISTS bus_routes (contextId TEXT PRIMARY KEY, peerId TEXT, projectId TEXT, at INTEGER)");
-    raw.exec("INSERT INTO bus_routes VALUES ('c', 'p', 'proj', 1)");
-    raw.exec("PRAGMA user_version = 2");
-  } finally {
-    raw.close();
-  }
-
-  expect(withBusDb(abDir, (db) => db.query("SELECT 1 FROM bus_seen").all(), null)).toEqual([]);
-  const check = new Database(busDbPath(abDir), { readonly: true });
-  try {
-    const names = (check.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
-    expect(names).not.toContain("bus_routes");
-    expect((check.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(BUS_DB_VERSION);
-  } finally {
-    check.close();
-  }
-});
-
-test("a session or project delete leaves the seen set alone", () => {
-  // Per sending machine, not per session: erasing a session's mail must not
-  // make a resend of it apply a second time.
-  withBusDb(abDir, (db) => db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('m', 'i', 1, 1, 'applied')"), null);
-  expect(tryBusDb(abDir, "a session delete", (db) => deleteScope(db, { projectId: "p1", sessionId: "s1" }))).toBe(true);
-  expect(tryBusDb(abDir, "a project delete", (db) => deleteScope(db, { projectId: "p1" }))).toBe(true);
-  expect(withBusDb(abDir, (db) => db.query("SELECT 1 FROM bus_seen").all().length, 0)).toBe(1);
-});
-
-test("the notify-only schema upgrade removes the mailbox and resets every versioned table", () => {
-  fillEverySessionTable();
-  withBusDb(abDir, (db) => {
-    db.exec("CREATE TABLE bus_mailbox (item TEXT)");
-    db.exec("INSERT INTO bus_mailbox VALUES ('old post')");
-    db.exec("INSERT INTO bus_seen (from_machine, id, at, expires_at, outcome) VALUES ('old', 'id', 1, 2, 'applied')");
-    db.exec("INSERT INTO bus_deliveries (projectId, line) VALUES ('p1', '{}')");
-    db.exec(`PRAGMA user_version = ${BUS_DB_VERSION - 1}`);
-  }, null);
-  withBusDb(abDir, (db) => {
-    expect(db.query("SELECT name FROM sqlite_master WHERE name = 'bus_mailbox'").get()).toBeNull();
-    for (const table of [...SESSION_SCOPED, "bus_seen", "bus_deliveries"]) {
-      expect((db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n).toBe(0);
-    }
-  }, null);
 });

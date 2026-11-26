@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { createMessage } from "../protocol";
 // The wire message types come from the registry, not from ./protocol — that
 // file owns the payload sub-schemas and the budgets, and registration made
@@ -65,7 +64,6 @@ interface Attachment {
   bytes: number;
   progressAt: number;
   lastSent: number;
-  lastFrame?: TerminalScreenFrame;
   pending: Map<number, number>;
   unsent?: { sequence: number; revision: number; controller: AbortController };
   awaitingConsumption?: boolean;
@@ -73,14 +71,6 @@ interface Attachment {
   oversizeNotified: boolean;
 }
 const key = (address: TerminalAddress) => JSON.stringify([address.projectId, address.checkoutId, address.terminalId]);
-
-function sameScreen(a: TerminalScreenFrame, b: TerminalScreenFrame): boolean {
-  if (a === b) return true;
-  // A parse revision can advance without changing any viewer-visible state.
-  const { revision: _a, ...screenA } = a;
-  const { revision: _b, ...screenB } = b;
-  return isDeepStrictEqual(screenA, screenB);
-}
 
 /** Shared capture cache for all authenticated connections on this machine. */
 export class TerminalFrameHub {
@@ -442,26 +432,10 @@ export class TerminalViewerConnection {
       this.retire(attachment, { abortQueued: false });
       return;
     }
-    if (now - attachment.lastSent < TERMINAL_FRAME_INTERVAL_MS ||
-        attachment.revision === run.source.revision) return;
-    if (!attachment.unsent && this.atCapacity(attachment)) return;
-    const frame = this.hub.frame(run, now);
-    // Compare before cancelling queued work: an identical replacement must
-    // leave the original deliverable, with its consumption deadline intact.
-    // The cached revision can still match while the next capture is throttled.
-    // A status failure needs a fresh frame even if the screen has reverted.
-    if (!run.failure && !run.source.oversize && !attachment.oversizeNotified &&
-        frame && frame.revision >= attachment.revision && attachment.lastFrame &&
-        sameScreen(attachment.lastFrame, frame)) {
-      attachment.revision = frame.revision;
-      attachment.lastFrame = frame;
-      if (attachment.unsent) attachment.unsent.revision = frame.revision;
-      return;
-    }
-    if (attachment.unsent && attachment.unsent.revision < run.source.revision) {
+    if (attachment.unsent && attachment.unsent.revision < run.source.revision &&
+        now - attachment.lastSent >= TERMINAL_FRAME_INTERVAL_MS) {
       const unsent = attachment.unsent;
       attachment.unsent = undefined;
-      attachment.lastFrame = undefined;
       unsent.controller.abort();
       const bytes = attachment.pending.get(unsent.sequence) ?? 0;
       attachment.pending.delete(unsent.sequence);
@@ -469,7 +443,11 @@ export class TerminalViewerConnection {
       this.bytes -= bytes;
       this.budget.bytes -= bytes;
     }
-    if (this.atCapacity(attachment)) return;
+    if (attachment.pending.size >= TERMINAL_VIEWER_MAX_FRAMES ||
+        attachment.bytes >= TERMINAL_VIEWER_MAX_BYTES || this.budget.bytes >= TERMINAL_CONNECTION_MAX_BYTES ||
+        now - attachment.lastSent < TERMINAL_FRAME_INTERVAL_MS ||
+        attachment.revision === run.source.revision) return;
+    const frame = this.hub.frame(run, now);
     if (run.failure) { this.fail(attachment, "DISPLAY_FAILED", run.failure); return; }
     // The source keeps its last good frame, so an oversize capture is not
     // visible as a missing one — ask the source directly.
@@ -500,7 +478,6 @@ export class TerminalViewerConnection {
     this.budget.bytes += bytes;
     attachment.lastSent = now;
     attachment.revision = frame.revision;
-    attachment.lastFrame = frame;
     const unsent = {
       sequence: attachment.sequence, revision: frame.revision, controller: new AbortController(),
     };
@@ -521,11 +498,6 @@ export class TerminalViewerConnection {
       settled();
       this.retire(attachment);
     }
-  }
-
-  private atCapacity(attachment: Attachment): boolean {
-    return attachment.pending.size >= TERMINAL_VIEWER_MAX_FRAMES ||
-      attachment.bytes >= TERMINAL_VIEWER_MAX_BYTES || this.budget.bytes >= TERMINAL_CONNECTION_MAX_BYTES;
   }
 
   /** Treats a transport that throws SYNCHRONOUSLY the same as one whose
@@ -578,7 +550,6 @@ export class TerminalViewerConnection {
     attachment.bytes = 0;
     attachment.pending.clear();
     attachment.unsent = undefined;
-    attachment.lastFrame = undefined;
     attachment.awaitingConsumption = false;
     attachment.revision = -1;
     attachment.oversizeNotified = false;
@@ -592,7 +563,6 @@ export class TerminalViewerConnection {
     for (const attachment of this.attachments.values()) {
       if (attachment.run !== run) continue;
       attachment.revision = -1;
-      attachment.lastFrame = undefined;
       attachment.oversizeNotified = false;
     }
   }

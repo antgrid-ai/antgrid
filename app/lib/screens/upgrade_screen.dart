@@ -1,11 +1,16 @@
 import 'dart:io';
 
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/material.dart' show MaterialPageRoute, Scaffold;
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_panel_header.dart';
 import '../analytics/events.dart';
 import '../models/subscription_info.dart';
 import '../providers/analytics.dart';
@@ -33,15 +38,6 @@ const _proYearlyFeatures = [
 /// deleted when checkout opens — see the TEMP-PROMO marker at the foot of this
 /// file.
 const _unavailableCtaLabel = 'Available after beta';
-
-/// Content column caps. Chosen from density, not window width, like the sign-in
-/// column: a phone fills its width less the gutters, while a wide tablet or
-/// desktop keeps lines readable.
-const double _touchColumnWidth = 480;
-const double _compactColumnWidth = 640;
-
-double _columnWidth(CarbonThemeData t) =>
-    t.isTouch ? _touchColumnWidth : _compactColumnWidth;
 
 /// The machine count sits mid-sentence, so it has to agree with its noun —
 /// Free is 1, and "1 machines" is the kind of thing a buyer notices.
@@ -77,36 +73,34 @@ class _UpgradeScreenState extends ConsumerState<UpgradeScreen> {
   Widget build(BuildContext context) {
     final catalogAsync = ref.watch(pricingCatalogProvider);
 
-    return AbCarbonScope(
-      child: Builder(
-        builder: (scoped) {
-          final t = CarbonTheme.of(scoped);
-          return Scaffold(
-            backgroundColor: t.colors.background,
-            body: SafeArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _PricingToolbar(
-                    onClose: widget.onClose ?? () => Navigator.of(scoped).pop(),
-                  ),
-                  Expanded(
-                    child: catalogAsync.when(
-                      loading: () => const Center(
-                        child: CarbonLoading(size: CarbonLoadingSize.small),
-                      ),
-                      error: (e, _) => _ErrorState(
-                        message: e.toString(),
-                        onRetry: () => ref.invalidate(pricingCatalogProvider),
-                      ),
-                      data: (catalog) => _PricingBody(catalog: catalog),
-                    ),
-                  ),
-                ],
+    return Scaffold(
+      backgroundColor: context.antgrid.bgDeepest,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AbPanelHeader(
+              title: 'PRICING',
+              actions: [
+                AbIconButton(
+                  icon: AbIcons.close,
+                  tooltip: 'Close',
+                  onTap: widget.onClose ?? () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            Expanded(
+              child: catalogAsync.when(
+                loading: () => const Center(child: AbLoading()),
+                error: (e, _) => _ErrorState(
+                  message: e.toString(),
+                  onRetry: () => ref.invalidate(pricingCatalogProvider),
+                ),
+                data: (catalog) => _PricingBody(catalog: catalog),
               ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
@@ -125,51 +119,6 @@ bool requiresCrossPlatformBillingOnDevice(
   );
 }
 
-class _PricingToolbar extends StatelessWidget {
-  const _PricingToolbar({required this.onClose});
-
-  final VoidCallback onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: t.borderSubtle(1))),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: CarbonSizes.lg),
-        child: Padding(
-          padding: const EdgeInsetsDirectional.only(
-            start: CarbonSpacing.spacing05,
-            end: CarbonSpacing.spacing03,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Semantics(
-                  header: true,
-                  child: Text(
-                    'PRICING',
-                    style: t.typography.heading.copyWith(
-                      color: t.colors.textPrimary,
-                    ),
-                  ),
-                ),
-              ),
-              CarbonButton.iconOnly(
-                icon: const CarbonIcon(CarbonIcons.close),
-                semanticLabel: 'Close',
-                onPressed: onClose,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _ErrorState extends StatelessWidget {
   const _ErrorState({required this.message, required this.onRetry});
 
@@ -178,29 +127,20 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
     return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: _columnWidth(t)),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              CarbonNotification(
-                kind: CarbonNotificationKind.error,
-                subtitle: message,
-              ),
-              const SizedBox(height: CarbonSpacing.spacing04),
-              CarbonButton(
-                label: 'Retry',
-                kind: CarbonButtonKind.tertiary,
-                expand: true,
-                onPressed: onRetry,
-              ),
-            ],
-          ),
+      child: Padding(
+        padding: const EdgeInsets.all(AbTokens.space16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              message,
+              style: AbTokens.sansStyle(color: context.antgrid.error),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: AbTokens.space12),
+            AbButton(label: 'Retry', onTap: onRetry),
+          ],
         ),
       ),
     );
@@ -214,16 +154,14 @@ class _PricingBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
     final catalog = this.catalog;
     if (catalog == null) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+          padding: const EdgeInsets.all(AbTokens.space16),
           child: Text(
             'Could not load pricing.',
-            textAlign: TextAlign.center,
-            style: t.typography.body.copyWith(color: t.colors.textSecondary),
+            style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
           ),
         ),
       );
@@ -234,28 +172,54 @@ class _PricingBody extends StatelessWidget {
     final yearlyDisplay =
         yearlyPlan?.priceDisplay ?? catalog.yearlyPriceDisplay ?? '';
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: _columnWidth(t)),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const _PricingHeader(),
-              if (trialPlan != null) ...[
-                const SizedBox(height: CarbonSpacing.spacing06),
-                _FreeTrialBanner(
-                  catalog: catalog,
-                  trialPlan: trialPlan,
-                  yearlyDisplay: yearlyDisplay,
-                ),
-              ],
-              const SizedBox(height: CarbonSpacing.spacing06),
-              if (yearlyPlan != null)
-                _ProYearlyCard(plan: yearlyPlan, price: yearlyDisplay),
-            ],
+    return ListView(
+      padding: const EdgeInsets.all(AbTokens.space16),
+      children: [
+        const _PricingHeader(),
+        if (trialPlan != null) ...[
+          const SizedBox(height: AbTokens.space24),
+          _FreeTrialBanner(
+            catalog: catalog,
+            trialPlan: trialPlan,
+            yearlyDisplay: yearlyDisplay,
+          ),
+        ],
+        const SizedBox(height: AbTokens.space24),
+        if (yearlyPlan != null)
+          _ProYearlyCard(plan: yearlyPlan, price: yearlyDisplay),
+      ],
+    );
+  }
+}
+
+class _PricingCta extends StatelessWidget {
+  const _PricingCta({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Opacity(
+      opacity: 0.4,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space16,
+          vertical: AbTokens.space12,
+        ),
+        decoration: BoxDecoration(
+          color: p.bgSurface,
+          border: Border.all(color: p.borderDefault),
+          borderRadius: AbTokens.borderRadius8,
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontSm,
+            fontWeight: FontWeight.w500,
+            color: p.textMuted,
           ),
         ),
       ),
@@ -263,42 +227,35 @@ class _PricingBody extends StatelessWidget {
   }
 }
 
-/// Disabled on purpose, and drawn at full strength inside a full-strength
-/// card: Carbon dims a control, never the container around it.
-class _PricingCta extends StatelessWidget {
-  const _PricingCta({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) =>
-      CarbonButton(label: label, expand: true, onPressed: null);
-}
-
 class _PricingHeader extends StatelessWidget {
   const _PricingHeader();
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     return Column(
       children: [
-        Semantics(
-          header: true,
-          child: Text(
-            'Simple, honest pricing',
-            textAlign: TextAlign.center,
-            style: t.typography.title.copyWith(color: t.colors.textPrimary),
+        Text(
+          'Simple, honest pricing',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontDisplayMd,
+            fontWeight: FontWeight.w700,
+            color: antgrid.textPrimary,
           ),
         ),
-        const SizedBox(height: CarbonSpacing.spacing04),
+        const SizedBox(height: AbTokens.space12),
         Text(
           'Monitor and control your AI coding agents from anywhere, on your '
           'own machines. Pro is billed per seat — one per person on your '
           'team. End-to-end encrypted between your devices (QUIC/TLS 1.3); '
           'relays cannot read content.',
           textAlign: TextAlign.center,
-          style: t.typography.body.copyWith(color: t.colors.textSecondary),
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontSm,
+            color: antgrid.textSecondary,
+            height: 1.45,
+          ),
         ),
       ],
     );
@@ -323,45 +280,91 @@ class _FreeTrialBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
 
-    return CarbonLayerSurface(
-      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Wrap(
-            spacing: CarbonSpacing.spacing03,
-            runSpacing: CarbonSpacing.spacing03,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const CarbonTag(label: 'FREE TRIAL', color: CarbonTagColor.blue),
-              Text(
-                '${catalog.trialDays}-day trial',
-                style: t.typography.helper.copyWith(
-                  color: t.colors.textSecondary,
+    return Opacity(
+      opacity: 0.6,
+      child: Container(
+        padding: const EdgeInsets.all(AbTokens.space16),
+        decoration: BoxDecoration(
+          color: antgrid.bgSurface,
+          border: Border.all(color: antgrid.borderDefault),
+          borderRadius: AbTokens.borderRadius8,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Wrap(
+              spacing: AbTokens.space8,
+              runSpacing: AbTokens.space8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                const _PlanBadge(label: 'FREE TRIAL'),
+                Text(
+                  '${catalog.trialDays}-day trial',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: antgrid.textMuted,
+                  ),
                 ),
+              ],
+            ),
+            const SizedBox(height: AbTokens.space8),
+            Text(
+              '${catalog.trialDays}-day free trial, then $yearlyDisplay '
+              'per seat / year',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontLg,
+                fontWeight: FontWeight.w600,
+                color: antgrid.textPrimary,
               ),
-            ],
-          ),
-          const SizedBox(height: CarbonSpacing.spacing03),
-          Text(
-            '${catalog.trialDays}-day free trial, then $yearlyDisplay '
-            'per seat / year',
-            style: t.typography.heading.copyWith(color: t.colors.textPrimary),
-          ),
-          const SizedBox(height: CarbonSpacing.spacing03),
-          Text(
-            'Add your card to start. Up to ${_machines(trialPlan.workerLimit)} '
-            'during the trial, on one seat — invite your team once it converts. '
-            'Your card won\'t be charged until ${_firstChargeDate()} — cancel '
-            'anytime before then to avoid the $yearlyDisplay per seat / year '
-            'charge. Subscription renews automatically unless canceled.',
-            style: t.typography.body.copyWith(color: t.colors.textSecondary),
-          ),
-          const SizedBox(height: CarbonSpacing.spacing05),
-          const _PricingCta(label: _unavailableCtaLabel),
-        ],
+            ),
+            const SizedBox(height: AbTokens.space6),
+            Text(
+              'Add your card to start. Up to ${_machines(trialPlan.workerLimit)} '
+              'during the trial, on one seat — invite your team once it converts. '
+              'Your card won\'t be charged until ${_firstChargeDate()} — cancel '
+              'anytime before then to avoid the $yearlyDisplay per seat / year '
+              'charge. Subscription renews automatically unless canceled.',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: antgrid.textSecondary,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: AbTokens.space16),
+            const _PricingCta(label: _unavailableCtaLabel),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PlanBadge extends StatelessWidget {
+  const _PlanBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space2,
+      ),
+      decoration: BoxDecoration(
+        color: p.accent,
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Text(
+        label.toUpperCase(),
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXs,
+          fontWeight: FontWeight.w700,
+          color: p.accentForeground,
+        ),
       ),
     );
   }
@@ -408,50 +411,64 @@ class _PlanCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
 
-    return CarbonLayerSurface(
-      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            title,
-            style: t.typography.headingLarge.copyWith(
-              color: t.colors.textPrimary,
+    return Opacity(
+      opacity: 0.6,
+      child: Container(
+        padding: const EdgeInsets.all(AbTokens.space16),
+        decoration: BoxDecoration(
+          color: antgrid.bgSurface,
+          border: Border.all(color: antgrid.borderDefault),
+          borderRadius: AbTokens.borderRadius8,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              title,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXl,
+                fontWeight: FontWeight.w700,
+                color: antgrid.textPrimary,
+              ),
             ),
-          ),
-          const SizedBox(height: CarbonSpacing.spacing04),
-          // One paragraph so the price and its suffix share a text baseline
-          // and still wrap at narrow widths. Carbon sets prices in Plex Sans
-          // like the rest of its type, not in the mono data face.
-          Text.rich(
-            TextSpan(
+            const SizedBox(height: AbTokens.space12),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
               children: [
-                TextSpan(
-                  text: price,
-                  style: t.typography.title.copyWith(
-                    color: t.colors.textPrimary,
+                Text(
+                  price,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontDisplayLg,
+                    fontWeight: FontWeight.w700,
+                    color: antgrid.textPrimary,
                   ),
                 ),
-                TextSpan(
-                  text: ' $priceSuffix',
-                  style: t.typography.label.copyWith(
-                    color: t.colors.textSecondary,
+                const SizedBox(width: AbTokens.space4),
+                Text(
+                  priceSuffix,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: antgrid.textMuted,
                   ),
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: CarbonSpacing.spacing03),
-          Text(
-            priceNote,
-            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
-          ),
-          _FeatureList(items: features, workers: workers, maxSeats: maxSeats),
-          const SizedBox(height: CarbonSpacing.spacing06),
-          const _PricingCta(label: _unavailableCtaLabel),
-        ],
+            const SizedBox(height: AbTokens.space6),
+            Text(
+              priceNote,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: antgrid.textMuted,
+              ),
+            ),
+            _FeatureList(items: features, workers: workers, maxSeats: maxSeats),
+            const SizedBox(height: AbTokens.space24),
+            const _PricingCta(label: _unavailableCtaLabel),
+          ],
+        ),
       ),
     );
   }
@@ -470,42 +487,35 @@ class _FeatureList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final body = t.typography.body;
+    final antgrid = context.antgrid;
     return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing05),
+      padding: const EdgeInsets.only(top: AbTokens.space16),
       child: Column(
         children: [
           for (final item in items) ...[
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Centred in the first line's box so the mark tracks the text
-                // at any text scale instead of a hand-set offset.
-                SizedBox(
-                  height: MediaQuery.textScalerOf(
-                    context,
-                  ).scale(body.fontSize ?? 16) * (body.height ?? 1.4),
-                  child: Center(
-                    child: CarbonIcon(
-                      CarbonIcons.checkmark,
-                      size: 16,
-                      color: t.colors.iconInteractive,
-                    ),
-                  ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: AbIcon(AbIcons.check, size: 14, color: antgrid.accent),
                 ),
-                const SizedBox(width: CarbonSpacing.spacing04),
+                const SizedBox(width: AbTokens.space10),
                 Expanded(
                   child: Text(
                     item
                         .replaceAll('{workers}', _machines(workers))
                         .replaceAll('{seats}', _seatCeiling(maxSeats)),
-                    style: body.copyWith(color: t.colors.textSecondary),
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontSm,
+                      color: antgrid.textSecondary,
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: CarbonSpacing.spacing04),
+            const SizedBox(height: AbTokens.space10),
           ],
         ],
       ),
@@ -603,11 +613,8 @@ Future<void> openUpgrade(
 //      each line (most editors: select + "toggle line comment").
 //   3. In web/src/routes/ui.tsx's `/pricing` handler and web/src/ui/pricing.tsx,
 //      do the matching restore — see the "TEMP-PROMO" comments there.
-//   4. Migrate the restored UI to Carbon. The static screen above is on
-//      Carbon (AbCarbonScope, Carbon widgets and tokens), while the code below
-//      is still built on the old Ab widgets and must not ship that way.
-//   5. Delete this marker block itself (down through the end of this file).
-//   6. Run `cd app && flutter analyze && flutter test` to confirm nothing
+//   4. Delete this marker block itself (down through the end of this file).
+//   5. Run `cd app && flutter analyze && flutter test` to confirm nothing
 //      still depends on the promo-only code paths.
 // ============================================================================
 // import 'dart:io';

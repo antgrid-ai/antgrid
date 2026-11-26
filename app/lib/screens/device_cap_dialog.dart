@@ -1,16 +1,21 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/material.dart' show showDialog;
+import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_confirm_dialog.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
 import '../providers/auth.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/provisioning_coordinator.dart';
 import '../services/devices_api.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
-import '../widgets/carbon_confirm.dart';
 
 /// Where the worker-cap variant sends someone who wants more machines. There is
 /// no checkout to send them to during the beta, so the ask is captured on the
@@ -29,9 +34,6 @@ Future<void> showDeviceCapDialog(
   final container = ref.container;
   await showDialog<void>(
     context: context,
-    // The scrim is painted by the dialog inside its Carbon scope so it follows
-    // Carbon's overlay token instead of Material's black54 barrier.
-    barrierColor: const Color(0x00000000),
     builder: (_) => DeviceCapDialog(info: info),
   );
   container.read(deviceCapProvider.notifier).set(null);
@@ -62,17 +64,13 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
   String? _busyId;
   String? _error;
 
-  /// Keys the modal so [_remove] can present its confirmation from beneath the
-  /// Carbon scope this dialog builds: the state's own context sits above it.
-  final _modalKey = GlobalKey();
-
   bool get _isWorker => _info.kind == DeviceCapKind.worker;
 
   Future<void> _remove(CappedDevice d) async {
     final devicesApi = ref.read(devicesApiProvider);
     final provisioning = ref.read(provisioningCoordinatorProvider);
-    final confirmed = await showCarbonConfirm(
-      _modalKey.currentContext ?? context,
+    final confirmed = await AbConfirmDialog.show(
+      context: context,
       title: _isWorker ? 'Sign out machine?' : 'Remove device?',
       body: _isWorker
           ? '"${d.displayName}" will stop running agents remotely until it '
@@ -81,7 +79,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
           : '"${d.displayName}" will lose remote access until it registers '
                 'again. This frees a slot so this machine can register.',
       confirmLabel: _isWorker ? 'Sign out' : 'Remove',
-      danger: true,
+      destructive: true,
     );
     if (!confirmed || !mounted) return;
 
@@ -139,107 +137,120 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final p = context.antgrid;
     final busy = _busyId != null;
-    // The caller sits outside any Carbon scope and a plain dialog route gives
-    // none, so the scope is built here rather than demanded of the caller.
-    return AbCarbonScope(
-      child: Builder(
-        builder: (scoped) {
-          final t = CarbonTheme.of(scoped);
-          void close() => Navigator.of(context).pop();
-          return Stack(
-            fit: StackFit.expand,
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: const EdgeInsets.all(AbTokens.space16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              ColoredBox(color: t.colors.overlay),
-              Padding(
-                padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-                child: Center(
-                  child: CarbonModal(
-                key: _modalKey,
-                size: CarbonModalSize.xs,
-                title: _isWorker
-                    ? 'Machine limit reached'
-                    : 'Device limit reached',
-                // The header's close button cannot be disabled, so while a
-                // revoke is in flight it does nothing instead.
-                onClose: busy ? () {} : close,
-                body: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      _info.message,
-                      style: t.typography.body.copyWith(
-                        color: t.colors.textPrimary,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _isWorker
+                          ? 'Machine limit reached'
+                          : 'Device limit reached',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontBody,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                    if (_isWorker) ...[
-                      const SizedBox(height: CarbonSpacing.spacing03),
-                      // The machine slot cannot be bought during the beta, so
-                      // the paid path leads somewhere that works instead of
-                      // standing there disabled. The line says why the button
-                      // is a waitlist and not a purchase; a tooltip could not,
-                      // having no hover on mobile.
-                      Text(
-                        'More machines aren\'t on sale yet.',
-                        style: t.typography.helper.copyWith(
-                          color: t.colors.textSecondary,
-                        ),
-                      ),
-                    ],
-                    if (_devices.isNotEmpty) ...[
-                      const SizedBox(height: CarbonSpacing.spacing05),
-                      // Bounded so a long device list scrolls instead of
-                      // overflowing.
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 260),
-                        child: SingleChildScrollView(
-                          child: CarbonContainedList(
-                            label: null,
-                            children: [
-                              for (final d in _devices)
-                                _DeviceRow(
-                                  device: d,
-                                  busy: busy,
-                                  isBusy: _busyId == d.id,
-                                  isWorker: _isWorker,
-                                  onRemove: () => _remove(d),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                    if (_error != null) ...[
-                      const SizedBox(height: CarbonSpacing.spacing05),
-                      CarbonNotification(
-                        kind: CarbonNotificationKind.error,
-                        subtitle: _error,
-                      ),
-                    ],
-                  ],
-                ),
-                actions: [
-                  CarbonModalAction(
-                    label: 'Close',
-                    kind: CarbonButtonKind.secondary,
-                    onPressed: busy ? null : close,
                   ),
-                  if (_isWorker)
-                    CarbonModalAction(
+                  AbIconButton(
+                    icon: AbIcons.close,
+                    onTap: busy ? null : () => Navigator.of(context).pop(),
+                    tooltip: 'Close',
+                  ),
+                ],
+              ),
+              const SizedBox(height: AbTokens.space12),
+              Text(
+                _info.message,
+                style: TextStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: p.textSecondary,
+                ),
+              ),
+              if (_devices.isNotEmpty) ...[
+                const SizedBox(height: AbTokens.space16),
+                // Bounded so a long device list scrolls instead of overflowing.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final d in _devices)
+                          _DeviceRow(
+                            device: d,
+                            busy: busy,
+                            isBusy: _busyId == d.id,
+                            isWorker: _isWorker,
+                            onRemove: () => _remove(d),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: AbTokens.space12),
+                Text(
+                  _error!,
+                  style: TextStyle(fontSize: AbTokens.fontSm, color: p.error),
+                ),
+              ],
+              const SizedBox(height: AbTokens.space16),
+              // Wrap, not Row: the worker variant's three children exceed the
+              // dialog's content width on a 320pt phone, and any textScaler
+              // above 1.0 overflows it on every phone.
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: AbTokens.space8,
+                runSpacing: AbTokens.space8,
+                children: [
+                  if (_isWorker) ...[
+                    // The machine slot cannot be bought during the beta, so the
+                    // paid path leads somewhere that works instead of standing
+                    // there disabled. The line says why the button is a
+                    // waitlist and not a purchase; a tooltip could not, having
+                    // no hover on mobile.
+                    Text(
+                      'More machines aren\'t on sale yet.',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textMuted,
+                      ),
+                    ),
+                    AbButton(
                       label: 'Join the waitlist',
-                      onPressed: () => detached(
+                      leading: AbIcon(
+                        AbIcons.openExternal,
+                        size: AbTokens.iconButtonGlyph,
+                        color: p.textSecondary,
+                      ),
+                      onTap: () => detached(
                         'DeviceCapDialog',
                         'open founding-pricing waitlist',
                         () => openExternalUrl(context, _foundingPricingUrl),
                       ),
                     ),
+                  ],
+                  AbButton(
+                    label: 'Close',
+                    onTap: busy ? null : () => Navigator.of(context).pop(),
+                  ),
                 ],
               ),
-            ),
-          ),
             ],
-          );
-        },
+          ),
+        ),
       ),
     );
   }
@@ -262,103 +273,29 @@ class _DeviceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final level = CarbonLayer.of(context);
-    final label = switch ((isWorker, isBusy)) {
-      (true, true) => 'Signing out…',
-      (true, false) => 'Sign out',
-      (false, true) => 'Removing…',
-      (false, false) => 'Remove',
-    };
-    final action = CarbonButton(
-      label: label,
-      kind: CarbonButtonKind.dangerGhost,
-      onPressed: busy ? null : onRemove,
-    );
-    // One accessible name carrying the id, which is what tells two
-    // same-named devices apart.
-    final text = Semantics(
-      label: '${device.displayName}, ${device.deviceId}',
-      child: ExcludeSemantics(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              device.displayName,
-              style: t.typography.body.copyWith(color: t.colors.textPrimary),
-            ),
-            // deviceId is code/data, so it takes the code style.
-            Text(
-              device.deviceId,
-              style: t.typography.code.copyWith(color: t.colors.textSecondary),
-            ),
-          ],
+    final p = context.antgrid;
+    return AbListRow(
+      horizontalPadding: 0,
+      density: AbRowDensity.sm,
+      title: Text(device.displayName),
+      // deviceId is code/data → mono (overrides the row's default sans subtitle).
+      subtitle: Text(
+        device.deviceId,
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXs,
+          color: p.textMuted,
         ),
       ),
-    );
-    // Not a CarbonContainedListRow: its actions cell never shrinks or wraps,
-    // so large accessibility text on a phone crushes the name beside it. This
-    // keeps the row's fill, padding and rule, and moves the action under the
-    // name once its label would take more than a third of the row, past
-    // which a device id wraps a few characters to a line beside it.
-    return ColoredBox(
-      color: t.layer(level),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final painter = TextPainter(
-                text: TextSpan(text: label, style: t.typography.control),
-                textDirection: TextDirection.ltr,
-                textScaler: MediaQuery.textScalerOf(context),
-                maxLines: 1,
-              )..layout();
-              final actionWidth = painter.width + 2 * CarbonSpacing.spacing05;
-              painter.dispose();
-              final inline = actionWidth <= constraints.maxWidth / 3;
-              final named = Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  start: CarbonSpacing.spacing05,
-                ),
-                child: text,
-              );
-              return Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: CarbonSpacing.spacing02,
-                ),
-                child: inline
-                    ? Row(
-                        children: [
-                          Expanded(child: named),
-                          const SizedBox(width: CarbonSpacing.spacing03),
-                          action,
-                        ],
-                      )
-                    // Unpadded, so the ghost button's own inline padding puts
-                    // its label on the name's edge.
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsetsDirectional.only(
-                              end: CarbonSpacing.spacing05,
-                            ),
-                            child: named,
-                          ),
-                          action,
-                        ],
-                      ),
-              );
-            },
-          ),
-          SizedBox(
-            height: CarbonBorders.hairline,
-            child: ColoredBox(color: t.borderSubtle(level)),
-          ),
-        ],
+      trailing: AbButton(
+        label: switch ((isWorker, isBusy)) {
+          (true, true) => 'Signing out…',
+          (true, false) => 'Sign out',
+          (false, true) => 'Removing…',
+          (false, false) => 'Remove',
+        },
+        color: busy ? null : p.error,
+        compact: true,
+        onTap: busy ? null : onRemove,
       ),
     );
   }

@@ -31,19 +31,19 @@ void main() {
       await settleShell(tester);
       expect(find.text('a.dart').hitTestable(), findsOneWidget);
 
-      // The switcher's History label is the only one hittable until then.
-      await tester.tap(find.text('History').hitTestable().first);
+      // Segments paint upper-case; History's own header is offstage until then.
+      await tester.tap(find.text('HISTORY').hitTestable().first);
       await settleShell(tester);
       expect(find.text('a.dart').hitTestable(), findsNothing);
 
       // A commit empties the tree, then the agent's next edit refills it.
       states.add(const FileTreeState());
       await settleShell(tester);
-      expect(find.textContaining('Changes ·'), findsNothing);
+      expect(find.textContaining('CHANGES ·'), findsNothing);
       states.add(oneChangeTree());
       await settleShell(tester);
 
-      expect(find.textContaining('Changes ·'), findsOneWidget);
+      expect(find.textContaining('CHANGES ·'), findsOneWidget);
       expect(find.text('a.dart').hitTestable(), findsNothing);
     } finally {
       debugDefaultTargetPlatformOverride = null;

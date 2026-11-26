@@ -2,8 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RESTART_FAILED_ERROR, SessionManager, SessionVerbError } from "../src/session-manager";
-import { setMemoryLaunchGate } from "../src/agent-host";
+import { SessionManager } from "../src/session-manager";
 import { HandlerEngine } from "../src/handler/engine";
 import type { AbMessage } from "../src/protocol";
 
@@ -20,10 +19,6 @@ const BACKLOG = [{ id: "i1", text: "run the tests", status: "queued" as const, c
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-// The Memory gate is process-global; each core installs its own and hands it back.
-const gateReleases: Array<() => void> = [];
-afterEach(() => { for (const release of gateReleases.splice(0)) release(); });
-
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((r) => { resolve = r; });
@@ -36,22 +31,17 @@ interface CoreOpts {
   teardownTimeoutMs?: number;
 }
 
-/** The only fields the restart tests read back from a spawn. */
-type Spawned = { terminalId?: string; args?: string[] };
-
 function makeCore(dir: string, opts: CoreOpts = {}) {
   const order: string[] = [];
   const sent: AbMessage[] = [];
-  const spawns: Spawned[] = [];
-  let memoryOn = false;
-  gateReleases.push(setMemoryLaunchGate(() => memoryOn));
+  const spawns: Array<{ terminalId?: string }> = [];
   const live = new Set<string>();
 
   // kill() is fire-and-forget in the real TerminalManager — the session stays in
   // `has()` until the exit handler runs, which is the whole reason setMode has
   // to wait for something other than kill()'s return.
   const term = {
-    spawn: (cfg: Spawned) => {
+    spawn: (cfg: { terminalId?: string }) => {
       live.add(cfg.terminalId!);
       spawns.push(cfg);
       order.push("pty-spawn");
@@ -117,9 +107,7 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
     return status.sessions.some((s) => s.terminalId === id);
   };
 
-  const setMemory = (on: boolean) => { memoryOn = on; };
-
-  return { sessions, engine, term, order, spawns, exitPty, isArmed, setMemory };
+  return { sessions, engine, term, order, spawns, exitPty, isArmed };
 }
 
 describe("session mode flip — teardown ordering", () => {
@@ -316,312 +304,6 @@ describe("session mode flip — teardown ordering", () => {
 
     expect(c.sessions.list(true).find((e) => e.id === s.id)?.mode).toBe("terminal");
     expect(c.order).toEqual([]);
-    c.sessions.flushNow();
-  });
-});
-
-describe("restartForMemory", () => {
-  let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "antgrid-restart-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
-
-  /** A running terminal session launched while Memory was off, with Memory since turned on. */
-  async function flagged(opts: CoreOpts = {}) {
-    const c = makeCore(dir, opts);
-    const s = c.sessions.create("t", { tool: "codex" });
-    await c.sessions.start(s.id);
-    c.setMemory(true);
-    return { c, s };
-  }
-
-  it("restarts a flagged running session and the new run is no longer flagged", async () => {
-    const { c, s } = await flagged();
-    expect(c.sessions.get(s.id)?.startedWithoutMemory).toBe(true);
-
-    const restart = c.sessions.restartForMemory(s.id);
-    await tick();
-    expect(c.spawns.length).toBe(1);
-    c.exitPty(s.id);
-
-    expect(await restart).toBe(true);
-    expect(c.spawns.length).toBe(2);
-    expect(c.term.has(s.id)).toBe(true);
-    expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
-    c.sessions.flushNow();
-  });
-
-  it("carries agentSessionId into the relaunch", async () => {
-    const c = makeCore(dir);
-    const transcript = join(dir, "transcript.jsonl");
-    writeFileSync(transcript, "{}\n");
-    const s = c.sessions.create("t", { tool: "claude-code" });
-    c.sessions.setAgentSession(s.id, "thread-xyz", transcript);
-    await c.sessions.start(s.id);
-    c.setMemory(true);
-
-    const restart = c.sessions.restartForMemory(s.id);
-    await tick();
-    c.exitPty(s.id);
-    await restart;
-
-    expect(c.sessions.get(s.id)?.agentSessionId).toBe("thread-xyz");
-    expect(c.spawns[1]?.args?.join(" ")).toContain("thread-xyz");
-    c.sessions.flushNow();
-  });
-
-  it("keeps an armed Handler armed and reports flipping only during the teardown", async () => {
-    const { c, s } = await flagged();
-    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG });
-    expect(c.sessions.isFlipping(s.id)).toBe(false);
-
-    const restart = c.sessions.restartForMemory(s.id);
-    await tick();
-    expect(c.sessions.isFlipping(s.id)).toBe(true);
-    c.exitPty(s.id);
-    await restart;
-
-    expect(c.sessions.isFlipping(s.id)).toBe(false);
-    expect(c.isArmed(s.id)).toBe(true);
-    expect(c.order).not.toContain("handler-disarm");
-    c.sessions.flushNow();
-  });
-
-  it("returns false and leaves the PTY alone when the session is not running", async () => {
-    const c = makeCore(dir);
-    c.setMemory(true);
-    const s = c.sessions.create("t", { tool: "codex" });
-
-    expect(await c.sessions.restartForMemory(s.id)).toBe(false);
-    expect(c.order).toEqual([]);
-    c.sessions.flushNow();
-  });
-
-  it("returns false and leaves the PTY alone while the launch is still preparing", async () => {
-    const { c, s } = await flagged();
-    (c.sessions as any).terminalPreparing.set(s.id, Promise.resolve());
-
-    expect(await c.sessions.restartForMemory(s.id)).toBe(false);
-    expect(c.order).toEqual(["pty-spawn"]);
-    (c.sessions as any).terminalPreparing.delete(s.id);
-    c.sessions.flushNow();
-  });
-
-  it("returns false and leaves the PTY alone when the run was not launched without Memory", async () => {
-    const c = makeCore(dir);
-    c.setMemory(true);
-    const s = c.sessions.create("t", { tool: "codex" });
-    await c.sessions.start(s.id);
-
-    // The gate was on at launch, so the run is never listed as missing Memory
-    // (whether or not the profile injected), and a restart cannot help it.
-    expect(await c.sessions.restartForMemory(s.id)).toBe(false);
-    expect(c.order).toEqual(["pty-spawn"]);
-    c.sessions.flushNow();
-  });
-
-  it("returns false for a session whose agent is not offered MCP", async () => {
-    const c = makeCore(dir);
-    const s = c.sessions.create("t", { command: "node" });
-    await c.sessions.start(s.id);
-    c.setMemory(true);
-
-    expect(await c.sessions.restartForMemory(s.id)).toBe(false);
-    expect(c.order).toEqual(["pty-spawn"]);
-    c.sessions.flushNow();
-  });
-
-  it("refuses with MEMORY_OFF and leaves the PTY alone when Memory was turned off again", async () => {
-    const { c, s } = await flagged();
-    c.setMemory(false);
-
-    const refusal = await c.sessions.restartForMemory(s.id).catch((e) => e);
-    expect(refusal).toBeInstanceOf(SessionVerbError);
-    expect(refusal.code).toBe("MEMORY_OFF");
-    expect(c.order).toEqual(["pty-spawn"]);
-    c.sessions.flushNow();
-  });
-
-  it("refuses with SCHEDULED_RUN and leaves the PTY alone while a schedule's run is active", async () => {
-    const { c, s } = await flagged();
-    (c.sessions as any).scheduledLaunches.set(s.id, { runtimeGeneration: "g", launched: true, cancelled: false, terminal: false });
-
-    const refusal = await c.sessions.restartForMemory(s.id).catch((e) => e);
-    expect(refusal).toBeInstanceOf(SessionVerbError);
-    expect(refusal.code).toBe("SCHEDULED_RUN");
-    expect(c.order).toEqual(["pty-spawn"]);
-    c.sessions.flushNow();
-  });
-
-  it("fails with TEARDOWN_TIMEOUT when the PTY never exits", async () => {
-    const { c, s } = await flagged({ teardownTimeoutMs: 10 });
-
-    const failure = await c.sessions.restartForMemory(s.id).catch((e) => e);
-    expect(failure).toBeInstanceOf(SessionVerbError);
-    expect(failure.code).toBe("TEARDOWN_TIMEOUT");
-
-    expect(c.spawns.length).toBe(1);
-    expect(c.sessions.isFlipping(s.id)).toBe(false);
-    c.sessions.flushNow();
-  });
-
-  it("fails with RESTART_FAILED and leaves the session stopped when the relaunch throws", async () => {
-    const { c, s } = await flagged();
-    const restart = c.sessions.restartForMemory(s.id);
-    await tick();
-    c.term.spawn = () => { throw new Error("spawn failed"); };
-    c.exitPty(s.id);
-
-    const failure = await restart.catch((e) => e);
-    expect(failure).toBeInstanceOf(SessionVerbError);
-    expect(failure.code).toBe("RESTART_FAILED");
-
-    expect(c.sessions.get(s.id)?.running).toBe(false);
-    expect(c.sessions.isFlipping(s.id)).toBe(false);
-    c.sessions.flushNow();
-  });
-
-  it("refuses an unknown, a fork-pending and an archived session without touching a runtime", async () => {
-    const { c, s } = await flagged();
-    await expect(c.sessions.restartForMemory("nope")).rejects.toThrow(/session not found/);
-
-    const forkPending = c.sessions.create("f", { tool: "codex" });
-    const persisted = (c.sessions as any).entries.get(forkPending.id);
-    persisted.conversationStart = "fork";
-    persisted.forkSourceSessionId = "src";
-    await expect(c.sessions.restartForMemory(forkPending.id)).rejects.toThrow(/native fork/);
-
-    expect(c.order).toEqual(["pty-spawn"]);
-
-    // archive() itself kills the PTY, so the refusal is all that is asserted.
-    c.sessions.archive(s.id);
-    await expect(c.sessions.restartForMemory(s.id)).rejects.toThrow(/archived/);
-    c.sessions.flushNow();
-  });
-
-  describe("chat runs", () => {
-    async function chatSession(opts: CoreOpts = {}) {
-      const c = makeCore(dir, opts);
-      c.setMemory(true);
-      const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
-      await c.sessions.start(s.id);
-      const runId = (c.sessions as any).terminalRunIds.get(s.id) as string;
-      return { c, s, runId };
-    }
-
-    it("marks a live chat run and notifies observers on set and on clear", async () => {
-      const { c, s, runId } = await chatSession();
-      let notified = 0;
-      c.sessions.onChange(() => { notified++; });
-
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-      expect(notified).toBe(1);
-      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBe(true);
-      expect(c.sessions.listStartedWithoutMemory().map((e) => e.id)).toEqual([s.id]);
-
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-      expect(notified).toBe(1);
-
-      c.sessions.noteChatRunMemory(s.id, runId, false);
-      expect(notified).toBe(2);
-      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
-
-      c.sessions.noteChatRunMemory(s.id, runId, false);
-      expect(notified).toBe(2);
-      c.sessions.flushNow();
-    });
-
-    it("ignores a stale run id", async () => {
-      const { c, s } = await chatSession();
-      let notified = 0;
-      c.sessions.onChange(() => { notified++; });
-
-      c.sessions.noteChatRunMemory(s.id, "old-run", true);
-
-      expect(notified).toBe(0);
-      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
-      c.sessions.flushNow();
-    });
-
-    it("never marks a terminal run", async () => {
-      const c = makeCore(dir);
-      c.setMemory(true);
-      const s = c.sessions.create("t", { tool: "codex" });
-      await c.sessions.start(s.id);
-      const runId = (c.sessions as any).terminalRunIds.get(s.id) as string;
-
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-
-      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
-      c.sessions.flushNow();
-    });
-
-    it("restarts a flagged chat run through stop and start", async () => {
-      const { c, s, runId } = await chatSession();
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-      c.order.length = 0;
-
-      expect(await c.sessions.restartForMemory(s.id)).toBe(true);
-
-      expect(c.order).toEqual(["handler-exit", "chat-stop", "chat-start"]);
-      expect(c.sessions.get(s.id)?.startedWithoutMemory).toBeUndefined();
-      c.sessions.flushNow();
-    });
-
-    it("returns false for an unflagged chat run", async () => {
-      const { c, s } = await chatSession();
-      c.order.length = 0;
-
-      expect(await c.sessions.restartForMemory(s.id)).toBe(false);
-      expect(c.order).toEqual([]);
-      c.sessions.flushNow();
-    });
-
-    it("refuses MEMORY_OFF and SCHEDULED_RUN for a flagged chat run", async () => {
-      const { c, s, runId } = await chatSession();
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-
-      c.setMemory(false);
-      const off = await c.sessions.restartForMemory(s.id).catch((e) => e);
-      expect(off.code).toBe("MEMORY_OFF");
-
-      c.setMemory(true);
-      (c.sessions as any).scheduledLaunches.set(s.id, { runtimeGeneration: runId, launched: true, cancelled: false, terminal: false });
-      const scheduled = await c.sessions.restartForMemory(s.id).catch((e) => e);
-      expect(scheduled.code).toBe("SCHEDULED_RUN");
-      c.sessions.flushNow();
-    });
-
-    it("fails with TEARDOWN_TIMEOUT when the chat teardown never settles", async () => {
-      const { c, s, runId } = await chatSession({ chatTeardown: () => deferred().promise, teardownTimeoutMs: 10 });
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-
-      const failure = await c.sessions.restartForMemory(s.id).catch((e) => e);
-      expect(failure).toBeInstanceOf(SessionVerbError);
-      expect(failure.code).toBe("TEARDOWN_TIMEOUT");
-      c.sessions.flushNow();
-    });
-
-    it("clears the mark when the chat run stops", async () => {
-      const { c, s, runId } = await chatSession();
-      c.sessions.noteChatRunMemory(s.id, runId, true);
-
-      await (c.sessions as any).stopAndAwait(s.id);
-
-      expect(c.sessions.listStartedWithoutMemory()).toEqual([]);
-      expect((c.sessions as any).runsWithoutMemory.has(s.id)).toBe(false);
-      c.sessions.flushNow();
-    });
-  });
-
-  it("codes a set-mode relaunch failure RESTART_FAILED and keeps its marker text", async () => {
-    const c = makeCore(dir);
-    const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
-    await c.sessions.start(s.id);
-    c.term.spawn = () => { throw new Error("spawn failed"); };
-
-    const failure = await c.sessions.setMode(s.id, "terminal").catch((e) => e);
-    expect(failure.code).toBe("RESTART_FAILED");
-    expect(failure.message).toStartWith(RESTART_FAILED_ERROR);
     c.sessions.flushNow();
   });
 });

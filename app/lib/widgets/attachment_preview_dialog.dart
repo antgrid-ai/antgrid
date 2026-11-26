@@ -1,11 +1,13 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/material.dart'
-    show Material, MaterialType, Navigator, showDialog;
+import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
-import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../models/device_stats.dart' show formatBytes;
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
@@ -16,7 +18,6 @@ import 'file_download.dart';
 import 'file_viewer_kind.dart';
 import 'file_viewer_router.dart';
 import 'viewer_header.dart';
-import 'viewer_support.dart';
 
 /// Opens a preview dialog over [service]'s `openPreview` slot for [path] —
 /// the shared mechanism behind both callers below. Reuses the Files tab's
@@ -86,35 +87,24 @@ Future<void> showAttachmentPreview(
 /// whole screen, a desktop window a large panel — because a PDF page or a long
 /// source file is the content here, and a 900x720 cap left most of a big
 /// display unused while overflowing a small one.
-///
-/// Callers open it with a plain dialog route from Ab surfaces, so it carries
-/// its own Carbon scope at the route root.
 class AttachmentPreviewDialog extends StatelessWidget {
   const AttachmentPreviewDialog({super.key, required this.service});
 
   final FileService service;
 
   @override
-  Widget build(BuildContext context) => Material(
-    // Above the scope: a Material inside it would replace the Carbon text
-    // style. A dialog route has no Material ancestor, which the viewers' text
-    // selection and the not yet migrated media viewers expect.
-    type: MaterialType.transparency,
-    child: AbCarbonScope(
-      child: StreamBuilder<FileTreeState>(
-        stream: service.stateStream,
-        initialData: service.currentState,
-        builder: (context, snapshot) => _buildPreview(context, snapshot.data!),
-      ),
-    ),
+  Widget build(BuildContext context) => StreamBuilder<FileTreeState>(
+    stream: service.stateStream,
+    initialData: service.currentState,
+    builder: (context, snapshot) => _buildPreview(context, snapshot.data!),
   );
 
   Widget _buildPreview(BuildContext context, FileTreeState state) {
-    final colors = CarbonTheme.of(context).colors;
+    final colors = context.antgrid;
     final preview = state.preview;
     final screen = MediaQuery.sizeOf(context);
     final compact = screen.width < kCompactBreakpoint;
-    final inset = compact ? CarbonSpacing.spacing03 : CarbonSpacing.spacing06;
+    final inset = compact ? AbTokens.space8 : AbTokens.space24;
     final maxWidth = screen.width - inset * 2;
     final maxHeight =
         screen.height - inset * 2 - MediaQuery.viewPaddingOf(context).vertical;
@@ -125,17 +115,18 @@ class AttachmentPreviewDialog extends StatelessWidget {
         ? maxHeight
         : (screen.height * 0.86).clamp(420.0, 900.0).clamp(0.0, maxHeight);
     void close() => Navigator.of(context).pop();
-    return Center(
+    return Dialog(
+      insetPadding: EdgeInsets.all(inset),
       child: SizedBox(
         width: width,
         height: height,
         child: DecoratedBox(
-          position: DecorationPosition.foreground,
           decoration: BoxDecoration(
-            border: Border.all(color: colors.borderSubtle01),
+            border: Border.all(color: colors.borderSubtle),
+            borderRadius: AbTokens.borderRadius8,
           ),
-          child: ColoredBox(
-            color: colors.background,
+          child: ClipRRect(
+            borderRadius: AbTokens.borderRadius8,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -179,8 +170,7 @@ class _PreviewTitleBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final colors = theme.colors;
+    final c = context.antgrid;
     final loaded = content;
     final fullPath = loaded?.path ?? path ?? '';
     final name = displayName ?? previewFileName(fullPath);
@@ -190,24 +180,22 @@ class _PreviewTitleBar extends StatelessWidget {
         : '${previewKindLabel(loaded)} · ${formatBytes(loaded.size)}';
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: colors.layer01,
-        border: Border(bottom: BorderSide(color: colors.borderSubtle01)),
+        color: c.bgSurface,
+        border: Border(bottom: BorderSide(color: c.borderSubtle)),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: CarbonSpacing.spacing03,
-          vertical: CarbonSpacing.spacing02,
+          horizontal: AbTokens.space12,
+          vertical: AbTokens.space8,
         ),
         child: Row(
-          spacing: CarbonSpacing.spacing02,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(right: CarbonSpacing.spacing02),
-              child: CarbonIcon(
-                loaded == null ? CarbonIcons.document : previewKindIcon(loaded),
-                color: colors.iconSecondary,
-              ),
+            AbIcon(
+              loaded == null ? AbIcons.file : previewKindIcon(loaded),
+              size: 18,
+              color: c.textSecondary,
             ),
+            const SizedBox(width: AbTokens.space10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -217,47 +205,57 @@ class _PreviewTitleBar extends StatelessWidget {
                     name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.typography.code.copyWith(
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontBody,
                       fontWeight: FontWeight.w600,
-                      color: colors.textPrimary,
+                      color: c.textPrimary,
                     ),
                   ),
                   if (facts != null || folder.isNotEmpty)
-                    // One line that gives up its folder first: two Row
-                    // children would each need their own overflow rule.
-                    Text.rich(
-                      TextSpan(
-                        children: [
-                          if (facts != null) TextSpan(text: facts),
-                          if (facts != null && folder.isNotEmpty)
-                            const TextSpan(text: ' · '),
-                          if (folder.isNotEmpty) TextSpan(text: folder),
-                        ],
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.typography.helper.copyWith(
-                        color: colors.textSecondary,
+                    Padding(
+                      padding: const EdgeInsets.only(top: AbTokens.space2),
+                      // One line that gives up its folder first: two Row
+                      // children would each need their own overflow rule.
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            if (facts != null)
+                              TextSpan(
+                                text: facts,
+                                style: TextStyle(color: c.textSecondary),
+                              ),
+                            if (facts != null && folder.isNotEmpty)
+                              const TextSpan(text: ' · '),
+                            if (folder.isNotEmpty) TextSpan(text: folder),
+                          ],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.monoStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: c.textMuted,
+                        ),
                       ),
                     ),
                 ],
               ),
             ),
+            const SizedBox(width: AbTokens.space8),
             if (fullPath.isNotEmpty)
-              ViewerIconButton(
-                icon: CarbonIcons.copy,
-                label: 'Copy path',
-                onPressed: () => detached(
+              AbIconButton(
+                icon: AbIcons.copy,
+                tooltip: 'Copy path',
+                onTap: () => detached(
                   'AttachmentPreview',
                   'copy path',
                   () => copyPathWithToast(context, fullPath),
                 ),
               ),
             if (loaded != null) FileDownloadButton(content: loaded),
-            ViewerIconButton(
-              icon: CarbonIcons.close,
-              label: 'Close',
-              onPressed: onClose,
+            AbIconButton(
+              icon: AbIcons.close,
+              tooltip: 'Close',
+              onTap: onClose,
             ),
           ],
         ),
@@ -311,16 +309,16 @@ String previewKindLabel(FileContent content) {
 }
 
 @visibleForTesting
-CarbonIcons previewKindIcon(FileContent content) {
+String previewKindIcon(FileContent content) {
   switch (fileViewerKindFor(content.path, content.encoding, content.mimeType)) {
     case FileViewerKind.image:
     case FileViewerKind.svg:
     case FileViewerKind.pdf:
-      return CarbonIcons.view;
+      return AbIcons.fileMedia;
     case FileViewerKind.binary:
-      return CarbonIcons.documentBlank;
+      return AbIcons.fileBinary;
     case FileViewerKind.markdown:
     case FileViewerKind.code:
-      return CarbonIcons.document;
+      return AbIcons.file;
   }
 }

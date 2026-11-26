@@ -1,10 +1,24 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_status_tone.dart';
+import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_agent_mark.dart';
+import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_disclosure.dart';
+import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_separator.dart';
+import '../../design/widgets/ab_status_dot.dart';
+import '../../design/widgets/ab_tap_target.dart';
+import '../../design/widgets/ab_tooltip.dart';
+import '../../util/detached.dart';
 import '../../models/scheduler.dart';
 import 'scheduler_format.dart';
-import 'scheduler_status_glyph.dart';
 
 enum _RunFilter { all, failed, catchUp }
 
@@ -23,15 +37,13 @@ String _filterLabel(_RunFilter f) => switch (f) {
   _RunFilter.catchUp => 'Catch-up',
 };
 
-// Column widths of the desktop table; each includes the table's own cell
-// padding.
+// Column widths of the desktop row grid; the detail panel indents by the
+// status column so it lines up under the run name.
 const double _statusColumn = 148;
-const double _timeColumn = 84;
-const double _triggerColumn = 112;
-const double _durationColumn = 96;
-// Fits Stop with Open session, or Open session with Details, on one line.
-const double _actionsColumn = 304;
-const double _detailLabelWidth = 128;
+const double _timeColumn = 52;
+const double _triggerColumn = 84;
+const double _durationColumn = 72;
+const double _actionsColumn = 208;
 
 /// Runs of the schedules on one machine, grouped by day. Every time is shown
 /// once, in [viewerZone]; the day lives in the group header.
@@ -51,7 +63,6 @@ class SchedulerRunsView extends StatefulWidget {
     required this.focusedRunId,
     required this.onOpenSession,
     required this.onStop,
-    required this.onEditSchedule,
   });
 
   final List<ScheduleRun> runs;
@@ -70,10 +81,6 @@ class SchedulerRunsView extends StatefulWidget {
   final String? focusedRunId;
   final void Function(ScheduleRun) onOpenSession;
   final void Function(ScheduleRun) onStop;
-
-  /// Opens a live schedule's editor. A deleted schedule has none to open, so
-  /// its name stays plain text.
-  final void Function(AgentSchedule) onEditSchedule;
 
   @override
   State<SchedulerRunsView> createState() => _SchedulerRunsViewState();
@@ -131,11 +138,35 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     return [group, ...groups];
   }
 
-  void _toggle(ScheduleRun r) => setState(() {
-    if (!_expanded.add(r.id)) _expanded.remove(r.id);
-  });
+  Future<void> _pickSchedule(BuildContext anchor) async {
+    final rect = abMenuAnchorRect(anchor);
+    if (rect == null) return;
+    final schedules = [...widget.schedules]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final picked = await showAbMenu<String>(
+      context: anchor,
+      anchorRect: rect,
+      entries: [
+        AbMenuItem(
+          label: 'All schedules',
+          value: '',
+          icon: widget.scheduleId == null ? AbIcons.check : null,
+        ),
+        if (schedules.isNotEmpty) const AbMenuDivider(),
+        for (final s in schedules)
+          AbMenuItem(
+            label: s.name,
+            value: s.id,
+            icon: widget.scheduleId == s.id ? AbIcons.check : null,
+          ),
+      ],
+    );
+    if (picked == null || !mounted) return;
+    widget.onScheduleFilter(picked.isEmpty ? null : picked);
+  }
 
-  Widget _toolbar(CarbonThemeData t, List<ScheduleRun> all) {
+  Widget _toolbar(List<ScheduleRun> all) {
+    final p = context.antgrid;
     final filterName = widget.scheduleId == null
         ? 'All schedules'
         : widget.schedules
@@ -143,60 +174,87 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
                   .firstOrNull
                   ?.name ??
               'Schedule';
-    final schedules = [...widget.schedules]
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     final zone = Text(
       'Times in ${widget.viewerZone}',
-      style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontSm,
+        color: p.textSecondary,
+      ),
     );
     final chips = Wrap(
-      spacing: CarbonSpacing.spacing03,
-      runSpacing: CarbonSpacing.spacing02,
+      spacing: AbTokens.space8,
+      runSpacing: AbTokens.space4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         for (final f in _RunFilter.values)
-          CarbonTag(
+          AbChip.choice(
             key: ValueKey('scheduler-runs-filter-${f.name}'),
             label:
                 '${_filterLabel(f)} ${all.where((r) => _matches(f, r)).length}',
             selected: _filter == f,
-            // Single select: a tap on the chosen tag asks to clear it, and a
-            // null callback would make the tag inert and shrink its footprint.
-            onSelectedChanged: (on) {
-              if (on) setState(() => _filter = f);
-            },
+            onTap: () => setState(() => _filter = f),
           ),
-        CarbonMenuButton(
-          key: const ValueKey('scheduler-runs-schedule-filter'),
-          label: filterName,
-          kind: CarbonButtonKind.ghost,
-          size: CarbonButtonSize.small,
-          maxLines: 1,
-          semanticLabel: 'Filter by schedule',
-          entries: [
-            CarbonMenuRadioGroup<String>(
-              value: widget.scheduleId ?? '',
-              options: [
-                const CarbonOption(value: '', label: 'All schedules'),
-                for (final s in schedules)
-                  CarbonOption(value: s.id, label: s.name),
-              ],
-              onChanged: (v) => widget.onScheduleFilter(v.isEmpty ? null : v),
+        Builder(
+          builder: (anchor) => AbTapTarget(
+            onTap: () => detached(
+              'Scheduler',
+              'schedule filter failed',
+              () => _pickSchedule(anchor),
             ),
-          ],
+            child: Container(
+              key: const ValueKey('scheduler-runs-schedule-filter'),
+              padding: const EdgeInsets.symmetric(
+                horizontal: AbTokens.space10,
+                vertical: AbTokens.space4,
+              ),
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: widget.scheduleId == null
+                      ? p.borderStrong
+                      : p.textSecondary,
+                ),
+                borderRadius: AbTokens.borderRadius3,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: AbTokens.space6,
+                children: [
+                  Flexible(
+                    child: Text(
+                      filterName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        fontWeight: FontWeight.w500,
+                        color: widget.scheduleId == null
+                            ? p.textSecondary
+                            : p.textPrimary,
+                      ),
+                    ),
+                  ),
+                  AbIcon(
+                    AbIcons.chevronDown,
+                    size: AbTokens.fontSm,
+                    color: p.textMuted,
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ],
     );
     if (widget.compact) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        spacing: CarbonSpacing.spacing03,
+        spacing: AbTokens.space8,
         children: [chips, zone],
       );
     }
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
-      spacing: CarbonSpacing.spacing04,
+      spacing: AbTokens.space12,
       children: [
         Expanded(child: chips),
         zone,
@@ -204,97 +262,84 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     );
   }
 
-  Widget _note(CarbonThemeData t, String text, double padding) => Padding(
-    padding: EdgeInsets.all(padding),
-    child: Center(
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        style: t.typography.body.copyWith(color: t.colors.textSecondary),
-      ),
-    ),
-  );
-
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final p = context.antgrid;
     final all = _sorted();
     final shown = all.where((r) => _matches(_filter, r)).toList();
     final showToolbar = all.isNotEmpty || widget.scheduleId != null;
-    final padding = widget.compact
-        ? CarbonSpacing.spacing04
-        : CarbonSpacing.spacing05;
+    final padding = widget.compact ? AbTokens.space12 : AbTokens.space16;
     return ListView(
       padding: EdgeInsets.all(padding),
       children: [
         if (showToolbar)
           Padding(
-            padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing05),
-            child: _toolbar(t, all),
+            padding: const EdgeInsets.only(bottom: AbTokens.space12),
+            child: _toolbar(all),
           ),
         if (all.isEmpty)
-          _note(t, schedulerNoRunsHint, CarbonSpacing.spacing07)
+          const AbEmptyState(title: schedulerNoRunsHint)
         else if (shown.isEmpty)
-          _note(t, 'No runs match this filter', CarbonSpacing.spacing05)
+          const AbEmptyState.compact(title: 'No runs match this filter')
         else
           for (final group in _groups(shown))
             Padding(
               key: ValueKey('scheduler-runs-day-${group.key}'),
-              padding: EdgeInsets.only(
-                bottom: widget.compact
-                    ? CarbonSpacing.spacing05
-                    : CarbonSpacing.spacing06,
+              padding: const EdgeInsets.only(bottom: AbTokens.space16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                spacing: AbTokens.space8,
+                children: [
+                  AbSectionHeader(
+                    label: schedulerDayHeader(
+                      _when(group.value.first),
+                      widget.viewerZone,
+                      widget.now,
+                    ),
+                    color: p.textSecondary,
+                    padding: const EdgeInsets.only(left: AbTokens.space4),
+                  ),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: p.bgSurface,
+                      border: Border.all(color: p.borderSubtle),
+                      borderRadius: AbTokens.borderRadius8,
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Column(
+                      children: [
+                        for (var i = 0; i < group.value.length; i++) ...[
+                          if (i > 0) const AbSeparator.horizontal(),
+                          _row(group.value[i]),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              child: _day(t, group),
             ),
       ],
     );
   }
 
-  Widget _day(CarbonThemeData t, MapEntry<String, List<ScheduleRun>> group) {
-    final header = schedulerDayHeader(
-      _when(group.value.first),
-      widget.viewerZone,
-      widget.now,
-    );
-    if (widget.compact) {
-      return CarbonContainedList(
-        label: header,
-        children: [for (final r in group.value) _tile(t, r)],
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      spacing: CarbonSpacing.spacing03,
-      children: [
-        Semantics(
-          header: true,
-          child: Text(
-            header,
-            style: t.typography.heading.copyWith(color: t.colors.textPrimary),
-          ),
-        ),
-        CarbonDataTable(
-          columns: const [
-            CarbonDataTableColumn(label: 'Status', width: _statusColumn),
-            CarbonDataTableColumn(label: 'Schedule'),
-            CarbonDataTableColumn(label: 'Time', width: _timeColumn),
-            CarbonDataTableColumn(label: 'Trigger', width: _triggerColumn),
-            CarbonDataTableColumn(
-              label: 'Duration',
-              width: _durationColumn,
-              align: CarbonDataTableAlign.end,
-            ),
-            CarbonDataTableColumn(
-              label: '',
-              width: _actionsColumn,
-              align: CarbonDataTableAlign.end,
-            ),
-          ],
-          rows: [for (final r in group.value) _tableRow(t, r)],
-        ),
-      ],
-    );
+  AbStatusTone _tone(SchedulerRunTone t) => switch (t) {
+    SchedulerRunTone.active => AbStatusTone.info,
+    SchedulerRunTone.attention => AbStatusTone.warning,
+    SchedulerRunTone.success => AbStatusTone.success,
+    SchedulerRunTone.error => AbStatusTone.danger,
+    SchedulerRunTone.muted => AbStatusTone.agentIdle,
+    SchedulerRunTone.warning => AbStatusTone.warning,
+  };
+
+  Color _wordColor(SchedulerRunTone t) {
+    final p = context.antgrid;
+    return switch (t) {
+      SchedulerRunTone.active => p.accent,
+      SchedulerRunTone.attention || SchedulerRunTone.warning => p.warning,
+      SchedulerRunTone.error => p.error,
+      SchedulerRunTone.success => p.textPrimary,
+      SchedulerRunTone.muted => p.textSecondary,
+    };
   }
 
   Duration? _elapsed(ScheduleRun r) {
@@ -305,9 +350,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
   }
 
   String? _sub(ScheduleRun r) {
-    final schedule = _schedule(r);
     final parts = <String>[
-      if (schedule != null) widget.agentLabel(schedule.agentId),
       ?_project(r),
       if (_isCatchUp(r) && r.missedCount != null)
         '${schedulerMissedLabel(r.missedCount)} while closed'
@@ -317,61 +360,78 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     return parts.isEmpty ? null : parts.join(' · ');
   }
 
-  Widget _status(CarbonThemeData t, ScheduleRun r) {
-    final indicator = CarbonIconIndicator(
-      kind: schedulerRunIndicator(r.status, trigger: r.trigger),
-      label: schedulerRunStatusWord(r.status, trigger: r.trigger),
-    );
-    if (r.status != 'needs-input') return indicator;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      spacing: CarbonSpacing.spacing01,
+  Widget _status(ScheduleRun r) {
+    final tone = schedulerRunTone(r.status, trigger: r.trigger);
+    final word = schedulerRunStatusWord(r.status, trigger: r.trigger);
+    final since = _when(r);
+    return Row(
+      spacing: AbTokens.space8,
       children: [
-        indicator,
-        Padding(
-          // Under the label, past the glyph and its gap.
-          padding: EdgeInsetsDirectional.only(
-            start: t.iconSize + CarbonSpacing.spacing03,
-          ),
-          child: Text(
-            schedulerWaiting(_when(r), widget.now),
-            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+        AbStatusDot(
+          tone: _tone(tone),
+          style:
+              tone == SchedulerRunTone.muted || tone == SchedulerRunTone.warning
+              ? AbDotStyle.hollow
+              : AbDotStyle.filled,
+          pulse: tone == SchedulerRunTone.active,
+        ),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                word,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  fontWeight: FontWeight.w600,
+                  color: _wordColor(tone),
+                ),
+              ),
+              if (r.status == 'needs-input')
+                Text(
+                  schedulerWaiting(since, widget.now),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textSecondary,
+                  ),
+                ),
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _title(CarbonThemeData t, ScheduleRun r) {
+  Widget _title(ScheduleRun r) {
+    final p = context.antgrid;
     final schedule = _schedule(r);
     final sub = _sub(r);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      spacing: CarbonSpacing.spacing01,
+      spacing: AbTokens.space2,
       children: [
-        if (schedule != null)
-          CarbonLink(
-            label: _name(r),
-            onPressed: () => widget.onEditSchedule(schedule),
-          )
-        else
-          Text(
-            _name(r),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: t.typography.heading.copyWith(color: t.colors.textPrimary),
+        Text(
+          _name(r),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontMd,
+            fontWeight: FontWeight.w600,
+            color: p.textPrimary,
           ),
+        ),
         if (schedule != null || sub != null)
           Row(
-            spacing: CarbonSpacing.spacing02,
+            spacing: AbTokens.space6,
             children: [
               if (schedule != null)
                 AbAgentMark(
                   toolKey: schedule.agentId,
                   label: widget.agentLabel(schedule.agentId),
-                  size: t.iconSize,
-                  color: t.colors.iconSecondary,
+                  size: AbTokens.fontSm,
                 ),
               if (sub != null)
                 Flexible(
@@ -379,8 +439,9 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
                     sub,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: t.typography.helper.copyWith(
-                      color: t.colors.textSecondary,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.textSecondary,
                     ),
                   ),
                 ),
@@ -390,11 +451,14 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     );
   }
 
-  Widget _time(CarbonThemeData t, ScheduleRun r) => CarbonTooltip(
+  Widget _time(ScheduleRun r) => AbTooltip(
     message: schedulerUtcLabel(_when(r)),
     child: Text(
       schedulerClock(_when(r), widget.viewerZone),
-      style: t.typography.code.copyWith(color: t.colors.textPrimary),
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontMd,
+        color: context.antgrid.textPrimary,
+      ),
     ),
   );
 
@@ -403,25 +467,31 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
     required Key key,
     required String label,
     required void Function(ScheduleRun) onTap,
-    required CarbonButtonKind kind,
-    Widget? icon,
+    Color? color,
+    Widget? leading,
   }) {
-    return CarbonButton(
-      key: key,
-      label: label,
-      kind: kind,
-      size: CarbonButtonSize.small,
-      icon: icon,
-      semanticLabel: '$label for ${_name(r)}',
-      onPressed: widget.enabled ? () => onTap(r) : null,
+    final tap = widget.enabled ? () => onTap(r) : null;
+    return Semantics(
+      label: '$label for ${_name(r)}',
+      button: true,
+      enabled: widget.enabled,
+      excludeSemantics: true,
+      onTap: tap,
+      child: AbButton(
+        key: key,
+        label: label,
+        color: color,
+        leading: leading,
+        onTap: tap,
+      ),
     );
   }
 
-  Widget _actions(ScheduleRun r, {bool details = false}) {
+  Widget _actions(ScheduleRun r) {
     return Wrap(
       alignment: WrapAlignment.end,
-      spacing: CarbonSpacing.spacing03,
-      runSpacing: CarbonSpacing.spacing03,
+      spacing: AbTokens.space6,
+      runSpacing: AbTokens.space6,
       children: [
         if (r.active)
           _action(
@@ -429,7 +499,7 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
             key: ValueKey('scheduler-run-stop-${r.id}'),
             label: 'Stop',
             onTap: widget.onStop,
-            kind: CarbonButtonKind.dangerGhost,
+            color: context.antgrid.error,
           ),
         if (r.sessionId != null)
           _action(
@@ -437,147 +507,166 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
             key: ValueKey('scheduler-run-open-${r.id}'),
             label: 'Open session',
             onTap: widget.onOpenSession,
-            // Needs-input is the one state a person must act on.
-            kind: r.status == 'needs-input'
-                ? CarbonButtonKind.primary
-                : CarbonButtonKind.ghost,
-            icon: const CarbonIcon(CarbonIcons.launch),
+            leading: AbIcon(
+              AbIcons.openExternal,
+              size: AbTokens.fontXs,
+              color: context.antgrid.textSecondary,
+            ),
           ),
-        if (details) _detailsToggle(r),
       ],
     );
   }
 
-  Widget _detailsToggle(ScheduleRun r) {
-    final open = _expanded.contains(r.id);
-    return CarbonButton(
-      label: 'Details',
-      kind: CarbonButtonKind.ghost,
-      size: CarbonButtonSize.small,
-      expanded: open,
-      icon: CarbonIcon(open ? CarbonIcons.chevronUp : CarbonIcons.chevronDown),
-      onPressed: () => _toggle(r),
-    );
-  }
-
-  String _trigger(ScheduleRun r) =>
-      // The status cell already carries the wait, and a missed record's status
-      // word and sub-line already say Missed.
-      r.trigger == 'missed' ? '' : schedulerTrigger(r.trigger);
-
-  String _duration(ScheduleRun r) =>
-      r.status == 'needs-input' ? '—' : schedulerDurationPadded(_elapsed(r));
-
-  CarbonDataTableRow _tableRow(CarbonThemeData t, ScheduleRun r) {
-    final hasActions = r.active || r.sessionId != null || _isCatchUp(r);
-    final open = _expanded.contains(r.id);
-    return CarbonDataTableRow(
-      key: ValueKey('scheduler-run-${r.id}'),
-      selected: r.id == widget.focusedRunId,
-      expansion: _isCatchUp(r) && open ? _details(t, r) : null,
-      cells: [
-        _status(t, r),
-        _title(t, r),
-        _time(t, r),
-        Text(_trigger(r)),
-        Text(
-          _duration(r),
-          style: t.typography.code.copyWith(color: t.colors.textSecondary),
-        ),
-        if (hasActions)
-          _actions(r, details: _isCatchUp(r))
-        else
-          const SizedBox.shrink(),
-      ],
-    );
-  }
-
-  Widget _tile(CarbonThemeData t, ScheduleRun r) {
-    final level = CarbonLayer.of(context);
+  Widget _row(ScheduleRun r) {
+    final p = context.antgrid;
     final focused = r.id == widget.focusedRunId;
-    final hasActions = r.active || r.sessionId != null;
+    final expandable = _isCatchUp(r);
     final open = _expanded.contains(r.id);
-    final line = r.active
-        ? schedulerActiveRunLine(r, widget.now)
-        : schedulerRunStatusWord(r.status, trigger: r.trigger);
-    final trigger = _trigger(r);
-    return DecoratedBox(
-      key: ValueKey('scheduler-run-${r.id}'),
-      decoration: BoxDecoration(
-        color: focused ? t.layerSelected(level) : t.layer(level),
-        border: Border(
-          bottom: BorderSide(
-            color: t.borderSubtle(level),
-            width: CarbonBorders.hairline,
-          ),
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: CarbonSpacing.spacing05,
-          vertical: CarbonSpacing.spacing04,
-        ),
+    final hasActions = r.active || r.sessionId != null;
+    // The status cell already carries the wait, and a missed record's status
+    // word and sub-line already say Missed.
+    final trigger = r.trigger == 'missed' ? '' : schedulerTrigger(r.trigger);
+    final duration = r.status == 'needs-input'
+        ? '—'
+        : schedulerDurationPadded(_elapsed(r));
+    final dimStyle = AbTokens.sansStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textSecondary,
+    );
+    final durationStyle = AbTokens.monoStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textSecondary,
+    );
+
+    final Widget header;
+    if (widget.compact) {
+      final line = r.active
+          ? schedulerActiveRunLine(r, widget.now)
+          : schedulerRunStatusWord(r.status, trigger: r.trigger);
+      final tone = schedulerRunTone(r.status, trigger: r.trigger);
+      header = Padding(
+        padding: const EdgeInsets.all(AbTokens.space12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          spacing: CarbonSpacing.spacing03,
+          spacing: AbTokens.space6,
           children: [
             Row(
-              spacing: CarbonSpacing.spacing03,
+              spacing: AbTokens.space8,
               children: [
-                SchedulerStatusGlyph.run(r.status, trigger: r.trigger),
+                AbStatusDot(
+                  tone: _tone(tone),
+                  style:
+                      tone == SchedulerRunTone.muted ||
+                          tone == SchedulerRunTone.warning
+                      ? AbDotStyle.hollow
+                      : AbDotStyle.filled,
+                  pulse: tone == SchedulerRunTone.active,
+                ),
                 Expanded(
                   child: Text(
                     line,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: t.typography.heading.copyWith(
-                      color: t.colors.textPrimary,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontSm,
+                      fontWeight: FontWeight.w600,
+                      color: _wordColor(tone),
                     ),
                   ),
                 ),
-                _time(t, r),
+                _time(r),
               ],
             ),
-            _title(t, r),
-            // Wraps: neither text can shrink, and at large text on a narrow
-            // phone the pair is wider than the row.
-            Wrap(
-              spacing: CarbonSpacing.spacing03,
+            _title(r),
+            Row(
+              spacing: AbTokens.space8,
               children: [
-                if (trigger.isNotEmpty)
-                  Text(
-                    trigger,
-                    style: t.typography.helper.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
+                if (trigger.isNotEmpty) Text(trigger, style: dimStyle),
                 if (!r.active && _elapsed(r) != null)
-                  Text(
-                    _duration(r),
-                    style: t.typography.code.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
+                  Text(duration, style: durationStyle),
               ],
             ),
             if (hasActions) _actions(r),
-            if (_isCatchUp(r)) _detailsToggle(r),
-            if (_isCatchUp(r) && open) _details(t, r),
           ],
         ),
+      );
+    } else {
+      header = Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space16,
+          vertical: AbTokens.space10,
+        ),
+        child: Row(
+          spacing: AbTokens.space16,
+          children: [
+            SizedBox(width: _statusColumn, child: _status(r)),
+            Expanded(child: _title(r)),
+            SizedBox(width: _timeColumn, child: _time(r)),
+            SizedBox(
+              width: _triggerColumn,
+              child: Text(trigger, style: dimStyle),
+            ),
+            SizedBox(
+              width: _durationColumn,
+              child: Text(duration, style: durationStyle),
+            ),
+            SizedBox(
+              width: _actionsColumn,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: hasActions ? _actions(r) : null,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      key: ValueKey('scheduler-run-${r.id}'),
+      color: focused ? p.bgSelected : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          header,
+          if (expandable)
+            Padding(
+              padding: EdgeInsets.only(
+                left: widget.compact
+                    ? AbTokens.space12
+                    : AbTokens.space16 + _statusColumn + AbTokens.space16,
+                right: AbTokens.space16,
+                bottom: AbTokens.space8,
+              ),
+              child: AbDisclosure(
+                label: 'Details',
+                expanded: open,
+                onToggle: () => setState(() {
+                  if (!_expanded.add(r.id)) _expanded.remove(r.id);
+                }),
+                child: _details(r),
+              ),
+            ),
+        ],
       ),
     );
   }
 
-  Widget _details(CarbonThemeData t, ScheduleRun r) {
+  Widget _details(ScheduleRun r) {
+    final p = context.antgrid;
     final zone = r.timezone ?? _schedule(r)?.timezone ?? widget.viewerZone;
-    final labelStyle = t.typography.label.copyWith(
-      color: t.colors.textSecondary,
+    final labelStyle = AbTokens.sansStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textSecondary,
     );
-    final valueStyle = t.typography.control.copyWith(
-      color: t.colors.textPrimary,
+    final valueStyle = AbTokens.sansStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textPrimary,
     );
-    final monoValue = t.typography.code.copyWith(color: t.colors.textPrimary);
+    final monoValue = AbTokens.monoStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textPrimary,
+    );
     final why =
         r.reason ??
         (r.trigger == 'missed'
@@ -629,52 +718,59 @@ class _SchedulerRunsViewState extends State<SchedulerRunsView> {
       if (r.sessionId != null)
         (
           'Session',
-          CarbonLink(
-            label:
-                '${_name(r)} · ${r.sessionId!.substring(0, r.sessionId!.length < 4 ? r.sessionId!.length : 4)}',
-            onPressed: widget.enabled ? () => widget.onOpenSession(r) : null,
+          AbTapTarget(
+            onTap: widget.enabled ? () => widget.onOpenSession(r) : null,
+            child: Text(
+              '${_name(r)} · ${r.sessionId!.substring(0, r.sessionId!.length < 4 ? r.sessionId!.length : 4)}',
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.accent,
+              ),
+            ),
           ),
         ),
     ];
-    return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
-      child: CarbonLayerSurface(
-        border: true,
-        padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-        child: widget.compact
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                spacing: CarbonSpacing.spacing03,
-                children: [
-                  for (final (label, value) in rows)
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(label, style: labelStyle),
-                        value,
-                      ],
-                    ),
-                ],
-              )
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                spacing: CarbonSpacing.spacing03,
-                children: [
-                  for (final (label, value) in rows)
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      spacing: CarbonSpacing.spacing05,
-                      children: [
-                        SizedBox(
-                          width: _detailLabelWidth,
-                          child: Text(label, style: labelStyle),
-                        ),
-                        Expanded(child: value),
-                      ],
-                    ),
-                ],
-              ),
+    return Container(
+      margin: const EdgeInsets.only(top: AbTokens.space4),
+      padding: const EdgeInsets.all(AbTokens.space12),
+      decoration: BoxDecoration(
+        color: p.bgDeep,
+        border: Border.all(color: p.borderSubtle),
+        borderRadius: AbTokens.borderRadius5,
       ),
+      child: widget.compact
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: AbTokens.space8,
+              children: [
+                for (final (label, value) in rows)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: labelStyle),
+                      value,
+                    ],
+                  ),
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: AbTokens.space8,
+              children: [
+                for (final (label, value) in rows)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    spacing: AbTokens.space16,
+                    children: [
+                      SizedBox(
+                        width: _timeColumn + _triggerColumn,
+                        child: Text(label, style: labelStyle),
+                      ),
+                      Expanded(child: value),
+                    ],
+                  ),
+              ],
+            ),
     );
   }
 }

@@ -1,19 +1,18 @@
 import { OpencodeDriver, type OpencodeClientLike } from "./chat-backend";
 import { spawnOpencode } from "./spawn";
-import { OpencodeStartupError } from "./server";
 import type { StructuredDriver } from "../../structured/structured-driver";
 import type { DriverCtx } from "../types";
 
 export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredDriver {
   // spawnOpencode is async (it awaits server startup); the driver's start()
-  // awaits the lazy client's initialization so the factory stays synchronous
-  // without treating a failed acquisition as an optional history-read failure.
+  // performs the await via a thunked client. Build a lazy OpencodeClientLike
+  // that resolves the spawn on first use so the factory stays synchronous.
   let spawned: Promise<Awaited<ReturnType<typeof spawnOpencode>>> | null = null;
   let closed = false;
   const ensure = () => {
     if (closed) throw new Error("OpenCode backend is disposed");
     if (!spawned) {
-      spawned = spawn({ cwd: ctx.projectPath, env: ctx.chatAugment().env, signal: ctx.scope.signal });
+      spawned = spawn({ cwd: ctx.projectPath });
       ctx.emitUpdateCheck();
     }
     return spawned;
@@ -24,15 +23,14 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     return operation(resource.client);
   };
   const lazy: OpencodeClientLike = {
-    initialize: () => invoke(async () => {}),
     createSession: (o) => invoke((client) => client.createSession(o)),
     messages: (s) => invoke((client) => client.messages(s)),
-    revertMessages: (s, m) => invoke((client) => client.revertMessages(s, m)),
+    deleteMessage: (s, m) => invoke((client) => client.deleteMessage(s, m)),
     prompt: (s, t, o) => invoke((client) => client.prompt(s, t, o)),
     abort: (s) => invoke((client) => client.abort(s)),
-    summarize: (s) => invoke((client) => client.summarize(s)),
+    summarize: (s, m) => invoke((client) => client.summarize(s, m)),
     replyPermission: (s, id, r) => invoke((client) => client.replyPermission(s, id, r)),
-    replyForm: (s, id, a) => invoke((client) => client.replyForm(s, id, a)),
+    replyQuestion: (id, a) => invoke((client) => client.replyQuestion(id, a)),
     listCommands: () => invoke((client) => client.listCommands()),
     listAgents: () => invoke((client) => client.listAgents()),
     listProviders: () => invoke((client) => client.listProviders()),
@@ -44,13 +42,7 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     // Await the real teardown (server exit) so an in-app `opencode
     // upgrade` never runs while the SDK server still holds the binary.
     // Nothing spawned yet → nothing to wait for.
-    dispose: async () => {
-      closed = true;
-      await spawned?.then((s) => s.client.dispose(), (error: unknown) => {
-        // Failed acquisition is safe to retry only after its child was released.
-        if (!(error instanceof OpencodeStartupError)) throw error;
-      });
-    },
+    dispose: async () => { closed = true; await spawned?.then((s) => s.client.dispose()); },
   };
   return new OpencodeDriver({
     onAgentSession: ctx.onAgentSession,

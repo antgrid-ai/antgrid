@@ -18,24 +18,7 @@ export function pluginDirArg(args: string[]): string | undefined {
   return at >= 0 ? args[at + 1] : undefined;
 }
 
-/**
- * The preapproved tool list out of a merged launch augmentation. It rides as one
- * `--allowedTools=a,b` token (the CLI flag is variadic); the SDK takes the list
- * as an option instead, so the token is unpacked here. Absent => undefined.
- */
-export function allowedToolsArg(args: string[]): string[] | undefined {
-  const tools = joinedFlagValue(args, "--allowedTools")?.split(",").filter(Boolean);
-  return tools?.length ? tools : undefined;
-}
-
-/** The value of a `--flag=value` token, the form the augmentation uses for flags
- *  whose separated form would swallow the user's next word. */
-function joinedFlagValue(args: string[], flag: string): string | undefined {
-  return args.find((arg) => arg.startsWith(`${flag}=`))?.slice(flag.length + 1);
-}
-
-// `spawn` is injectable so tests can observe the options without a real claude.
-export function createDriver(ctx: DriverCtx, spawn: typeof spawnClaude = spawnClaude): StructuredDriver {
+export function createDriver(ctx: DriverCtx): StructuredDriver {
   // Bounded tail of the subprocess's stderr: startup failures (bad auth,
   // corrupted install) otherwise vanish silently — the SDK only invokes
   // this callback, it never surfaces stderr any other way.
@@ -51,10 +34,13 @@ export function createDriver(ctx: DriverCtx, spawn: typeof spawnClaude = spawnCl
       stderrBytes -= stderrLines.shift()?.length ?? 0;
     }
   };
+  // Reuse the terminal-mode title plugin in chat mode so /session-title
+  // auto-names the session from the conversation. Only the plugin dir is
+  // lifted out of the augmentation and mapped to the SDK's extraArgs shape.
+  // The chat augmentation carries no MCP profile (`buildChatSpawnAugment`
+  // skips it), so chat sessions get no Antgrid tools.
   const chatAug = ctx.chatAugment();
   const pluginDir = pluginDirArg(chatAug.args);
-  const mcpConfig = joinedFlagValue(chatAug.args, "--mcp-config");
-  const allowedTools = allowedToolsArg(chatAug.args);
   // `claude update` is install-method-sensitive, but this is detection
   // only; the run itself is fail-soft (see the agent:update handler).
   ctx.emitUpdateCheck();
@@ -62,15 +48,11 @@ export function createDriver(ctx: DriverCtx, spawn: typeof spawnClaude = spawnCl
     sessionId: ctx.sessionId,
     sendMessage: ctx.send,
     cwd: ctx.projectPath,
-    spawn: ({ canUseTool, onElicitation, abort, resume }) =>
-      spawn({ cwd: ctx.projectPath, canUseTool, onElicitation, resume,
+    spawn: ({ canUseTool, abort, resume }) =>
+      spawnClaude({ cwd: ctx.projectPath, canUseTool, resume,
         approvalPolicy: ctx.approvalPolicy,
-        ...(allowedTools ? { allowedTools } : {}),
         onStderr: pushStderr, abortController: abort,
-        extraArgs: {
-          ...(pluginDir ? { "plugin-dir": pluginDir } : {}),
-          ...(mcpConfig ? { "mcp-config": mcpConfig } : {}),
-        },
+        ...(pluginDir ? { extraArgs: { "plugin-dir": pluginDir } } : {}),
         extraEnv: chatAug.env }),
     onSessionId: ctx.onAgentSession,
     stderrTail: () => stderrLines.join("\n"),

@@ -1,10 +1,12 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/gestures.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
+import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../models/workspace_view.dart';
 import '../providers/visible_surface.dart';
 
@@ -22,47 +24,32 @@ extension WorkspaceViewUI on WorkspaceView {
     WorkspaceView.handler => 'Handler',
   };
 
-  CarbonIcons get carbonIcon => switch (this) {
-    WorkspaceView.preview => CarbonIcons.applicationWeb,
-    WorkspaceView.files => CarbonIcons.folder,
-    WorkspaceView.git => CarbonIcons.branch,
-    WorkspaceView.terminals => CarbonIcons.terminal,
-    WorkspaceView.handler => CarbonIcons.security,
+  String get icon => switch (this) {
+    WorkspaceView.preview => AbIcons.preview,
+    WorkspaceView.files => AbIcons.files,
+    WorkspaceView.git => AbIcons.git,
+    WorkspaceView.terminals => AbIcons.terminal,
+    WorkspaceView.handler => AbIcons.shield,
   };
 }
 
-/// The count as drawn: capped, so a runaway backlog cannot widen a tab.
-String workspaceViewCountText(int count) => count > 99 ? '99+' : '$count';
-
-/// A view's accessible name with its count folded in ("Git, 3"). A bare
-/// number beside the name announces as a stray digit; this is what makes it
-/// read as the view's own backlog.
-String workspaceViewSemanticLabel(WorkspaceView view, int count) =>
-    count > 0 ? '${view.label}, ${workspaceViewCountText(count)}' : view.label;
-
-/// The workspace header strip's total height, border included. One source for
-/// [WorkspaceTabBar] and the agent bar so their tops and bottoms meet across
-/// the resizable divider. Mirrors Carbon's tab height (40 compact, the finger
-/// target on touch) from the same platform test [AbCarbonScope] uses, so the
-/// agent bar can read it from outside its own scope.
-double get workspaceStripHeight =>
-    (AbCarbonScope.platformDensity == CarbonDensity.touch
-        ? AbTokens.tapTargetMin
-        : 40.0) +
-    CarbonBorders.hairline;
-
-/// Horizontal tab strip mounted at the top of the workspace panel. Height is
-/// [workspaceStripHeight], which the agent bar shares so the two sit flush
-/// across the resizable divider.
+/// Horizontal tab strip mounted at the top of the workspace panel. Replaces
+/// the previous vertical 48px `SidebarRail`. Height matches
+/// [AbTokens.statusHeaderHeight] so it sits flush with the agent panel
+/// header across the resizable divider.
+///
+/// Stateful for the strip's scroll position: the tabs outgrow the bar well
+/// before the panel reaches its narrowest (the touch tablet's docked context
+/// pane is a quarter of the window), so the last tabs sit off the right edge
+/// and the selected one has to be scrolled back to whenever it changes —
+/// picking Terminals from `WorkspaceMenuButton`'s popup otherwise swapped the
+/// body while every visible tab stayed unselected.
 ///
 /// Which tabs it lists comes from [visibleWorkspaceViewsProvider] rather than
 /// from the caller: the phone's nav and the agent bar's rail read the same
 /// provider, and a strip that took the list as a parameter could be handed a
 /// different one.
-///
-/// Its own [AbCarbonScope] sits inside the widget, below the keyed
-/// `WorkspacePanel`, so the panel's identity never depends on it.
-class WorkspaceTabBar extends ConsumerWidget {
+class WorkspaceTabBar extends ConsumerStatefulWidget {
   const WorkspaceTabBar({
     super.key,
     required this.selected,
@@ -81,135 +68,292 @@ class WorkspaceTabBar extends ConsumerWidget {
   final VoidCallback? onClose;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WorkspaceTabBar> createState() => _WorkspaceTabBarState();
+}
+
+class _WorkspaceTabBarState extends ConsumerState<WorkspaceTabBar> {
+  final _tabKeys = {for (final view in WorkspaceView.values) view: GlobalKey()};
+  final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    // The pane can open onto a tab that was never on screen (the popup selects
+    // while the pane is closed), so the first layout needs the same reveal a
+    // later selection change gets.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _revealSelected(animate: false),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant WorkspaceTabBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selected != widget.selected) {
+      // After the frame: the newly selected tab has to be laid out before
+      // ensureVisible can measure where to scroll it.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealSelected(animate: true),
+      );
+    }
+  }
+
+  void _revealSelected({required bool animate}) {
+    if (!mounted) return;
+    final tabContext = _tabKeys[widget.selected]?.currentContext;
+    if (tabContext == null) return;
+    Scrollable.ensureVisible(
+      tabContext,
+      // Centred rather than nudged to the nearest edge: the strip holds more
+      // tabs than the pane fits, so centring keeps a neighbour visible on
+      // either side and makes it obvious the rest scroll.
+      alignment: 0.5,
+      duration: animate ? AbTokens.motionDefault : Duration.zero,
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final views = ref.watch(visibleWorkspaceViewsProvider);
-    // Read here, outside the scope: the Ab-side token behind it is host layout.
-    final stripHeight = workspaceStripHeight;
-    return AbCarbonScope(
-      child: Builder(
-        builder: (context) {
-          final theme = CarbonTheme.of(context);
-          return Container(
-            decoration: BoxDecoration(
-              color: theme.colors.background,
-              border: Border(
-                bottom: BorderSide(color: theme.colors.borderSubtle00),
+    return Container(
+      height: AbTokens.statusHeaderHeight,
+      decoration: BoxDecoration(
+        color: context.antgrid.bgDeep,
+        border: Border(bottom: BorderSide(color: context.antgrid.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          // Tabs live inside a horizontally scrollable region so the Row
+          // never overflows when the resizable context panel narrows past
+          // the tabs' intrinsic width. Expanded gives the scroll view a
+          // bounded width; the trailing expand affordance stays fixed.
+          //
+          // The RawScrollbar is what makes that scrollability discoverable
+          // and mouse-draggable rather than a dead end: without it, a narrow
+          // panel with the selection centred (see [_revealSelected]) can push
+          // BOTH end tabs off screen with nothing on screen hinting there's
+          // more to scroll to, and a mouse (no touch drag, no trackpad
+          // gesture) has no obvious way to get there. Top-anchored so it
+          // never competes with each tab's own bottom active-state
+          // underline; `thumbVisibility: true` only ever draws when the
+          // strip actually overflows — a scrollbar has nothing to paint once
+          // every tab already fits.
+          Expanded(
+            child: RawScrollbar(
+              controller: _scrollController,
+              thumbVisibility: true,
+              thickness: 3,
+              radius: const Radius.circular(2),
+              scrollbarOrientation: ScrollbarOrientation.top,
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                child: Row(
+                  children: [
+                    for (final view in views)
+                      _TabItem(
+                        key: _tabKeys[view],
+                        view: view,
+                        isActive: view == widget.selected,
+                        onTap: () => widget.onSelected(view),
+                        badgeCount: widget.badges[view] ?? 0,
+                      ),
+                  ],
+                ),
               ),
             ),
-            child: SizedBox(
-              height: stripHeight - CarbonBorders.hairline,
+          ),
+          if (widget.onToggleExpand != null || widget.onClose != null)
+            Padding(
+              padding: const EdgeInsets.only(right: AbTokens.space6),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                spacing: AbTokens.space2,
                 children: [
-                  // Touch and stylus drags are removed so the strip adds no
-                  // horizontal drag recognizer beside the tablet's raw-pointer
-                  // fling dispatcher; trackpad pans stay, as they never reach
-                  // that dispatcher.
-                  Expanded(
-                    child: ScrollConfiguration(
-                      behavior: ScrollConfiguration.of(context).copyWith(
-                        dragDevices: const <PointerDeviceKind>{
-                          PointerDeviceKind.trackpad,
-                        },
+                  if (widget.onToggleExpand != null)
+                    if (widget.isExpanded)
+                      // Expanded means the agent panel is gone from the
+                      // window entirely (see `_PanelMode.contextExpanded`'s
+                      // doc in workspace_shell.dart) — the ONLY way back, so
+                      // it reads as a labeled button rather than an icon a
+                      // returning user has to already know the meaning of.
+                      AbButton(
+                        compact: true,
+                        label: 'Restore',
+                        // Brighter than the label (which stays the button's
+                        // default textSecondary) so the glyph reads as an
+                        // icon next to the word, not a second run of text —
+                        // same color as the label made the pair blend
+                        // together at this size.
+                        leading: Padding(
+                          padding: const EdgeInsets.only(
+                            right: AbTokens.space2,
+                          ),
+                          child: AbIcon(
+                            AbIcons.collapse,
+                            size: AbTokens.iconButtonGlyph,
+                            color: context.antgrid.textPrimary,
+                          ),
+                        ),
+                        onTap: widget.onToggleExpand,
+                      )
+                    else
+                      AbIconButton(
+                        icon: AbIcons.expand,
+                        tooltip: 'Expand',
+                        onTap: widget.onToggleExpand,
                       ),
-                      child: CarbonTabs<WorkspaceView>(
-                        semanticLabel: 'Workspace views',
-                        activation: CarbonActivationMode.manual,
-                        wheelScrollsSideways: true,
-                        value: selected,
-                        onChanged: onSelected,
-                        // A re-tap re-publishes the selection so a pane that
-                        // was closed or scrolled away reacts to the tab it
-                        // was already on.
-                        onReselect: onSelected,
-                        tabs: [
-                          for (final view in views)
-                            CarbonOption<WorkspaceView>(
-                              value: view,
-                              label: view.label,
-                              // CarbonTabs speaks the name then this, "Git, 3".
-                              secondaryLabel: (badges[view] ?? 0) > 0
-                                  ? workspaceViewCountText(badges[view]!)
-                                  : null,
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  if (onToggleExpand != null)
-                    _StripButton(
-                      // Expanded means the agent panel is gone from the window
-                      // entirely (see `_PanelMode.contextExpanded`), so this
-                      // is the only way back.
-                      icon: isExpanded
-                          ? CarbonIcons.minimize
-                          : CarbonIcons.maximize,
-                      label: isExpanded ? 'Restore' : 'Expand',
-                      onPressed: onToggleExpand,
-                    ),
                   // Hides the panel outright (not a collapse to a strip); the
                   // window title bar's panel control is the way back.
-                  if (onClose != null)
-                    _StripButton(
-                      icon: CarbonIcons.close,
-                      label: 'Hide panel',
-                      onPressed: onClose,
+                  if (widget.onClose != null)
+                    AbIconButton(
+                      icon: AbIcons.close,
+                      tooltip: 'Hide panel',
+                      onTap: widget.onClose,
                     ),
                 ],
               ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
 }
 
-class _StripButton extends StatelessWidget {
-  const _StripButton({
-    required this.icon,
-    required this.label,
-    required this.onPressed,
+/// A workspace view's pending-count badge. Shared by the tab strip's
+/// [_TabItem] and the agent bar's workspace menu (`WorkspaceMenuPanel` in
+/// `workspace_menu_button.dart`) so a count reads identically — same shape,
+/// and [active] (the view's selected state, not hover) drives the same
+/// dim-unless-selected foreground in both places rather than two widgets that
+/// could quietly diverge.
+class WorkspaceViewBadge extends StatelessWidget {
+  const WorkspaceViewBadge({
+    super.key,
+    required this.count,
+    this.active = false,
   });
 
-  final CarbonIcons icon;
-  final String label;
-  final VoidCallback? onPressed;
+  final int count;
+  final bool active;
 
   @override
-  Widget build(BuildContext context) => CarbonTooltip(
-    message: label,
-    excludeFromSemantics: true,
-    alignment: CarbonTooltipAlignment.end,
-    child: CarbonButton.iconOnly(
-      icon: CarbonIcon(icon),
-      semanticLabel: label,
-      onPressed: onPressed,
-    ),
-  );
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space4,
+        vertical: 1,
+      ),
+      decoration: BoxDecoration(
+        color: p.bgRaised,
+        border: Border.all(color: p.borderSubtle),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: active ? p.textPrimary : p.textMuted,
+        ),
+      ),
+    );
+  }
 }
 
-/// A workspace view's pending-count as a Carbon tag, empty when there is none.
-/// Reads the same [workspaceBadgesProvider] the tab strip's count and the
-/// workspace menu read, so a count is one figure everywhere. The tag is
-/// decoration for a row that already speaks the count through
-/// [workspaceViewSemanticLabel], so it carries no semantics of its own.
-/// Must sit under an [AbCarbonScope].
-class WorkspaceViewCountTag extends ConsumerWidget {
-  const WorkspaceViewCountTag({super.key, required this.view});
+class _TabItem extends StatefulWidget {
+  const _TabItem({
+    super.key,
+    required this.view,
+    required this.isActive,
+    required this.onTap,
+    required this.badgeCount,
+  });
 
   final WorkspaceView view;
+  final bool isActive;
+  final VoidCallback onTap;
+  final int badgeCount;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final count = ref.watch(
-      workspaceBadgesProvider.select((badges) => badges[view] ?? 0),
-    );
-    if (count <= 0) return const SizedBox.shrink();
-    return ExcludeSemantics(
-      child: CarbonTag(
-        label: workspaceViewCountText(count),
-        size: CarbonTagSize.small,
+  State<_TabItem> createState() => _TabItemState();
+}
+
+class _TabItemState extends State<_TabItem> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = (widget.isActive || _hovering)
+        ? context.antgrid.textPrimary
+        : context.antgrid.textSecondary;
+
+    return Semantics(
+      button: true,
+      selected: widget.isActive,
+      // The badge is drawn as a bare number, which announces as a stray digit
+      // after the tab name; folding it into the label is what makes it read as
+      // this tab's count. A bare GestureDetector announces as nothing at all,
+      // so both the role and the selected state have to be stated here.
+      label: widget.badgeCount > 0
+          ? '${widget.view.label}, ${widget.badgeCount}'
+          : widget.view.label,
+      // Excluding the subtree takes the GestureDetector's tap action with it,
+      // which would leave a button assistive tech can see and cannot press.
+      excludeSemantics: true,
+      onTap: widget.onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            // Pin each tab to the bar's full height so the active-tab accent
+            // underline anchors flush at the bottom edge instead of floating
+            // mid-bar at the tab's intrinsic content height.
+            height: AbTokens.statusHeaderHeight,
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: widget.isActive
+                      ? context.antgrid.accent
+                      : Colors.transparent,
+                  width: 2,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                AbIcon(widget.view.icon, size: 14, color: color),
+                const SizedBox(width: AbTokens.space6),
+                Text(
+                  widget.view.label,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: color,
+                  ),
+                ),
+                if (widget.badgeCount > 0) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  WorkspaceViewBadge(
+                    count: widget.badgeCount,
+                    active: widget.isActive,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

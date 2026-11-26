@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_progress_rule.dart';
+import 'package:antgrid/design/widgets/ab_url_field.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/preview_site_data.dart';
@@ -11,7 +14,6 @@ import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:antgrid/widgets/preview_draw_overlay.dart';
 import 'package:flutter/foundation.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -143,18 +145,18 @@ void main() {
   Future<Map<int, String>?> storedOwners(WidgetTester tester) async =>
       await tester.runAsync<Map<int, String>?>(PreviewOriginOwnerStore().read);
 
-  Finder toolbarFinder(String label) => find.byWidgetPredicate(
-    (w) => w is CarbonButton && w.semanticLabel == label,
-    description: 'CarbonButton "$label"',
-  );
-
-  CarbonButton toolbarButton(WidgetTester tester, String label) =>
-      tester.widget<CarbonButton>(toolbarFinder(label));
+  AbIconButton toolbarButton(WidgetTester tester, String tooltip) =>
+      tester.widget<AbIconButton>(
+        find.ancestor(
+          of: find.byTooltip(tooltip),
+          matching: find.byType(AbIconButton),
+        ),
+      );
 
   String addressText(WidgetTester tester) => tester
       .widget<EditableText>(
         find.descendant(
-          of: find.byType(CarbonTextInput),
+          of: find.byType(AbUrlField),
           matching: find.byType(EditableText),
         ),
       )
@@ -287,7 +289,7 @@ void main() {
       await settle(tester);
 
       expect(platform.controllers, isEmpty);
-      expect(find.byType(CarbonProgressBar), findsOneWidget);
+      expect(find.byType(AbProgressRule), findsOneWidget);
 
       gate.complete();
       await settle(tester);
@@ -390,7 +392,7 @@ void main() {
 
         await tester.enterText(
           find.descendant(
-            of: find.byType(CarbonTextInput),
+            of: find.byType(AbUrlField),
             matching: find.byType(EditableText),
           ),
           input,
@@ -504,7 +506,7 @@ void main() {
       await settle(tester);
       final first = platform.controllers.single;
 
-      await tester.tap(toolbarFinder('Draw on the page'));
+      await tester.tap(find.byTooltip('Draw on the page'));
       await tester.pump();
       expect(find.byType(PreviewDrawOverlay), findsOneWidget);
 
@@ -599,7 +601,7 @@ void main() {
       expect(platform.controllers, hasLength(2));
       final live = platform.controllers.last;
 
-      await tester.tap(toolbarFinder('Pick an element'));
+      await tester.tap(find.byTooltip('Pick an element'));
       await tester.pump();
       expect(toolbarButton(tester, 'Pick an element').selected, isTrue);
       final address = addressText(tester);
@@ -652,14 +654,14 @@ void main() {
 
       history.complete(true);
       await settle(tester);
-      expect(toolbarButton(tester, 'Back').onPressed, isNull);
+      expect(toolbarButton(tester, 'Back').onTap, isNull);
 
       // The live page's own history does enable Back.
       final live = platform.controllers.last;
       live.historyGate = Completer<bool>()..complete(true);
       live.delegate!.onPageFinished!(_kOrigin);
       await settle(tester);
-      expect(toolbarButton(tester, 'Back').onPressed, isNotNull);
+      expect(toolbarButton(tester, 'Back').onTap, isNotNull);
       await tester.pump(const Duration(seconds: 10));
     });
 
@@ -676,35 +678,6 @@ void main() {
       await settle(tester);
 
       expect(controller.retirements, 1);
-    });
-  });
-
-  group('PreviewScreen element picker', () {
-    testWidgets('a picker whose script the page refuses shows as off', (
-      tester,
-    ) async {
-      // Desktop: mobile keeps the picker behind the overflow menu.
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      final rig = await boot(tester);
-      await openLocalTab(rig.preview, _kPort);
-      await tester.pumpWidget(host(rig.container, showPreview: true));
-      await settle(tester);
-      final controller = platform.controllers.single;
-
-      controller.scriptError = StateError('page refused the script');
-      await tester.tap(toolbarFinder('Pick an element'));
-      await settle(tester);
-      expect(controller.scripts, hasLength(1));
-      expect(toolbarButton(tester, 'Pick an element').selected, isFalse);
-
-      // Once the page accepts it, the same tap arms.
-      controller.scriptError = null;
-      await tester.tap(toolbarFinder('Pick an element'));
-      await settle(tester);
-      expect(controller.scripts, hasLength(2));
-      expect(toolbarButton(tester, 'Pick an element').selected, isTrue);
-      await tester.pump(const Duration(seconds: 10));
-      debugDefaultTargetPlatformOverride = null;
     });
   });
 }

@@ -1,34 +1,22 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/new_session_start.dart';
-import 'package:antgrid/providers/project_index.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/recent_sessions/starting_session_row.dart';
-
-import '../helpers/carbon_guard.dart';
 
 /// The row renders nothing until a start is armed, and a zero-extent sliver
 /// child is skipped by the default finders — so the container has to be built
 /// here rather than looked up off an element that does not exist yet.
 ProviderContainer _container(List<Override> overrides) {
-  final container = ProviderContainer(
-    overrides: [
-      // Grouping by project (the default) reads the sidebar's merge; with no
-      // machines known, every copy keeps a bucket of its own.
-      projectGroupByEntryProvider.overrideWithValue(const {}),
-      ...overrides,
-    ],
-  );
+  final container = ProviderContainer(overrides: overrides);
   addTearDown(container.dispose);
   return container;
 }
@@ -38,7 +26,7 @@ Widget _host(ProviderContainer container, Widget child) {
     container: container,
     child: MaterialApp(
       theme: buildAbTheme(),
-      home: Scaffold(body: AbCarbonScope(child: child)),
+      home: Scaffold(body: child),
     ),
   );
 }
@@ -95,12 +83,11 @@ void main() {
       expect(find.byKey(startingSessionRowKey), findsNothing);
 
       _begin(container);
-      // Never pumpAndSettle: the row's spinner animates forever.
+      // Never pumpAndSettle: the row's AbLoadingDot animates forever.
       await tester.pump();
 
       expect(find.byKey(startingSessionRowKey), findsOneWidget);
-      expect(find.text('Starting'), findsOneWidget);
-      expect(abWidgetsInScope(tester), isEmpty);
+      expect(find.text('STARTING'), findsOneWidget);
       expect(find.text('Fix the parser'), findsOneWidget);
       expect(find.text('mac-studio · antgrid'), findsOneWidget);
       expect(_phaseText(tester), 'Waking mac-studio...');
@@ -146,13 +133,6 @@ void main() {
       find.descendant(of: row, matching: find.byType(InkWell)),
       findsNothing,
     );
-    // Static means no onPressed: the Carbon row then builds no focus stop and
-    // announces itself as one non-button node.
-    final listRow = find.descendant(
-      of: row,
-      matching: find.byType(CarbonContainedListRow),
-    );
-    expect(tester.widget<CarbonContainedListRow>(listRow).onPressed, isNull);
 
     await tester.tap(row, warnIfMissed: false);
     await tester.pump();

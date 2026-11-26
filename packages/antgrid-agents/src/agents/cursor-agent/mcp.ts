@@ -1,6 +1,5 @@
 import { join } from "node:path";
 import { materializeJson, NO_INJECTION } from "../launch-inject";
-import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 import { cursorSupportsFlag } from "./help";
 
@@ -22,8 +21,7 @@ const MCP_ENV = {
  * workspace trust (the hook profile already passes `--trust`) with no approval
  * prompt, and is spawned twice per launch, which is accepted.
  */
-export function inject(ctx: McpInjectCtx): LaunchAugmentation {
-  const { abDir } = ctx;
+export function inject({ abDir, mcpCommand }: McpInjectCtx): LaunchAugmentation {
   if (!cursorSupportsFlag("--plugin-dir")) return NO_INJECTION;
   const pluginDir = join(abDir, "plugin", "cursor");
   const written = materializeJson("Cursor MCP plugin", {
@@ -33,9 +31,7 @@ export function inject(ctx: McpInjectCtx): LaunchAugmentation {
       description: "Antgrid session tools",
     },
     [join(pluginDir, ".mcp.json")]: {
-      mcpServers: Object.fromEntries(mcpCommands(ctx).map(([name, command]) => [name,
-        { command: command.binary, args: [...command.preargs], env: MCP_ENV },
-      ])),
+      mcpServers: { antgrid: { command: mcpCommand.binary, args: [...mcpCommand.preargs], env: MCP_ENV } },
     },
   });
   return written ? { args: ["--plugin-dir", pluginDir], env: {} } : NO_INJECTION;

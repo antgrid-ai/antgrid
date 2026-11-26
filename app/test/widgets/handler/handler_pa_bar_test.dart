@@ -2,6 +2,11 @@
 // composer moved into the backlog drawer, because a second field with its own
 // send button, pinned under the session composer, read as a rival place to type
 // with nothing on either saying who receives it.
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/ab_icons.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
+import 'package:antgrid/design/widgets/ab_state_chip.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
@@ -11,9 +16,7 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
-import 'package:antgrid/widgets/handler/handler_item_status.dart';
 import 'package:antgrid/widgets/handler/handler_pa_bar.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -53,17 +56,15 @@ HandlerSessionState _armed({
   availability: availability,
 );
 
-/// The lens chip is a pressable Carbon tag; its fill is the whole assertion.
-CarbonTag _chip(WidgetTester tester, String label) =>
-    tester.widget<CarbonTag>(find.widgetWithText(CarbonTag, label));
-
-/// The colours the bar itself resolved, read from under its own scope.
-CarbonColors _colors(WidgetTester tester) =>
-    CarbonTheme.of(tester.element(find.byType(CarbonTag))).colors;
+/// The chip's tone is the whole assertion, and the harness below mounts no
+/// palette extension — so read the one the bar itself resolved rather than
+/// guessing which fallback is in force.
+AbStateChip _chip(WidgetTester tester, String label) =>
+    tester.widget<AbStateChip>(find.widgetWithText(AbStateChip, label));
 
 /// The state word is the first span of a rich title, so its tone is only
 /// legible off the spans — a `Text` finder would hand back the whole line.
-/// The title is the one rich `Text` the bar builds; the hint and the chip
+/// The title is the one rich `Text` the bar builds; the subtitle and the chip
 /// label both carry plain `data`.
 TextSpan _stateSpan(WidgetTester tester) {
   final title = tester.widget<Text>(
@@ -75,30 +76,16 @@ TextSpan _stateSpan(WidgetTester tester) {
 /// Everything that sits ON the row's one line, so a test can assert they share
 /// a centre rather than eyeballing a screenshot.
 List<Finder> _onTheLine() => [
-  find.byWidgetPredicate(
-    (w) => w is CarbonIcon && w.icon == CarbonIcons.listBulleted,
-  ),
+  find.byWidgetPredicate((w) => w is AbIcon && w.icon == AbIcons.tasklist),
   find.byWidgetPredicate((w) => w is Text && w.textSpan != null),
-  find.byType(CarbonTag),
-  find.byWidgetPredicate(
-    (w) => w is CarbonIcon && w.icon == CarbonIcons.chevronUp,
-  ),
+  find.byType(AbStateChip),
+  find.byWidgetPredicate((w) => w is AbIcon && w.icon == AbIcons.chevronUp),
 ];
-
-/// Asserts the finders share one vertical centre, to a sub-pixel tolerance.
-void _expectOneCentre(WidgetTester tester) {
-  final centres = _onTheLine()
-      .map((f) => tester.getRect(f).center.dy)
-      .toList();
-  for (final y in centres) {
-    expect(y, closeTo(centres.first, 0.5));
-  }
-}
 
 /// The brief marker carries no text, so the icon it draws is the only thing
 /// that identifies it.
 final Finder _briefMarker = find.byWidgetPredicate(
-  (w) => w is CarbonIcon && w.icon == CarbonIcons.chat,
+  (w) => w is AbIcon && w.icon == AbIcons.comment,
 );
 
 HandlerInstructionItem _item(String id, String text, String status) =>
@@ -201,7 +188,9 @@ void main() {
     // phrases in the same casing, and one lens spelled two ways on two
     // surfaces is read as two settings.
     await _pump(tester, sessions: {'t1': _armed(roleId: 'qa')});
-    expect(_chip(tester, 'Proof it works').color, CarbonTagColor.gray);
+    final chip = _chip(tester, 'Proof it works');
+    expect(chip.active, isFalse);
+    expect(chip.tone, isNull);
   });
 
   testWidgets('the default is named as nothing extra', (tester) async {
@@ -239,7 +228,7 @@ void main() {
     // and saying so here would advertise a control over nothing.
     await _pump(tester, sessions: {'t1': _armed()}, lenses: null);
     expect(find.text('Nothing extra'), findsNothing);
-    expect(_chip(tester, '—').color, CarbonTagColor.gray);
+    expect(_chip(tester, '—').active, isFalse);
   });
 
   testWidgets('the lens chip is tinted where nothing is being judged', (
@@ -256,10 +245,10 @@ void main() {
         ),
       },
     );
-    expect(
-      _chip(tester, 'What could break').color,
-      handlerToneTagColor(HandlerTone.warning),
-    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    final chip = _chip(tester, 'What could break');
+    expect(chip.tone, p.warning);
+    expect(chip.active, isTrue);
   });
 
   testWidgets('a brief shows a marker beside the lens', (tester) async {
@@ -320,10 +309,10 @@ void main() {
     // that carried the word — `HandlerHeaderControl` — is mounted nowhere, so
     // an armed session had no surface at all saying what Handler was doing.
     await _pump(tester, sessions: {'t1': _armed()});
-    final c = _colors(tester);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     final word = _stateSpan(tester);
     expect(word.text, 'Watching');
-    expect(word.style?.color, handlerToneColor(c, HandlerTone.quiet));
+    expect(word.style?.color, p.textMuted);
   });
 
   // `needs_you` is the bridge's one word for two situations, and the tone is
@@ -341,10 +330,10 @@ void main() {
         ),
       },
     );
-    final c = _colors(tester);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     final asked = _stateSpan(tester);
     expect(asked.text, 'Asked you');
-    expect(asked.style?.color, handlerToneColor(c, HandlerTone.secondary));
+    expect(asked.style?.color, p.textSecondary);
   });
 
   testWidgets('a session that has actually stopped keeps the loud word', (
@@ -359,10 +348,10 @@ void main() {
         ),
       },
     );
-    final c = _colors(tester);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     final stopped = _stateSpan(tester);
     expect(stopped.text, 'Needs you');
-    expect(stopped.style?.color, handlerToneColor(c, HandlerTone.accent));
+    expect(stopped.style?.color, p.accent);
   });
 
   testWidgets('an unwatchable session never reads as watching', (tester) async {
@@ -374,10 +363,10 @@ void main() {
       tester,
       sessions: {'t1': _armed(observability: HandlerObservability.unsupported)},
     );
-    final c = _colors(tester);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     final word = _stateSpan(tester);
     expect(word.text, 'Not watched');
-    expect(word.style?.color, handlerToneColor(c, HandlerTone.warning));
+    expect(word.style?.color, p.warning);
   });
 
   testWidgets('monitoring that has not come up yet says so', (tester) async {
@@ -391,10 +380,10 @@ void main() {
         ),
       },
     );
-    final c = _colors(tester);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     final word = _stateSpan(tester);
     expect(word.text, 'Waiting for agent');
-    expect(word.style?.color, handlerToneColor(c, HandlerTone.warning));
+    expect(word.style?.color, p.warning);
   });
 
   testWidgets('a bridge that reports no availability keeps the plain word', (
@@ -415,7 +404,10 @@ void main() {
     // reads as "the icon is too high", and it survived a redesign of the row
     // because nothing here could fail for it.
     await _pump(tester, sessions: {'t1': _armed()});
-    _expectOneCentre(tester);
+    final centres = _onTheLine()
+        .map((f) => tester.getRect(f).center.dy)
+        .toSet();
+    expect(centres, hasLength(1));
   });
 
   testWidgets('the line keeps its centre once the hint wraps under it', (
@@ -432,14 +424,17 @@ void main() {
         ),
       },
     );
-    _expectOneCentre(tester);
+    final centres = _onTheLine()
+        .map((f) => tester.getRect(f).center.dy)
+        .toSet();
+    expect(centres, hasLength(1));
   });
 
   testWidgets('the bar offers no place to type of its own', (tester) async {
     // The whole point of the collapse: the session composer above it is the
     // one field, and Handler's own box lives a tap away in the drawer.
     await _pump(tester, sessions: {'t1': _armed()});
-    expect(find.byType(CarbonTextInput), findsNothing);
+    expect(find.byType(AbTextField), findsNothing);
     expect(find.byType(HandlerInstructionComposer), findsNothing);
     expect(find.text(handlerDisclaimerText), findsNothing);
   });
@@ -546,8 +541,8 @@ void main() {
     // 280px is the narrowest surface this repo mounts handler UI at, and the
     // actionable half of this string is its TAIL — on one ellipsized line the
     // user is told what will not work and never where to go. Asserted through
-    // the render object rather than the widget field, so what is asserted is
-    // the allowance the paragraph was actually laid out with.
+    // the render object rather than the widget field, since it is AbListRow's
+    // DefaultTextStyle that has to carry the allowance down to the Text.
     tester.view.physicalSize = const Size(280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);

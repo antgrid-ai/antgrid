@@ -5,7 +5,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_progress_rule.dart';
-import 'attach_progress.dart';
+import 'terminal_attachment_uploader.dart';
 
 /// The in-flight attach readout, shaped as a twin of `SendToAgentButton` so the
 /// terminal's floating overlays read as one family.
@@ -52,7 +52,7 @@ class TerminalUploadStrip extends StatelessWidget {
                 const SizedBox(width: AbTokens.space4),
                 Expanded(
                   child: Text(
-                    progress.statusFirstLabel,
+                    _label(progress),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     // Mono: the label names a file that becomes a path.
@@ -71,4 +71,15 @@ class TerminalUploadStrip extends StatelessWidget {
       ),
     );
   }
+}
+
+String _label(AttachProgress progress) {
+  final name = progress.fileName;
+  return switch (progress.phase) {
+    AttachPhase.staging => '$name · uploading…',
+    // Matches the composer's attachment convention character for character.
+    AttachPhase.sending => '$name ${((progress.fraction ?? 0) * 100).round()}%',
+    AttachPhase.finishing => '$name · finishing…',
+    AttachPhase.done => '$name · added',
+  };
 }

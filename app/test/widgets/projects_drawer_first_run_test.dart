@@ -6,7 +6,7 @@
 //
 // The drawer is the only desktop surface mounted on BOTH routes, which is the
 // whole reason the checklist lives here rather than on the New Session canvas.
-import 'package:antgrid/widgets/docked_column.dart';
+import 'package:antgrid/design/widgets/ab_docked_column.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/providers/account_agents.dart';
@@ -17,7 +17,6 @@ import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/widgets/account_footer.dart';
 import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,11 +41,6 @@ const _allSteps = [
   (id: FirstRunStepIds.connectPhone, label: 'Connect your phone', done: false),
   (id: FirstRunStepIds.armHandler, label: 'Arm Handler', done: false),
 ];
-
-// Carbon icon-only buttons carry their label as semantics, not a Tooltip.
-final _dismiss = find.byWidgetPredicate(
-  (w) => w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
-);
 
 DrawerEntry _project(String id) => LocalProjectEntry(
   AbProject(
@@ -108,7 +102,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(FirstRunSetupSection), findsOneWidget);
-    expect(find.text('Setup · 1/2'), findsOneWidget);
+    expect(find.text('SETUP · 1/2'), findsOneWidget);
 
     // Docked, not floating in the list: below the scrollable body, above the
     // account footer. UpdateRow sits between them but only renders while an
@@ -153,18 +147,10 @@ void main() {
     // prevent — a bound in scaled pixels, because the row it has to contain
     // grows with the scaler and a raw token does not.
     expect(
-      tester.getBottomLeft(find.text('Projects')).dy,
+      tester.getBottomLeft(find.text('PROJECTS')).dy,
       lessThanOrEqualTo(section),
     );
-    expect(
-      tester.getBottomLeft(find.byType(AccountFooter)).dy,
-      tester.view.physicalSize.height,
-    );
-    expect(
-      tester.getSize(find.byType(AccountFooter)).height,
-      greaterThanOrEqualTo(CarbonSizes.md),
-      reason: 'the pinned footer was squeezed',
-    );
+    expect(tester.getSize(find.byType(AccountFooter)).height, 45);
 
     // The point of the dock: its viewport is shorter than the checklist inside
     // it, so the overflow became a scroll.
@@ -190,15 +176,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    // DockedColumn never squeezes its header, so at this size the header is
-    // what runs past the bottom edge; the drawer's ClipRect is the only
+    // AbDockedColumn never squeezes its header, so at this size the header is
+    // what runs past the bottom edge; the drawer's Clip.hardEdge is the only
     // thing keeping it off the pane beside it.
     expect(
       find.ancestor(
-        of: find.byType(DockedColumn),
-        matching: find.byType(ClipRect),
+        of: find.byType(AbDockedColumn),
+        matching: find.byType(ClipPath),
       ),
-      findsWidgets,
+      findsOneWidget,
     );
     debugDefaultTargetPlatformOverride = null;
   });
@@ -210,13 +196,13 @@ void main() {
     await tester.pumpWidget(buildDrawer());
     await tester.pumpAndSettle();
 
-    await tester.tap(_dismiss);
+    await tester.tap(find.byTooltip("Dismiss — won't show again"));
     await tester.pumpAndSettle();
 
     // Unmounted outright, not shrunk: the dock skips its scroll view too, so
     // no Scrollable outlives the checklist (see _SetupDock).
     expect(find.byType(FirstRunSetupSection), findsNothing);
-    expect(find.textContaining('Setup'), findsNothing);
+    expect(find.textContaining('SETUP'), findsNothing);
     expect(find.byType(AccountFooter), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });

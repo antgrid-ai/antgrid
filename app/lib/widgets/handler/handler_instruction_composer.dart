@@ -1,10 +1,12 @@
-import 'dart:math' as math;
-
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_composer_send_button.dart';
+import '../../design/widgets/ab_prompt_field.dart';
+import '../../design/widgets/ab_tooltip.dart';
 import '../transcript/composer/smart_enter.dart';
 import 'handler_judge_chip.dart';
 import 'handler_session_settings.dart';
@@ -26,7 +28,7 @@ class HandlerComposerSend {
 
   final String tooltip;
 
-  /// The key is an icon with no visible text, so the label is the only thing
+  /// [ComposerSendButton] paints a bare glyph, so the label is the only thing
   /// a screen reader has to say what this key does.
   final String semanticLabel;
 
@@ -154,7 +156,7 @@ class _HandlerInstructionComposerState
   /// composer cannot answer a return key differently.
   ///
   /// `onKeyEvent` fires for hardware keys only, so `hasHardwareKeyboard` is a
-  /// fact here rather than an assumption; a plain text field has no
+  /// fact here rather than an assumption; a plain [AbPromptField] has no
   /// document model, so no line it holds is ever anything but plain. That
   /// leaves the soft keyboard's Enter as a newline and mobile committing
   /// through the send key — which is why this field carries no
@@ -211,65 +213,88 @@ class _HandlerInstructionComposerState
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final p = context.antgrid;
     final send = widget.send;
     // One "armed instrument" surface, the same focus contract as the New
-    // Session composer: the frame carries the state — subtle at rest, strong on
-    // hover, Carbon's 2px focus colour while the field has focus — painted in
-    // the foreground so the thicker edge never shifts the content inside it.
-    final frameColor = _focused
-        ? t.colors.focus
+    // Session composer and RichComposer: default -> strong on hover -> accent
+    // while the field has focus.
+    final borderColor = _focused
+        ? p.accent
         : _hovered
-        ? t.borderStrong(1)
-        : t.borderSubtle(1);
-    final frameWidth = _focused ? CarbonBorders.focus : CarbonBorders.hairline;
+        ? p.borderStrong
+        : p.borderDefault;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
-      child: Container(
-        color: t.layer(1),
-        foregroundDecoration: BoxDecoration(
-          border: Border.all(color: frameColor, width: frameWidth),
+      child: AnimatedContainer(
+        duration: AbTokens.motionDefault,
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          border: Border.all(color: borderColor),
+          borderRadius: AbTokens.borderRadius8,
+          color: p.bgSurface,
         ),
-        // The frame is a layer-1 surface, so what sits on it is one layer up.
-        child: CarbonLayer(
-          level: 2,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsetsDirectional.fromSTEB(
-                  CarbonSpacing.spacing05,
-                  CarbonSpacing.spacing04,
-                  CarbonSpacing.spacing05,
-                  0,
-                ),
-                child: CarbonTextInput(
-                  key: const Key('handler-instruction-field'),
-                  bare: true,
-                  variant: CarbonTextInputVariant.multiline,
-                  controller: widget.controller,
-                  focusNode: _focus,
-                  semanticLabel: widget.hintText,
-                  placeholder: widget.hintText,
-                  // Same cap as the New Session prompt: a long instruction
-                  // scrolls inside the box rather than pushing the backlog
-                  // list — or the arm sheet's own commit — off screen.
-                  minLines: 1,
-                  maxLines: 7,
-                  prefix: _PromptMarker(focused: _focused),
-                ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AbTokens.space12,
+                AbTokens.space12,
+                AbTokens.space12,
+                AbTokens.space6,
               ),
-              Padding(
-                padding: const EdgeInsets.all(CarbonSpacing.spacing03),
-                child: Row(
-                  children: [
-                    // The picker takes the row's slack so its compound label
-                    // sheds inside a bounded width; the send key stays last
-                    // and intrinsic, so no gap opens after it.
-                    Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Shell-prompt marker, the same "type here" affordance the
+                  // New Session composer carries, so the two boxes read as one
+                  // instrument.
+                  Padding(
+                    padding: const EdgeInsets.only(top: AbTokens.space2),
+                    child: Text(
+                      '❯',
+                      style: AbTokens.monoStyle(
+                        fontSize: AbTokens.fontMd,
+                        fontWeight: FontWeight.w600,
+                        color: p.accent,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: AbTokens.space8),
+                  Expanded(
+                    // Same cap as RichComposer (~8 lines): a long instruction
+                    // scrolls inside the box rather than pushing the backlog
+                    // list — or the arm sheet's own commit — off screen.
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 176),
+                      child: AbPromptField(
+                        key: const Key('handler-instruction-field'),
+                        controller: widget.controller,
+                        focusNode: _focus,
+                        hintText: widget.hintText,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AbTokens.space10,
+                0,
+                AbTokens.space10,
+                AbTokens.space10,
+              ),
+              child: Row(
+                children: [
+                  // The chip takes the row's slack so its compound label sheds
+                  // inside a bounded width (ComposerChip needs one); the send
+                  // key stays last and intrinsic, so no gap opens after it.
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
                       child: HandlerJudgeChip(
                         terminalId: widget.terminalId,
                         judge: widget.judge,
@@ -277,59 +302,26 @@ class _HandlerInstructionComposerState
                         scopeNote: widget.judgeScopeNote,
                       ),
                     ),
-                    if (send != null) ...[
-                      const SizedBox(width: CarbonSpacing.spacing03),
-                      CarbonButton.iconOnly(
-                        key: const Key('handler-instruction-send'),
-                        kind: CarbonButtonKind.primary,
-                        icon: const CarbonIcon(CarbonIcons.send),
-                        semanticLabel: send.semanticLabel,
-                        onPressed: _canSend ? send.onSend : null,
+                  ),
+                  if (send != null) ...[
+                    const SizedBox(width: AbTokens.space8),
+                    Semantics(
+                      button: true,
+                      enabled: _canSend,
+                      label: send.semanticLabel,
+                      child: AbTooltip(
+                        message: send.tooltip,
+                        child: ComposerSendButton(
+                          key: const Key('handler-instruction-send'),
+                          onTap: _canSend ? send.onSend : null,
+                        ),
                       ),
-                    ],
+                    ),
                   ],
-                ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The shell-prompt marker the New Session composer carries, so the two boxes
-/// read as one instrument.
-class _PromptMarker extends StatelessWidget {
-  const _PromptMarker({required this.focused});
-
-  final bool focused;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    final code = t.typography.code;
-    double lineHeight(TextStyle s) => (s.fontSize ?? 0) * (s.height ?? 1);
-    // Seats the marker on the first line of the field, whose text is body
-    // sized, however the density sizes the two.
-    final top = math.max(
-      0.0,
-      (lineHeight(t.typography.body) - lineHeight(code)) / 2,
-    );
-    return Padding(
-      padding: EdgeInsetsDirectional.only(
-        top: top,
-        end: CarbonSpacing.spacing03,
-      ),
-      child: Text(
-        '❯',
-        style: code.copyWith(
-          // The mono family has no U+276F; without a named fallback the
-          // platform substitutes whatever font has it, or draws a missing-glyph
-          // box.
-          fontFamilyFallback: const ['JetBrains Mono NL'],
-          color: focused ? c.interactive : c.iconSecondary,
+            ),
+          ],
         ),
       ),
     );

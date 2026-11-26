@@ -14,7 +14,6 @@ export interface AgentHostServices {
   stateDirectory(): string;
   hookCommand(): HookCommand;
   mcpCommand?(): HookCommand;
-  memoryMcpCommand?(): HookCommand | undefined;
   killChildTree(child: { readonly pid?: number; kill(): unknown }): Promise<void>;
   stripInheritedCertOverrides(env: Record<string, string>): Record<string, string>;
 }

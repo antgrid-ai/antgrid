@@ -49,19 +49,12 @@ import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/workspace_menu_button.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/workspace_shell_harness.dart';
-
-/// The leading drawer button. A Carbon tooltip is not a Material one, so
-/// `byTooltip` cannot find it; it is named by its semantic label instead.
-final _projectsButton = find.byWidgetPredicate(
-  (w) => w is CarbonButton && w.semanticLabel == 'Projects',
-);
 
 const double _kScreenWidth = 1600;
 // Mirrors AbTokens.drawerPaneWidth and WorkspaceShellState's
@@ -121,6 +114,13 @@ Future<void> _settle(WidgetTester tester) async {
 /// Picks a view from the agent bar's workspace rail. Settles first: the rail
 /// is shown from a post-frame callback (see `WorkspaceMenuButton`), so it is
 /// one frame behind the shell that publishes it.
+///
+/// Taps the label with no hover because [_withTabletShell] pins
+/// `TargetPlatform.android`, where the rail never recedes and the labels are
+/// laid out from the first frame. Should the rail ever recede here, this taps a
+/// clipped, zero-opacity label ~200px outside the rail's box — and `tester.tap`
+/// only WARNS on a miss, so the swipe-routing tests would fail as "expected
+/// git, got null" and read as a bug in the fling router.
 Future<void> _pickView(WidgetTester tester, String label) async {
   await _settle(tester);
   await tester.tap(
@@ -151,7 +151,7 @@ void main() {
       await _withTabletShell(tester, (container) async {
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, 0);
 
-        await tester.tap(_projectsButton);
+        await tester.tap(find.byTooltip('Projects'));
         await _settle(tester);
         expect(
           tester.getTopLeft(find.byType(ProjectsDrawer)).dx,
@@ -159,7 +159,7 @@ void main() {
           reason: 'the sidebar should have closed',
         );
 
-        await tester.tap(_projectsButton);
+        await tester.tap(find.byTooltip('Projects'));
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, 0);
       });
@@ -209,7 +209,8 @@ void main() {
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
       expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, 0);
 
-      // Over the pane's own body, below its tab strip.
+      // Over the pane's own body, below its tab strip (which owns a drag of
+      // its own across the top 38px).
       await tester.flingFrom(
         const Offset(_kScreenWidth - _kContextPanelWidth / 2, 200),
         const Offset(250, 0),
@@ -294,7 +295,7 @@ void main() {
       await _withTabletShell(tester, (container) async {
         await _pickView(tester, 'Git');
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
-        await tester.tap(_projectsButton);
+        await tester.tap(find.byTooltip('Projects'));
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, lessThan(0));
 
@@ -324,7 +325,7 @@ void main() {
         await _pickView(tester, 'Git');
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
 
-        await tester.tap(_projectsButton);
+        await tester.tap(find.byTooltip('Projects'));
         await _settle(tester);
         expect(tester.getTopLeft(find.byType(ProjectsDrawer)).dx, lessThan(0));
 

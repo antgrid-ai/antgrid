@@ -1,7 +1,15 @@
 import 'dart:async';
 
-import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/widgets/carbon_empty_state.dart';
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/ab_icons.dart';
+import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
+import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
+import 'package:antgrid/design/widgets/ab_menu.dart';
+import 'package:antgrid/design/widgets/ab_prompt_field.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -14,12 +22,13 @@ import '../../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/prefs_test_mock.dart';
+import '../../helpers/toast_host.dart';
 
 const _tests = HandlerInstructionItem(
   id: 'i1',
@@ -190,11 +199,9 @@ Future<void> _pumpDrawer(
           firstRun ?? await FirstRunStore.open(),
         ),
       ],
-      child: MaterialApp(
-        builder: (context, child) => AbCarbonScope(child: child!),
-        home: const Scaffold(
-          body: Center(child: HandlerBacklogDrawer(terminalId: 't1')),
-        ),
+      child: const MaterialApp(
+        builder: abToastHostBuilder,
+        home: Scaffold(body: HandlerBacklogDrawer(terminalId: 't1')),
       ),
     ),
   );
@@ -217,28 +224,14 @@ Map<String, dynamic> _sentConfigure(ProjectSession session) => _transportOf(
   session,
 ).sent.firstWhere((m) => m['type'] == 'handler:configure');
 
-/// The row whose menu was opened last, so the entries a test inspects are the
-/// ones on screen without the test naming the row twice.
-int _openRow = 0;
-
-Finder _rowMenus() => find.byType(CarbonOverflowMenu);
-
 Future<void> _openMenuFor(WidgetTester tester, int rowIndex) async {
-  _openRow = rowIndex;
-  // The list scrolls above a pinned composer, so a row past the fold sits
-  // under the composer until it is brought into view.
-  await tester.ensureVisible(_rowMenus().at(rowIndex));
-  await tester.pump();
-  await tester.tap(_rowMenus().at(rowIndex));
+  await tester.tap(find.byTooltip('Item actions').at(rowIndex));
   await tester.pumpAndSettle();
 }
 
-/// The entries of the open menu, read off the trigger that built them: a
-/// held entry is one with no callback, which is how Carbon draws it disabled.
-List<CarbonMenuItem> _openMenuItems(WidgetTester tester) => [
-  for (final entry
-      in tester.widget<CarbonOverflowMenu>(_rowMenus().at(_openRow)).entries)
-    if (entry is CarbonMenuItem) entry,
+List<AbMenuItem> _openMenuItems(WidgetTester tester) => [
+  for (final entry in tester.widget<AbMenu>(find.byType(AbMenu)).items)
+    if (entry is AbMenuItem) entry,
 ];
 
 List<String> _openMenuLabels(WidgetTester tester) => [
@@ -250,6 +243,17 @@ List<String> _openMenuLabels(WidgetTester tester) => [
 /// test on an invariant that has nothing to do with what it asserted.
 Future<void> _drainSessionCacheFlush(WidgetTester tester) async {
   await tester.pump(const Duration(seconds: 1));
+  await tester.pumpAndSettle();
+}
+
+/// Asserts the held edit answered with [reason] as a toast, then lets the
+/// toast's dismiss timer expire so it can't outlive the test.
+Future<void> _drainToast(WidgetTester tester, String reason) async {
+  expect(
+    find.descendant(of: find.byType(AbToast), matching: find.text(reason)),
+    findsOneWidget,
+  );
+  await tester.pump(const Duration(seconds: 4));
   await tester.pumpAndSettle();
 }
 
@@ -282,7 +286,7 @@ Future<void> _sendInstruction(WidgetTester tester, String text) async {
 }
 
 String _fieldText(WidgetTester tester) =>
-    tester.widget<CarbonTextInput>(_field).controller!.text;
+    tester.widget<AbPromptField>(_field).controller.text;
 
 Future<void> _pick(WidgetTester tester, String label) async {
   await tester.tap(find.text(label));
@@ -556,8 +560,8 @@ void main() {
     // affordance, and every menu entry is a drop/move/requeue.
     expect(
       tester
-          .widgetList<CarbonIcon>(find.byType(CarbonIcon))
-          .where((i) => i.icon == CarbonIcons.add),
+          .widgetList<AbIcon>(find.byType(AbIcon))
+          .where((i) => i.icon == AbIcons.add),
       isEmpty,
     );
     expect(find.textContaining('epend'), findsNothing);
@@ -673,8 +677,8 @@ void main() {
     final session = await _armedSession(const []);
     await _pumpDrawer(tester, session);
 
-    expect(find.byType(CarbonEmptyState), findsOneWidget);
-    expect(find.byType(CarbonOverflowMenu), findsNothing);
+    expect(find.byType(AbEmptyState), findsOneWidget);
+    expect(find.byTooltip('Item actions'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -702,7 +706,7 @@ void main() {
     );
     // No second route to the one action: the composer below is it, and a
     // button here would give that action a second name.
-    expect(_sendKey, findsOneWidget);
+    expect(find.byTooltip('Send to Handler'), findsOneWidget);
   });
 
   // The window between a seeded arm and its extraction landing, which is the
@@ -760,7 +764,7 @@ void main() {
       );
       await _pumpDrawer(tester, session);
 
-      expect(find.text('What you asked for'), findsOneWidget);
+      expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
       expect(find.text('only instruction'), findsOneWidget);
       expect(find.textContaining('more in between'), findsNothing);
     });
@@ -802,18 +806,18 @@ void main() {
       );
       await _pumpDrawer(tester, session);
 
-      // Entry #1 is the session's opening sentence and stays on screen when
-      // the rest folds away, so the list keeps the room on a keyboard-up
-      // phone; the disclosure counts what it holds.
-      expect(find.text('What you asked for'), findsOneWidget);
+      // Nothing above the backlog's own Flexible scrolls, so the whole window
+      // of sentences comes out of the list's height on a keyboard-up phone.
+      // Entry #1 stays either way: it is what the session was opened to do.
       expect(find.text('ship the fix'), findsOneWidget);
       expect(find.text('and tag it'), findsNothing);
-      expect(find.text('2 more'), findsOneWidget);
+      // And the count says there is more behind the heading than the one line
+      // under it.
+      expect(find.text('· 3'), findsOneWidget);
 
-      await tester.tap(find.text('2 more'));
+      await tester.tap(find.text('WHAT YOU ASKED FOR'));
       await tester.pumpAndSettle();
 
-      expect(find.text('ship the fix'), findsOneWidget);
       expect(find.text('and tag it'), findsOneWidget);
     });
 
@@ -841,7 +845,7 @@ void main() {
       final session = await _armedSession(const [], goal: '');
       await _pumpDrawer(tester, session);
 
-      expect(find.textContaining('What you asked for'), findsNothing);
+      expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
     });
 
     testWidgets(
@@ -852,7 +856,7 @@ void main() {
         final session = await _armedSession(const []);
         await _pumpDrawer(tester, session);
 
-        expect(find.text('What you asked for'), findsOneWidget);
+        expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
         expect(find.text('ship the fix'), findsOneWidget);
         expect(find.textContaining('more in between'), findsNothing);
       },
@@ -877,12 +881,6 @@ void main() {
 
       // One copy on screen — the pending row's — not a second from this block.
       expect(find.text('run tests now'), findsOneWidget);
-      // The row's content is excluded from semantics, so its state has to ride
-      // on the label.
-      expect(
-        find.semantics.byLabel('run tests now. $handlerPendingInstructionLabel'),
-        findsOneWidget,
-      );
     });
 
     testWidgets('a pending sentence is not counted as elided either', (
@@ -927,7 +925,7 @@ void main() {
 
       // Once in this block as entry #1, once in the pending row below.
       expect(find.text('ship the fix'), findsNWidgets(2));
-      expect(find.textContaining('What you asked for'), findsOneWidget);
+      expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
       expect(find.textContaining('more in between'), findsNothing);
     });
 
@@ -957,7 +955,7 @@ void main() {
       // block goes away, since the one entry it had was the filtered one.
       expect(find.text(long), findsOneWidget);
       expect(find.text(clipped), findsNothing);
-      expect(find.textContaining('What you asked for'), findsNothing);
+      expect(find.text('WHAT YOU ASKED FOR'), findsNothing);
     });
 
     testWidgets(
@@ -998,11 +996,8 @@ void main() {
           projectSessionProvider('p').overrideWith((ref) => session),
           firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
         ],
-        child: MaterialApp(
-          builder: (context, child) => AbCarbonScope(child: child!),
-          home: const Scaffold(
-            body: Center(child: HandlerBacklogDrawer(terminalId: 'other')),
-          ),
+        child: const MaterialApp(
+          home: Scaffold(body: HandlerBacklogDrawer(terminalId: 'other')),
         ),
       ),
     );
@@ -1081,7 +1076,7 @@ void main() {
       expect(find.text('also update the docs'), findsOneWidget);
       expect(find.text('sending'), findsOneWidget);
       // Nothing to reorder or drop: the item is not in the bridge's list yet.
-      expect(find.byType(CarbonOverflowMenu), findsOneWidget);
+      expect(find.byTooltip('Item actions'), findsOneWidget);
 
       _emitStatus(session, [
         _tests,
@@ -1186,7 +1181,7 @@ void main() {
 
       // Refused before the tap: whitespace leaves the key dead, so there is
       // nothing to press rather than a press that quietly does nothing.
-      expect(tester.widget<CarbonButton>(_sendKey).onPressed, isNull);
+      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNull);
 
       await tester.tap(_sendKey);
       await tester.pump();
@@ -1214,11 +1209,8 @@ void main() {
             selectedRegistrationIdProvider.overrideWithValue('p'),
             projectSessionProvider('p').overrideWith((ref) => session),
           ],
-          child: MaterialApp(
-            builder: (context, child) => AbCarbonScope(child: child!),
-            home: const Scaffold(
-              body: Center(child: HandlerBacklogDrawer(terminalId: 'other')),
-            ),
+          child: const MaterialApp(
+            home: Scaffold(body: HandlerBacklogDrawer(terminalId: 'other')),
           ),
         ),
       );
@@ -1247,19 +1239,18 @@ void main() {
       );
     });
 
-    testWidgets('the disclaimer is a closable info notification', (
+    testWidgets('the disclaimer reads as chrome, from the token', (
       tester,
     ) async {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      final notice = tester.widget<CarbonNotification>(
-        find.byType(CarbonNotification),
+      final disclaimer = find.text(handlerDisclaimerText);
+      final p = tester.element(disclaimer).antgrid;
+      expect(
+        tester.widget<Text>(disclaimer).style,
+        AbTokens.sansStyle(fontSize: AbTokens.fontXxs, color: p.textMuted),
       );
-      expect(notice.kind, CarbonNotificationKind.info);
-      expect(notice.subtitle, handlerDisclaimerText);
-      expect(notice.closeLabel, "Dismiss — won't show again");
-      expect(notice.onClose, isNotNull);
     });
 
     testWidgets('closing the disclaimer takes it away with nothing left', (
@@ -1268,14 +1259,14 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      tester.widget<CarbonNotification>(find.byType(CarbonNotification)).onClose!();
+      await tester.tap(find.byTooltip("Dismiss — won't show again"));
       await tester.pumpAndSettle();
 
       expect(find.text(handlerDisclaimerText), findsNothing);
       // No stand-in: the Undo list the sentence points at carries its own
       // pinned header one layer up, so a residual control here would hold
       // nothing but a line the user has just closed.
-      expect(find.byType(CarbonNotification), findsNothing);
+      expect(find.byTooltip("Dismiss — won't show again"), findsNothing);
     });
 
     testWidgets('a closed disclaimer does not come back on the next open', (
@@ -1344,15 +1335,14 @@ void main() {
       // a shorter menu would answer "why can't I move this" with nothing.
       expect(_openMenuLabels(tester), contains('Move up'));
       for (final entry in _openMenuItems(tester)) {
-        expect(entry.onPressed, isNull, reason: entry.label);
+        expect(entry.enabled, isFalse, reason: entry.label);
+        expect(entry.disabledReason, oneOutstanding, reason: entry.label);
       }
 
       await _pick(tester, 'Delete');
 
       expect(configures(session), isEmpty);
-      // The reason is the line above the list, still on screen with the menu
-      // open: no toast has to carry it to a phone's modal.
-      expect(find.text(oneOutstanding), findsOneWidget);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('the same edit goes through once the snapshot lands', (
@@ -1367,7 +1357,7 @@ void main() {
 
       await _openMenuFor(tester, 1);
       for (final entry in _openMenuItems(tester)) {
-        expect(entry.onPressed, isNotNull, reason: entry.label);
+        expect(entry.enabled, isTrue, reason: entry.label);
       }
       await _pick(tester, 'Delete');
 
@@ -1391,13 +1381,14 @@ void main() {
       ).where((e) => e.label.startsWith('Stop waiting on'));
       expect(held, hasLength(2));
       for (final entry in held) {
-        expect(entry.onPressed, isNull, reason: entry.label);
+        expect(entry.enabled, isFalse, reason: entry.label);
+        expect(entry.disabledReason, oneOutstanding, reason: entry.label);
       }
 
       await _pick(tester, 'Stop waiting on 1');
 
       expect(configures(session), isEmpty);
-      expect(find.text(oneOutstanding), findsOneWidget);
+      await _drainToast(tester, oneOutstanding);
     });
 
     testWidgets('two outstanding instructions are counted, not quoted', (
@@ -1414,7 +1405,7 @@ void main() {
       expect(find.text(twoOutstanding), findsOneWidget);
 
       await _openMenuFor(tester, 0);
-      expect(_openMenuItems(tester).first.onPressed, isNull);
+      expect(_openMenuItems(tester).first.disabledReason, twoOutstanding);
     });
 
     testWidgets('a new instruction is not held — the bridge appends it', (
@@ -1460,11 +1451,11 @@ void main() {
       createdAt: 4,
     );
 
-    /// The editor is the only [CarbonModal] in the tree — [_pumpDrawer] mounts
-    /// the drawer itself as a plain body, so anything inside one is the sheet.
+    /// The editor is the only [Dialog] in the tree — [_pumpDrawer] mounts the
+    /// drawer itself as a plain body, so anything inside one is the sheet.
     Finder editorFields() => find.descendant(
-      of: find.byType(CarbonModal),
-      matching: find.byType(CarbonTextInput),
+      of: find.byType(Dialog),
+      matching: find.byType(AbTextField),
     );
 
     Future<void> openEditor(WidgetTester tester, int rowIndex) async {
@@ -1477,10 +1468,10 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    CarbonButton saveButton(WidgetTester tester) => tester.widget<CarbonButton>(
+    AbButton saveButton(WidgetTester tester) => tester.widget<AbButton>(
       find.ancestor(
         of: find.text('Save item'),
-        matching: find.byType(CarbonButton),
+        matching: find.byType(AbButton),
       ),
     );
 
@@ -1524,7 +1515,7 @@ void main() {
 
       await openEditor(tester, 1);
 
-      final field = tester.widget<CarbonTextInput>(editorFields().first);
+      final field = tester.widget<AbTextField>(editorFields().first);
       expect(field.controller!.text, 'open a PR');
       // Caret at the end, not a full selection: this is model output that is
       // usually most of the way right, and select-all makes the first
@@ -1580,13 +1571,13 @@ void main() {
       service.instruct('t1', 'Run Tests');
       await tester.pumpAndSettle();
 
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
       // In the sheet, not only on the list behind it: the drawer's own notice
       // is under a barrier here, and the disabled button is what needs
       // explaining. Same sentence either way — one hold, one wording.
       expect(
         find.descendant(
-          of: find.byType(CarbonModal),
+          of: find.byType(Dialog),
           matching: find.text(
             'Still sending "Run Tests" — editing is paused until it lands.',
           ),
@@ -1603,7 +1594,7 @@ void main() {
       );
       // Still on screen, still holding what was typed.
       expect(
-        tester.widget<CarbonTextInput>(editorFields().first).controller!.text,
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
         'commit the fix on a branch',
       );
 
@@ -1677,22 +1668,20 @@ void main() {
 
       expect(
         find.descendant(
-          of: find.byType(CarbonModal),
+          of: find.byType(Dialog),
           matching: find.textContaining('epend'),
         ),
         findsNothing,
       );
       expect(
         tester
-            .widgetList<CarbonIcon>(
+            .widgetList<AbIcon>(
               find.descendant(
-                of: find.byType(CarbonModal),
-                matching: find.byType(CarbonIcon),
+                of: find.byType(Dialog),
+                matching: find.byType(AbIcon),
               ),
             )
-            .where(
-              (i) => i.icon == CarbonIcons.add || i.icon == CarbonIcons.link,
-            ),
+            .where((i) => i.icon == AbIcons.add || i.icon == AbIcons.link),
         isEmpty,
       );
       await tester.enterText(editorFields().first, 'open a draft PR');
@@ -1711,20 +1700,20 @@ void main() {
       await openEditor(tester, 1);
       // A wholesale replace that changes nothing costs a round trip to leave
       // the list exactly where it stands.
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
 
       await tester.enterText(editorFields().first, '   ');
       await tester.pumpAndSettle();
       // An item with no text is not an item.
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
 
       await tester.enterText(editorFields().first, 'commit the fix');
       await tester.pumpAndSettle();
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
 
       await tester.enterText(editorFields().first, 'commit and push the fix');
       await tester.pumpAndSettle();
-      expect(saveButton(tester).onPressed, isNotNull);
+      expect(saveButton(tester).onTap, isNotNull);
     });
 
     testWidgets('an emptied field says what an item needs', (tester) async {
@@ -1738,7 +1727,7 @@ void main() {
       // Select-all-and-delete is how a retype starts, and Save dies on its
       // first keystroke. Every other refusal on this sheet is spoken; a dead
       // primary button with nothing beside it reads as a broken sheet.
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
       expect(
         find.text(
           'An item needs something to say. To drop it, use Delete on the row.',
@@ -1795,7 +1784,7 @@ void main() {
       _emitDisarmed(session);
       await tester.pumpAndSettle();
 
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
       expect(
         find.text(
           "Handler isn't armed on this session any more, so the edit can't be "
@@ -1806,7 +1795,7 @@ void main() {
       // Still on screen, still holding the words, which is the only copy of
       // them there is.
       expect(
-        tester.widget<CarbonTextInput>(editorFields().first).controller!.text,
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
         'commit the fix on a branch',
       );
     });
@@ -1829,7 +1818,7 @@ void main() {
       _emitStatus(session, [_tests]);
       await tester.pumpAndSettle();
 
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
       expect(
         find.text(
           'This item is no longer on the backlog — it was removed while you '
@@ -1845,7 +1834,7 @@ void main() {
         ).sent.where((m) => m['type'] == 'handler:configure'),
         isEmpty,
       );
-      expect(find.byType(CarbonModal), findsOneWidget);
+      expect(find.byType(Dialog), findsOneWidget);
     });
 
     testWidgets('a save with nowhere to go says so instead of doing nothing', (
@@ -1884,7 +1873,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(saveButton(tester).onPressed, isNull);
+      expect(saveButton(tester).onTap, isNull);
       expect(
         _transportOf(
           session,
@@ -1892,7 +1881,7 @@ void main() {
         isEmpty,
       );
       expect(
-        tester.widget<CarbonTextInput>(editorFields().first).controller!.text,
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
         'commit the fix on a branch',
       );
     });
@@ -1923,9 +1912,9 @@ void main() {
     testWidgets('the buttons stay reachable on a phone with the keyboard up', (
       tester,
     ) async {
-      // The one shape where the fields outgrow the sheet: the modal's full-screen
-      // branch is the screen minus the keyboard inset and nothing else, so
-      // anything that cannot shrink clips the button row off the bottom.
+      // The one shape where the fields outgrow the sheet: showAbAdaptiveSheet's
+      // mobile branch is the screen minus the keyboard inset and nothing else,
+      // so anything that cannot shrink clips the button row off the bottom.
       // The scale stands in for the shipped font, which is materially wider
       // than the one widget tests draw with.
       tester.view.physicalSize = const Size(375, 667);
@@ -1959,11 +1948,12 @@ void main() {
       await tester.pumpAndSettle();
 
       // Scoped to the sheet: the drawer underneath carries the composer's own
-      // field, and at this width the modal takes the whole screen.
+      // field, and at this width the sheet is a bottom sheet rather than a
+      // Dialog.
       final field = find
           .descendant(
-            of: find.byType(CarbonModal),
-            matching: find.byType(CarbonTextInput),
+            of: find.byType(BottomSheet),
+            matching: find.byType(AbTextField),
           )
           .first;
       await tester.enterText(field, 'commit and push the fix ' * 16);

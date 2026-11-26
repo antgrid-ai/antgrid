@@ -1,4 +1,4 @@
-import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -8,7 +8,6 @@ import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import '../helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/session_row.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -58,12 +57,10 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
-          home: AbCarbonScope(
-            child: Scaffold(
-              body: SizedBox(
-                width: 260,
-                child: SessionRow(entryId: _projectId, session: sessionEntry),
-              ),
+          home: Scaffold(
+            body: SizedBox(
+              width: 260,
+              child: SessionRow(entryId: _projectId, session: sessionEntry),
             ),
           ),
         ),
@@ -74,19 +71,6 @@ void main() {
     return container;
   }
 
-  final kebab = find.byType(CarbonOverflowMenu);
-
-  // The actions stay mounted so they stay focusable; what changes is whether
-  // the cell that holds them is shown.
-  bool kebabShown(WidgetTester tester) => tester
-      .widget<Visibility>(
-        find.ancestor(of: kebab, matching: find.byType(Visibility)).first,
-      )
-      .visible;
-
-  bool selectedOf(WidgetTester tester) =>
-      tester.widget<CarbonSideNavLink>(find.byType(CarbonSideNavLink)).current;
-
   group('SessionRow hover and sizing', () {
     testWidgets(
       'Scheduler clears the session highlight and returning restores it',
@@ -95,41 +79,53 @@ void main() {
         final container = await pumpRow(tester, FakeAgentTransport(), session);
         container.read(activeSessionIdProvider.notifier).set(session.id);
         await tester.pump();
-        expect(selectedOf(tester), isTrue);
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isTrue,
+        );
 
         container
             .read(workbenchSurfaceProvider.notifier)
             .set(WorkbenchSurface.scheduler);
         await tester.pump();
-        expect(selectedOf(tester), isFalse);
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isFalse,
+        );
         expect(container.read(activeSessionIdProvider), session.id);
 
         container
             .read(workbenchSurfaceProvider.notifier)
             .set(WorkbenchSurface.workspace);
         await tester.pump();
-        expect(selectedOf(tester), isTrue);
+        expect(
+          tester.widget<AbListRow>(find.byType(AbListRow)).selected,
+          isTrue,
+        );
         await tester.pumpWidget(const SizedBox());
       },
     );
 
     testWidgets(
-      'on desktop, the kebab is shown only on hover and row height never jitters',
+      'on desktop, kebab menu appears only on hover and row height never jitters',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
         try {
-          await pumpRow(tester, FakeAgentTransport(), _session('sess-1'));
+          final transport = FakeAgentTransport();
+          final session = _session('sess-1');
+          await pumpRow(tester, transport, session);
 
           final rowFinder = find.byType(SessionRow);
           expect(rowFinder, findsOneWidget);
 
-          expect(kebabShown(tester), isFalse);
+          // 1. Unhovered: kebab menu does NOT exist in the widget tree.
+          expect(find.byTooltip('Session actions'), findsNothing);
 
-          // A 32px compact row: the actions cell holds its size while hidden, so
-          // nothing below it moves when the pointer arrives.
-          final restHeight = tester.getSize(rowFinder).height;
-          expect(restHeight, 32.0);
+          // Unhovered height is exactly 24px content + 2px padding + 2px margin = 28px.
+          final unhoveredHeight = tester.getSize(rowFinder).height;
+          expect(unhoveredHeight, 28.0);
 
+          // 2. Hover over the row: kebab menu appears.
           final mouse = await tester.createGesture(
             kind: PointerDeviceKind.mouse,
           );
@@ -138,14 +134,18 @@ void main() {
           await mouse.moveTo(tester.getCenter(rowFinder));
           await tester.pump();
 
-          expect(kebabShown(tester), isTrue);
-          expect(tester.getSize(rowFinder).height, restHeight);
+          expect(find.byTooltip('Session actions'), findsOneWidget);
 
+          // Hovered height remains strictly identical (zero vertical jitter).
+          final hoveredHeight = tester.getSize(rowFinder).height;
+          expect(hoveredHeight, unhoveredHeight);
+
+          // 3. Move mouse away: kebab menu vanishes again.
           await mouse.moveTo(const Offset(500, 500));
           await tester.pump();
 
-          expect(kebabShown(tester), isFalse);
-          expect(tester.getSize(rowFinder).height, restHeight);
+          expect(find.byTooltip('Session actions'), findsNothing);
+          expect(tester.getSize(rowFinder).height, unhoveredHeight);
 
           await tester.pumpWidget(const SizedBox());
         } finally {
@@ -154,15 +154,17 @@ void main() {
       },
     );
 
-    testWidgets('on mobile, the kebab is always shown in a 44pt row', (
+    testWidgets('on mobile, kebab menu is always present in tree', (
       tester,
     ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       try {
-        await pumpRow(tester, FakeAgentTransport(), _session('sess-2'));
+        final transport = FakeAgentTransport();
+        final session = _session('sess-2');
+        await pumpRow(tester, transport, session);
 
-        expect(kebabShown(tester), isTrue);
-        expect(tester.getSize(find.byType(SessionRow)).height, 44.0);
+        expect(find.byTooltip('Session actions'), findsOneWidget);
+        expect(tester.getSize(find.byType(SessionRow)).height, 28.0);
 
         await tester.pumpWidget(const SizedBox());
       } finally {
@@ -171,11 +173,13 @@ void main() {
     });
 
     testWidgets(
-      'the kebab opens the session actions and stays revealed while the menu and a dialog are up',
+      'tapping kebab menu opens session actions menu and selecting action executes',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
         try {
-          await pumpRow(tester, FakeAgentTransport(), _session('sess-3'));
+          final transport = FakeAgentTransport();
+          final session = _session('sess-3');
+          await pumpRow(tester, transport, session);
 
           final rowFinder = find.byType(SessionRow);
           final mouse = await tester.createGesture(
@@ -185,7 +189,9 @@ void main() {
           await mouse.addPointer(location: Offset.zero);
           await mouse.moveTo(tester.getCenter(rowFinder));
           await tester.pump();
-          expect(kebabShown(tester), isTrue);
+
+          final kebab = find.byTooltip('Session actions');
+          expect(kebab, findsOneWidget);
 
           await tester.tap(kebab);
           await tester.pumpAndSettle();
@@ -194,33 +200,26 @@ void main() {
           expect(find.text('Rename'), findsOneWidget);
           expect(find.text('Delete'), findsOneWidget);
 
-          // The pointer is over the menu, which sits outside the row.
+          // Move mouse away from SessionRow to simulate mouse moving over popup menu items
           await mouse.moveTo(const Offset(600, 600));
           await tester.pump();
-          expect(kebabShown(tester), isTrue);
 
+          // Kebab is still mounted because menu is open
+          expect(find.byTooltip('Session actions'), findsOneWidget);
+
+          // Tap 'Rename' menu item
           await tester.tap(find.text('Rename'));
           await tester.pumpAndSettle();
 
-          // The dialog is hosted on a context that outlived the menu.
+          // Rename dialog appears because anchor remained mounted
           expect(find.text('Rename session'), findsOneWidget);
-          expect(kebabShown(tester), isTrue);
 
+          // Cancel rename dialog
           await tester.tap(find.text('Cancel'));
           await tester.pumpAndSettle();
 
-          // The dialog hands focus back to the kebab, and focus inside the row
-          // reveals it for keyboard users. Take focus away so only the menu and
-          // dialog state is left to hold it open.
-          FocusManager.instance.primaryFocus?.unfocus();
-          await tester.pump();
-          // A stationary pointer is not re-hit-tested as overlays come and go,
-          // so move it the way a user leaving the row would.
-          await mouse.moveTo(const Offset(10, 500));
-          await tester.pump();
-
-          // Menu and dialog are gone and the pointer is away, so the kebab hides.
-          expect(kebabShown(tester), isFalse);
+          // Menu and dialog closed, and since mouse is away, kebab is now unmounted
+          expect(find.byTooltip('Session actions'), findsNothing);
 
           await tester.pumpWidget(const SizedBox());
         } finally {

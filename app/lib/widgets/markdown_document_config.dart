@@ -1,29 +1,22 @@
 import 'dart:math' as math;
 
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown/markdown.dart' as m;
 import 'package:markdown_widget/markdown_widget.dart';
 
-import 'carbon_code_style.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_scrollbar.dart';
 import 'markdown_heading_configs.dart';
 
 /// Prose leading for a document body — the font's own (~1.2) is for labels.
 /// Inline code and every marker that has to sit on a prose line tracks it, so
 /// a run of code shares the line box of the paragraph around it.
 const double _proseHeight = 1.55;
-
-/// Widest an inline remote image is decoded, in logical pixels. The full
-/// source resolution costs memory the pane rarely shows.
-const double _imageDecodeWidth = 720;
-
-/// A copy of [style] that merges with its parent's rather than replacing it.
-///
-/// Carbon text roles set `inherit: false`, and `TextStyle.merge` returns an
-/// argument that does not inherit untouched, so a role used as a block style
-/// would wipe the bold or italic of every span nested in it.
-TextStyle _merging(TextStyle style) => style.copyWith(inherit: true);
 
 /// Height of one prose line at the reader's text scale. A marker supplied
 /// through a builder is placed verbatim, without the vertical padding the
@@ -32,53 +25,38 @@ TextStyle _merging(TextStyle style) => style.copyWith(inherit: true);
 /// it grows with the system text size, and a fixed box would leave every marker
 /// riding above the line it belongs to.
 double _proseLine(BuildContext context) =>
-    MediaQuery.textScalerOf(context).scale(_bodyStyle(context).fontSize!) *
-    _proseHeight;
-
-TextStyle _bodyStyle(BuildContext context) =>
-    CarbonTheme.of(context).typography.body;
+    MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) * _proseHeight;
 
 /// Gutter holding a list marker. Pinned instead of left to the package default
 /// because both markers below align themselves inside it — a checkbox lands
 /// there as a bare inline span with no alignment of its own.
-const double _listGutter = CarbonSpacing.spacing05 * 2;
+const double _listGutter = AbTokens.space16 * 2;
 
-/// Whole-document markdown styling for the file viewer, on Carbon type roles
-/// and colours: Plex Sans prose, Plex Mono code in the same face and palette as
-/// the code viewer, links in `linkPrimary`, rules in `borderSubtle01`.
+/// Whole-document markdown styling for the file viewer.
 ///
 /// Deliberately a wider scale than `TranscriptMarkdown`: this is a file being
 /// read, not a message being scanned, so headings carry real hierarchy and
-/// tables and fences get surfaces of their own.
+/// tables and fences get surfaces of their own. Everything else stays in
+/// lockstep with `transcript/markdown_body.dart` — same heading tone, same
+/// underline-only links, same uncoloured fences.
 ///
 /// [onLinkTap] receives the raw href; classify it with `resolveMarkdownLink`.
 MarkdownConfig buildMarkdownDocumentConfig(
   BuildContext context, {
   ValueChanged<String>? onLinkTap,
 }) {
-  final theme = CarbonTheme.of(context);
-  final c = theme.colors;
-  final type = theme.typography;
-  final codeStyle = CarbonCodeStyle.of(context);
-  final body = _merging(
-    type.body.copyWith(color: c.textPrimary, height: _proseHeight),
-  );
-  final fence = _merging(codeStyle.text.copyWith(height: 1.5));
-  // Colourless: the package merges this over every token's palette style, so a
-  // colour here would flatten the highlighting to one hue.
-  final fenceBase = _merging(
-    CarbonCodeStyle.baseTextFor(theme).copyWith(height: 1.5),
-  );
+  final c = context.antgrid;
+  final body = AbTokens.sansStyle(color: c.textPrimary, height: _proseHeight);
+  final fence = AbTokens.monoStyle(color: c.textPrimary, height: 1.5);
 
   return MarkdownConfig(
     configs: [
       PConfig(textStyle: body),
+      // Underline is the whole affordance — links take body color, no tint.
+      // The package default is GitHub blue (#0969DA), a light-theme link color
+      // that lands near 3:1 on our dark surfaces.
       LinkConfig(
-        style: body.copyWith(
-          color: c.linkPrimary,
-          decoration: TextDecoration.underline,
-          decorationColor: c.linkPrimary,
-        ),
+        style: body.copyWith(decoration: TextDecoration.underline),
         onTap: onLinkTap,
       ),
       // Same size and leading as the prose around it: BoxHeightStyle.tight
@@ -87,49 +65,50 @@ MarkdownConfig buildMarkdownDocumentConfig(
       // The tint is what marks a run of code in a sentence, as on GitHub and
       // in VS Code; the face change alone is easy to read past.
       CodeConfig(
-        style: _merging(
-          type.code.copyWith(
-            fontSize: type.body.fontSize,
-            color: c.textPrimary,
-            height: _proseHeight,
-            backgroundColor: c.layer01,
-          ),
-        ),
+        style: AbTokens.monoStyle(
+          color: c.textPrimary,
+          height: _proseHeight,
+        ).copyWith(backgroundColor: c.bgSurface),
       ),
       PreConfig(
-        textStyle: fenceBase,
-        // The package defaults an untagged fence to Dart.
-        language: 'plaintext',
-        theme: codeStyle.highlightTheme,
+        textStyle: fence,
+        // Package default is a11yLightTheme — light-bg token colors on our dark
+        // surfaces, and the spec says no syntax coloring (v1). Empty theme +
+        // styleNotMatched = plain mono.
+        theme: const {},
         styleNotMatched: fence,
         decoration: BoxDecoration(
-          color: c.layer01,
-          border: Border.all(color: c.borderSubtle01),
+          color: c.bgSurface,
+          border: Border.all(color: c.borderDefault),
+          borderRadius: AbTokens.borderRadius,
         ),
-        padding: const EdgeInsets.all(CarbonSpacing.spacing04),
-        margin: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing03),
+        padding: const EdgeInsets.all(AbTokens.space12),
+        margin: const EdgeInsets.symmetric(vertical: AbTokens.space8),
         wrapper: (child, code, language) =>
             _FenceFrame(code: code, child: child),
       ),
-      // Carbon's heading roles, widened to one step per level: the title role
-      // for H1 down to the body size at H4, with H5 and H6 stepping under it
-      // in the label size. H1/H2 get their rule from
-      // [markdownDocumentGenerator]. All six are pinned so H4-H6 never fall
-      // back to the package's large defaults.
-      H1ConfigNoRule(style: _heading(type.title, c.textPrimary)),
-      H2ConfigNoRule(style: _heading(type.headingLarge, c.textPrimary)),
-      H3ConfigNoRule(style: _heading(type.heading, c.textPrimary)),
-      H4Config(style: _heading(type.body, c.textPrimary)),
-      H5Config(style: _heading(type.label, c.textPrimary)),
-      H6Config(style: _heading(type.label, c.textSecondary)),
+      // GitHub's and VS Code's document scale over a 14px body — roughly 1.7,
+      // 1.3, 1.15, 1, 0.93, 0.86em — in the body's own colour, so a heading
+      // outranks the prose it heads; only H6 drops to muted, as theirs does.
+      // H1/H2 get their rule from [markdownDocumentGenerator]. All six are
+      // pinned so H4-H6 never fall back to the package's large defaults.
+      H1ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontDisplaySm)),
+      H2ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontXl)),
+      H3ConfigNoRule(style: _heading(c.textPrimary, AbTokens.fontLg)),
+      H4Config(style: _heading(c.textPrimary, AbTokens.fontBody)),
+      H5Config(style: _heading(c.textPrimary, AbTokens.fontMd)),
+      H6Config(style: _heading(c.textSecondary, AbTokens.fontSm)),
+      // Defaults are GitHub's light-theme greys — a #d0d7de rule beside #57606a
+      // body text, which on our ground reads as a bright bar next to an
+      // invisible quote.
       BlockquoteConfig(
-        sideColor: c.borderStrong01,
+        sideColor: c.borderStrong,
         textColor: c.textSecondary,
-        sideWith: CarbonBorders.indicator,
-        padding: const EdgeInsets.fromLTRB(CarbonSpacing.spacing04, 0, 0, 0),
-        margin: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing03),
+        sideWith: 2,
+        padding: const EdgeInsets.fromLTRB(AbTokens.space12, 0, 0, 0),
+        margin: const EdgeInsets.symmetric(vertical: AbTokens.space8),
       ),
-      HrConfig(height: CarbonBorders.hairline, color: c.borderSubtle01),
+      HrConfig(height: 1, color: c.borderDefault),
       // Tables are built by [markdownDocumentGenerator] (`_DocTableNode`), not
       // from a TableConfig: the package's own node centres every header,
       // ignores column alignment, and never wraps a column.
@@ -153,8 +132,11 @@ MarkdownConfig buildMarkdownDocumentConfig(
   );
 }
 
-TextStyle _heading(TextStyle role, Color color) => _merging(
-  role.copyWith(color: color, fontWeight: FontWeight.w600, height: 1.35),
+TextStyle _heading(Color color, double fontSize) => AbTokens.sansStyle(
+  fontSize: fontSize,
+  color: color,
+  fontWeight: fontSize >= AbTokens.fontLg ? FontWeight.w700 : FontWeight.w600,
+  height: fontSize >= AbTokens.fontLg ? 1.3 : 1.35,
 );
 
 /// Hangs a copy button over a code fence, matching the transcript's fences.
@@ -170,13 +152,13 @@ class _FenceFrame extends StatelessWidget {
       children: [
         child,
         Positioned(
-          top: CarbonSpacing.spacing02,
-          right: CarbonSpacing.spacing02,
-          child: CarbonButton.iconOnly(
-            icon: const CarbonIcon(CarbonIcons.copy),
-            semanticLabel: 'Copy',
-            size: CarbonButtonSize.small,
-            onPressed: () => Clipboard.setData(ClipboardData(text: code)),
+          top: AbTokens.space6,
+          right: AbTokens.space6,
+          child: AbIconButton(
+            icon: AbIcons.copy,
+            tone: AbIconButtonTone.muted,
+            tooltip: 'Copy',
+            onTap: () => Clipboard.setData(ClipboardData(text: code)),
           ),
         ),
       ],
@@ -203,14 +185,13 @@ class _ListMarker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final c = theme.colors;
+    final c = context.antgrid;
     return SizedBox(
       height: _proseLine(context),
       child: Align(
         alignment: Alignment.centerRight,
         child: Padding(
-          padding: const EdgeInsets.only(right: CarbonSpacing.spacing03),
+          padding: const EdgeInsets.only(right: AbTokens.space8),
           child: isOrdered
               // Excluded from selection like the package's own `_OlMarker`:
               // the index is generated chrome, so copying a numbered list has
@@ -218,12 +199,13 @@ class _ListMarker extends StatelessWidget {
               ? SelectionContainer.disabled(
                   child: Text(
                     '${index + 1}.',
-                    style: theme.typography.code.copyWith(
-                      color: c.textSecondary,
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontSm,
+                      color: c.textMuted,
                     ),
                   ),
                 )
-              : _Bullet(depth: depth, color: c.textSecondary),
+              : _Bullet(depth: depth, color: c.textMuted),
         ),
       ),
     );
@@ -255,7 +237,7 @@ class _Bullet extends StatelessWidget {
   }
 }
 
-/// Task-list box, drawn with Carbon status glyphs rather than Material's
+/// Task-list box, drawn with the app's own toggle pair rather than Material's
 /// checkbox glyphs.
 class _TaskMarker extends StatelessWidget {
   const _TaskMarker({required this.checked});
@@ -264,7 +246,7 @@ class _TaskMarker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = CarbonTheme.of(context).colors;
+    final c = context.antgrid;
     // Same box and alignment as [_ListMarker]: the package drops a checkbox
     // into the marker gutter as a raw inline span, so anything narrower than
     // the gutter hugs its left edge and the boxes step left of the bullets
@@ -275,10 +257,11 @@ class _TaskMarker extends StatelessWidget {
       child: Align(
         alignment: Alignment.centerRight,
         child: Padding(
-          padding: const EdgeInsets.only(right: CarbonSpacing.spacing03),
-          child: CarbonIcon(
-            checked ? CarbonIcons.checkmarkFilled : CarbonIcons.circleOutline,
-            color: checked ? c.supportSuccess : c.iconSecondary,
+          padding: const EdgeInsets.only(right: AbTokens.space8),
+          child: AbIcon(
+            checked ? AbIcons.circleCheck : AbIcons.circle,
+            size: AbTokens.fontSm,
+            color: checked ? c.success : c.textMuted,
           ),
         ),
       ),
@@ -321,7 +304,8 @@ class _MarkdownImage extends StatelessWidget {
       // Decoded no wider than a comfortable reading width: the full source
       // resolution costs memory the pane rarely shows — a 4000px photo is
       // ~48MB of ARGB. It paints at that decoded size, never stretched.
-      final cap = _imageDecodeWidth * MediaQuery.devicePixelRatioOf(context);
+      final cap =
+          AbTokens.documentMaxWidth * MediaQuery.devicePixelRatioOf(context);
       return Image.network(
         url,
         width: width,
@@ -334,42 +318,41 @@ class _MarkdownImage extends StatelessWidget {
   }
 
   Widget _chip(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final c = theme.colors;
+    final c = context.antgrid;
     final label = alt.isNotEmpty ? alt : url.split('/').last;
-    final open = onOpen;
-    return CarbonInteraction(
-      onPressed: open == null ? null : () => open(url),
-      label: label,
-      excludeChildSemantics: true,
-      builder: (context, state, child) => CarbonFocusRing(
-        visible: state.focusVisible,
-        child: Container(
-          constraints: BoxConstraints(minHeight: theme.smallControlHeight),
-          padding: const EdgeInsets.symmetric(
-            horizontal: CarbonSpacing.spacing03,
-          ),
-          decoration: BoxDecoration(
-            color: state.hovered ? c.layerHover01 : c.layer01,
-            border: Border.all(color: c.borderSubtle01),
-          ),
-          child: child,
+    return GestureDetector(
+      onTap: onOpen == null ? null : () => onOpen!(url),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space8,
+          vertical: AbTokens.space4,
         ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        spacing: CarbonSpacing.spacing03,
-        children: [
-          CarbonIcon(CarbonIcons.documentBlank, color: c.iconSecondary),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.typography.code.copyWith(color: c.textSecondary),
+        decoration: BoxDecoration(
+          border: Border.all(color: c.borderDefault),
+          borderRadius: AbTokens.borderRadius,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AbIcon(
+              AbIcons.fileBinary,
+              size: AbTokens.fontSm,
+              color: c.textMuted,
             ),
-          ),
-        ],
+            const SizedBox(width: AbTokens.space6),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: c.textMuted,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -513,7 +496,7 @@ class _MarkdownTable extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = CarbonTheme.of(context).colors;
+    final c = context.antgrid;
     if (rows.isEmpty) return const SizedBox.shrink();
     final columns = rows.map((r) => r.cells.length).reduce(math.max);
     var bodyIndex = 0;
@@ -521,18 +504,18 @@ class _MarkdownTable extends StatelessWidget {
       for (final row in rows)
         TableRow(
           decoration: row.header
-              ? BoxDecoration(color: c.layerAccent01)
+              ? BoxDecoration(color: c.bgSurface)
               // Zebra rows, so a wide row can be followed across the gutter.
               : (bodyIndex++).isOdd
-              ? BoxDecoration(color: c.layer01)
+              ? BoxDecoration(color: c.bgDeep)
               : null,
           children: [
             for (var i = 0; i < columns; i++)
               i < row.cells.length
                   ? Padding(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: CarbonSpacing.spacing04,
-                        vertical: CarbonSpacing.spacing03,
+                        horizontal: AbTokens.space12,
+                        vertical: AbTokens.space6,
                       ),
                       child: Align(
                         alignment: row.cells[i].alignment,
@@ -547,7 +530,7 @@ class _MarkdownTable extends StatelessWidget {
         ),
     ];
     return LayoutBuilder(
-      builder: (context, constraints) => _HorizontalScroll(
+      builder: (context, constraints) => AbHorizontalScrollView(
         // Capped at the pane and sized to the content beneath that cap: a
         // table that fits keeps its natural width, and one that does not
         // fills the pane with its columns wrapping (flex shrinks a column no
@@ -559,54 +542,14 @@ class _MarkdownTable extends StatelessWidget {
             child: Table(
               defaultColumnWidth: const IntrinsicColumnWidth(flex: 1),
               defaultVerticalAlignment: TableCellVerticalAlignment.top,
-              // borderSubtle01 rather than 00: the grid is the only thing
-              // telling a cell from its neighbour, and the 00 rule over
-              // the background is barely visible.
-              border: TableBorder.all(color: c.borderSubtle01),
+              // borderDefault, not borderSubtle: the grid is the only thing
+              // telling a cell from its neighbour, and borderSubtle over
+              // bgDeepest is ~1.15:1.
+              border: TableBorder.all(color: c.borderDefault),
               children: tableRows,
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// A sideways scroll view with a Carbon-coloured bar that shows only while the
-/// content overflows, as the code viewer's scrollbars do.
-class _HorizontalScroll extends StatefulWidget {
-  const _HorizontalScroll({required this.child});
-
-  final Widget child;
-
-  @override
-  State<_HorizontalScroll> createState() => _HorizontalScrollState();
-}
-
-class _HorizontalScrollState extends State<_HorizontalScroll> {
-  final ScrollController _controller = ScrollController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return RawScrollbar(
-      controller: _controller,
-      scrollbarOrientation: ScrollbarOrientation.bottom,
-      thumbVisibility: true,
-      thickness: CarbonSpacing.spacing03,
-      crossAxisMargin: CarbonSpacing.spacing01,
-      thumbColor: CarbonTheme.of(context).colors.borderStrong01,
-      child: SingleChildScrollView(
-        controller: _controller,
-        scrollDirection: Axis.horizontal,
-        // Room for the thumb, so it never sits on the last row's text.
-        padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing04),
-        child: widget.child,
       ),
     );
   }
@@ -621,13 +564,11 @@ class _RuledHeadingNode extends HeadingNode {
     child: Builder(
       builder: (context) => Container(
         width: double.infinity,
-        margin: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-        padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing03),
+        margin: const EdgeInsets.only(top: AbTokens.space8),
+        padding: const EdgeInsets.only(bottom: AbTokens.space6),
         decoration: BoxDecoration(
           border: Border(
-            bottom: BorderSide(
-              color: CarbonTheme.of(context).colors.borderSubtle01,
-            ),
+            bottom: BorderSide(color: context.antgrid.borderDefault),
           ),
         ),
         child: ProxyRichText(
@@ -654,34 +595,11 @@ class _CodeSpan extends CodeNode {
   _CodeSpan(super.text, super.config);
 
   @override
-  TextStyle get style => _withFaceOf(super.style, codeConfig.style).copyWith(
+  TextStyle get style => super.style.copyWith(
+    fontFamily: codeConfig.style.fontFamily,
+    fontFamilyFallback: codeConfig.style.fontFamilyFallback,
     // Null leaves the line's own (none), so only a config that tints code —
     // the file viewer's — paints one.
     backgroundColor: codeConfig.style.backgroundColor,
-  );
-}
-
-/// [base] set in [face]'s family.
-///
-/// `TextStyle.fontFamily` reads back with the `packages/<name>/` prefix already
-/// applied, and `copyWith` re-applies the style's own package on top of what it
-/// is given, so copying the getter's value across doubles the prefix and the
-/// face silently falls back. The prefix is split back off and handed over as
-/// the package.
-TextStyle _withFaceOf(TextStyle base, TextStyle face) {
-  final match = RegExp(r'^packages/([^/]+)/').firstMatch(face.fontFamily ?? '');
-  if (match == null) {
-    return base.copyWith(
-      fontFamily: face.fontFamily,
-      fontFamilyFallback: face.fontFamilyFallback,
-    );
-  }
-  final prefix = match.group(0)!;
-  String bare(String family) =>
-      family.startsWith(prefix) ? family.substring(prefix.length) : family;
-  return base.copyWith(
-    fontFamily: bare(face.fontFamily!),
-    fontFamilyFallback: face.fontFamilyFallback?.map(bare).toList(),
-    package: match.group(1),
   );
 }

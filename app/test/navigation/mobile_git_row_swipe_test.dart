@@ -1,5 +1,5 @@
 // On the phone's workspace page a leftward swipe on a changed file opens its
-// Stage/Discard tray, and a rightward one goes back to the agent — through the
+// Stage/Revert tray, and a rightward one goes back to the agent — through the
 // real shell, whose PageView and pane flings compete for the same drags.
 import 'dart:ui' show GestureSettings;
 
@@ -60,7 +60,7 @@ void main() {
         await settleShell(tester);
 
         expect(find.text('Stage'), findsOneWidget);
-        expect(find.text('Discard'), findsOneWidget);
+        expect(find.text('Revert'), findsOneWidget);
       });
     });
 

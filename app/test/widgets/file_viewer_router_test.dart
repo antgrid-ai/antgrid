@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/binary_file_viewer.dart';
 import 'package:antgrid/widgets/file_viewer_router.dart';
@@ -13,12 +12,10 @@ import 'package:antgrid/widgets/file_content_viewer.dart';
 Widget _host(FileContent? fc, {bool loading = false}) => ProviderScope(
   child: MaterialApp(
     home: Scaffold(
-      body: AbCarbonScope(
-        child: FileViewerRouter(
-          fileContent: fc,
-          isLoading: loading,
-          selectedFilePath: fc?.path,
-        ),
+      body: FileViewerRouter(
+        fileContent: fc,
+        isLoading: loading,
+        selectedFilePath: fc?.path,
       ),
     ),
   ),
@@ -58,11 +55,8 @@ void main() {
         ),
       ),
     );
-    // The highlighted editor shows a spinner until it is ready, which never
-    // settles.
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
     expect(find.byType(FileContentViewer), findsOneWidget);
-    await tester.pump(const Duration(seconds: 3));
   });
 
   testWidgets('delegates error to FileContentViewer', (tester) async {

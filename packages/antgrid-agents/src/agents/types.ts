@@ -4,7 +4,7 @@
 // the spec table below reading a constant still in its temporal dead zone.
 
 import type { BridgeCommand, HookCommand } from "../hook-command";
-import type { HookInvocation, HookPath, HookPost, HookStdoutProfile } from "./hook-posts";
+import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { HandoffEventsFn } from "./handoff/events";
 import type { HandoffSnapshotFn } from "./handoff/types";
@@ -66,10 +66,8 @@ export interface CliAgentUpdate {
    *  Not always the registry key: claude-code's binary is `claude`. */
   command: string;
   /** argv for the CLI's own self-updater (codex/claude `update`, opencode
-   *  `upgrade` — the divergence this field exists to record). A function gets
-   *  the installed version (null when unreadable), for a CLI whose updater
-   *  takes different arguments across its own major versions. */
-  updateArgs: string[] | ((installed: string | null) => string[]);
+   *  `upgrade` — the divergence this field exists to record). */
+  updateArgs: string[];
   /** Reads this agent's updater state. Absent = no such file, and detection
    *  runs npm-only with app-side dismissal. */
   readState?: () => AgentUpdateState | null;
@@ -101,10 +99,6 @@ export interface LaunchAugmentation {
    * caller keeps OSC notifications enabled for this spawn. */
   notificationsInjected?: boolean;
   observation?: TerminalObservationAvailability;
-  /** The MCP profile went in without the Memory server because Memory was
-   * off, so a relaunch after it is turned on would add it. Unset when the
-   * profile failed soft: a relaunch would not fix that. */
-  memoryWithheld?: true;
 }
 
 export interface TerminalObservationAvailability {
@@ -122,7 +116,6 @@ export interface TerminalObservationAvailability {
  *  it is passed in rather than resolved per agent so one spawn cannot mix a
  *  compiled and a dev-mode command. */
 export interface HookInjectCtx {
-  mode?: "terminal" | "chat";
   abDir: string;
   cursorDir?: string;
   /** Isolates Kimi's user-level hook config in tests. */
@@ -133,9 +126,6 @@ export interface HookInjectCtx {
    *  writes into. Test seam, same role as `cursorDir`. */
   geminiConfigDir?: string;
   hookCommand: HookCommand;
-  /** True only when the MCP profile (run first) really registered the memory
-   *  server for this launch. */
-  memoryRegistered?: boolean;
 }
 
 /** Inputs to an MCP profile's `inject`, one per spawn. `mcpCommand` is the
@@ -154,7 +144,6 @@ export interface HookInjectCtx {
 export interface McpInjectCtx {
   abDir: string;
   mcpCommand: BridgeCommand;
-  memoryMcpCommand?: BridgeCommand;
 }
 
 export interface McpProfile {
@@ -180,11 +169,6 @@ export interface DriverCtx {
   projectId: string;
   approvalPolicy: ApprovalPolicy;
   chatAugment: () => { args: string[]; env: Record<string, string> };
-  /** Memory guidance for this run, `undefined` unless the last `chatAugment`
-   *  registered the Memory server and Memory is on, unpaused and answers in
-   *  time. Same gate as the hook path, so a driver that injects guidance itself
-   *  honours a pause the way terminal agents do. Call after `chatAugment`. */
-  memoryGuidance?: () => Promise<string | undefined>;
   /** Persist the agent-native resume id for this slot (overwrite-latest). */
   onAgentSession: (agentSessionId: string) => void;
   /** Report that the provider stopped serving this session (limit or outage) so
@@ -542,9 +526,6 @@ export interface HookProfile {
   /** Turns one allowlisted invocation into the loopback posts it implies. Called
    *  only after the event passed `events`, so it never re-checks. */
   toPosts: (invocation: HookInvocation, ctx: HookPostCtx) => Promise<HookPost[]>;
-  /** Opt-in model-visible output. Requires injected live caller identity;
-   * notification-only hooks never echo loopback response bodies. */
-  stdout?: HookStdoutProfile;
   /**
    * Every loopback path this agent's INSTALLED INTEGRATION can POST — whether
    * through `bridge hook` (this profile's `toPosts`) or from inside the agent's
@@ -637,14 +618,6 @@ export interface AgentCliSpec {
    *  Either a generated config file the agent needs in order to notify, or a
    *  behaviour switch the bridge must pin for every spawn. Absent = neither. */
   env?: (ctx: LaunchEnvCtx) => Record<string, string>;
-}
-
-/** What `AgentSpec.resolveNamingModel` may ask of the host. Both answer
- *  undefined on any failure rather than throwing. */
-export interface NamingModelProbe {
-  /** Stdout of the agent's binary run with these arguments, on exit 0. */
-  run(args: string[]): Promise<string | undefined>;
-  readText(path: string): Promise<string | undefined>;
 }
 
 export interface AgentSpec {
@@ -890,20 +863,6 @@ export interface AgentSpec {
    */
   cheapNamingModel?: string;
   /**
-   * Asks the installed CLI which model to name with, for a vendor where no
-   * fixed `cheapNamingModel` can be right: a multi-provider front end (opencode)
-   * reaches whatever providers this user configured, so any one slug fails
-   * outright for every user without that provider. Takes precedence over
-   * `cheapNamingModel`; undefined sends no `--model`, leaving the CLI on its
-   * own default.
-   *
-   * Read off the serving agent, like `cheapNamingModel`, and subject to the
-   * same `ANTGRID_NAMING_MODEL=0` switch. The probe runs that agent's binary
-   * with the naming spawn's own env and cwd, so it resolves the same config the
-   * naming call will.
-   */
-  resolveNamingModel?: (probe: NamingModelProbe) => Promise<string | undefined>;
-  /**
    * This vendor charges a whole billing unit per headless call, however small
    * the call is.
    *
@@ -943,14 +902,6 @@ export interface AgentSpec {
    *  a stale index rather than a refusal, and acting on one would throw away a
    *  resume the CLI would have honored. Absent = a miss is never acted on. */
   sessionStoreIsAuthoritative?: true;
-  /** Is this de-styled startup output the CLI refusing THIS resume id? Allow for
-   *  a narrow terminal wrapping the phrase, even mid-id. Match the id, not the
-   *  bare phrase: a resumed conversation replays its own history, and one that
-   *  merely quotes the refusal must not release the id for good. The CLI's own
-   *  words are a positive verdict where a store miss is not, so a match
-   *  releases the id and the session starts fresh in place. Absent = a refused
-   *  resume is never recovered. */
-  isResumeRefusal?: (output: string, agentSessionId: string) => boolean;
   /** Reads the name for this agent's session that is NOT one the agent chose
    *  for itself, tagged `manual` vs `first-message` (see ResolvedTitle — the tag
    *  drives whether we spend a model call). Absent = the agent has neither on

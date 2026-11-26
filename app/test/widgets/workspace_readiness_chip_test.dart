@@ -3,17 +3,35 @@
 // upstream dependencies (selectedTargetProvider, supervisorStatusProvider,
 // projectSessionProvider, terminalStateProvider) through a fake transport.
 
+import 'dart:math' as math;
+
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/ab_status_tone.dart';
-import 'package:antgrid/widgets/carbon_status_dot.dart';
+import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/project/checkout_readiness.dart';
 import 'package:antgrid/providers/checkout_readiness.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart';
 import 'package:antgrid/widgets/workspace_readiness_chip.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+// WCAG 2.x relative luminance / contrast, mirrored from
+// app/test/design/palette_contrast_test.dart (private there, so duplicated
+// rather than imported) — the same method the rest of the design system is
+// held to, not a bespoke one for this widget.
+double _relativeLuminance(Color c) {
+  double linearize(double ch) =>
+      ch <= 0.03928 ? ch / 12.92 : math.pow((ch + 0.055) / 1.055, 2.4) as double;
+  return 0.2126 * linearize(c.r) +
+      0.7152 * linearize(c.g) +
+      0.0722 * linearize(c.b);
+}
+
+double _contrast(Color a, Color b) {
+  final la = _relativeLuminance(a) + 0.05;
+  final lb = _relativeLuminance(b) + 0.05;
+  return la > lb ? la / lb : lb / la;
+}
 
 Future<void> _pump(WidgetTester tester, CheckoutReadiness readiness) async {
   await tester.pumpWidget(
@@ -49,41 +67,37 @@ void main() {
       tester.getSize(find.byType(WorkspaceReadinessChip)),
       Size.zero,
     );
-    expect(find.byType(CarbonTag), findsNothing);
+    expect(find.byType(AbStatusDot), findsNothing);
   });
 
   for (final readiness in _nonReady) {
     final (tone, label) = readinessDisplayInfo(readiness);
 
-    testWidgets('$readiness renders "$label" as a tag with a ${tone.name} dot', (
+    testWidgets('$readiness renders "$label" at its ${tone.name} tone', (
       tester,
     ) async {
       await _pump(tester, readiness);
 
-      final tag = tester.widget<CarbonTag>(find.byType(CarbonTag));
-      expect(tag.label, label);
       expect(find.text(label), findsOneWidget);
+      final dot = tester.widget<AbStatusDot>(find.byType(AbStatusDot));
+      expect(dot.tone, tone);
+    });
 
-      final dot = tester.widget<CarbonStatusDot>(
-        find.byKey(const Key('readiness-dot')),
+    testWidgets('$readiness label colour clears the body-text contrast floor', (
+      tester,
+    ) async {
+      await _pump(tester, readiness);
+
+      final text = tester.widget<Text>(find.text(label));
+      final color = text.style!.color!;
+      final ratio = _contrast(color, kDefaultPalette.bgSurface);
+      expect(
+        ratio,
+        greaterThanOrEqualTo(4.5),
+        reason:
+            '$readiness label "$label" is ${ratio.toStringAsFixed(2)}:1 on '
+            'bgSurface, below WCAG AA 4.5:1',
       );
-      final c = CarbonTheme.of(tester.element(find.byType(CarbonTag))).colors;
-      expect(dot.color, switch (tone) {
-        AbStatusTone.danger => c.supportError,
-        AbStatusTone.warning => c.supportWarning,
-        _ => c.iconDisabled,
-      });
     });
   }
-
-  testWidgets('the tag draws its status dot inside its own bounds', (
-    tester,
-  ) async {
-    await _pump(tester, CheckoutReadiness.stalled);
-
-    final tag = tester.getRect(find.byType(CarbonTag));
-    final dot = tester.getRect(find.byKey(const Key('readiness-dot')));
-    expect(tag.contains(dot.center), isTrue);
-    expect(dot.right, lessThan(tester.getTopLeft(find.text("Couldn't reach agent")).dx));
-  });
 }

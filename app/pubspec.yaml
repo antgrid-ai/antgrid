@@ -47,8 +47,6 @@ dependencies:
     path: ../packages/antgrid_relay_client
   antgrid_peer_transport:
     path: ../packages/antgrid_peer_transport
-  carbon_flutter:
-    path: ../packages/carbon_flutter
   iroh_flutter: 1.0.3
   url_launcher: ^6.3.0
   flutter_secure_storage: ^10.3.1
@@ -207,17 +205,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: 9f052f01d16646944e9e62316209c53cf6c62e8c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: 9f052f01d16646944e9e62316209c53cf6c62e8c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: 9f052f01d16646944e9e62316209c53cf6c62e8c
+      ref: 9967e5982067b3223782e31dbd0ad3a89cba8f41
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

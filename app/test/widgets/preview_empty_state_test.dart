@@ -1,24 +1,23 @@
-import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/widgets/carbon_empty_state.dart';
-import 'package:antgrid/widgets/preview_empty_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-Widget _host() => const MaterialApp(
-  home: Scaffold(body: AbCarbonScope(child: PreviewEmptyState())),
-);
+import 'package:antgrid/design/widgets/ab_empty_state.dart';
+import 'package:antgrid/widgets/preview_empty_state.dart';
 
 void main() {
   group('PreviewEmptyState', () {
     testWidgets('renders icon and title text', (tester) async {
-      await tester.pumpWidget(_host());
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: PreviewEmptyState())),
+      );
 
-      expect(find.byType(CarbonEmptyState), findsOneWidget);
+      expect(find.byType(AbEmptyState), findsOneWidget);
       expect(find.text('Open a Preview'), findsOneWidget);
     });
 
     testWidgets('renders subtitle text', (tester) async {
-      await tester.pumpWidget(_host());
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: PreviewEmptyState())),
+      );
 
       expect(
         find.text('Enter a dev server port above\nto preview it here'),

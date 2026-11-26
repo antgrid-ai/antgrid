@@ -1,7 +1,10 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_icon.dart';
 import '../../models/branch_remote_status.dart';
 import '../../providers/new_session_picker.dart';
 
@@ -15,9 +18,6 @@ import '../../providers/new_session_picker.dart';
 /// branch chip: the context row above is budgeted to exactly one line
 /// (new_session_composer.dart), and counts in the chip label would eat the
 /// branch name's width floor.
-///
-/// Paints no horizontal inset: the mount supplies the context row's, so the
-/// line cannot drift from the row above it.
 class BranchRemoteAdvisory extends ConsumerWidget {
   const BranchRemoteAdvisory({super.key});
 
@@ -48,8 +48,8 @@ class BranchRemoteAdvisory extends ConsumerWidget {
     // Animates rather than pops because the answer arrives seconds after the
     // row it sits under, often while the prompt field below already has focus.
     return AnimatedSize(
-      duration: CarbonMotion.resolve(context, CarbonMotion.moderate01),
-      curve: CarbonMotion.entrance,
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
       alignment: Alignment.topCenter,
       child: message == null
           ? const SizedBox(width: double.infinity)
@@ -86,28 +86,34 @@ class _AdvisoryLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final style = t.typography.helper.copyWith(color: t.colors.textSecondary);
-    // Centres the glyph on the first text line however the density sizes both.
-    final iconTop = ((style.fontSize! * style.height! - t.iconSize) / 2)
-        .clamp(0.0, double.infinity);
+    final p = context.antgrid;
     return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space10,
+        AbTokens.space6,
+        AbTokens.space10,
+        0,
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: EdgeInsets.only(top: iconTop),
-            child: CarbonStatusIcon(
-              CarbonStatusKind.warning,
-              size: t.iconSize,
+            padding: const EdgeInsets.only(top: AbTokens.space2),
+            child: AbIcon(
+              AbIcons.warning,
+              size: AbTokens.fontSm,
+              color: p.warning,
             ),
           ),
-          const SizedBox(width: CarbonSpacing.spacing03),
+          const SizedBox(width: AbTokens.space6),
           Expanded(
             child: Text(
               message,
-              style: style,
+              // Mono: this is git data — branch names and counts — not chrome.
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
+              ),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),

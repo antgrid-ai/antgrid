@@ -1,4 +1,4 @@
-import { memoryLaunchEnabled } from "./agent-host";
+import "./agent-host";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -79,9 +79,6 @@ export interface SessionLaunchSpec {
   scheduleOwnerId?: string;
   /** Host-internal: the permission mode a scheduled chat run starts in. */
   scheduledChatMode?: string;
-  /** Host-internal: start from the backend's default permission mode rather
-   *  than the last-used one, for a session another machine asked for. */
-  withoutInheritedChatMode?: boolean;
 }
 
 export interface ScheduledSessionSpec {
@@ -530,12 +527,30 @@ const FLUSH_DEBOUNCE_MS = 200;
  *  agent refusing to start. */
 const RESUME_REFUSAL_WINDOW_MS = 30_000;
 const RESUME_RESTART_WAIT_MS = 2_000;
+const NO_CONVERSATION_FOUND = "noconversationfoundwithsessionid";
+
+/** Raw PTY output with control sequences and every whitespace or control
+ *  character removed, lowercased — so a message the terminal coloured or
+ *  wrapped, even mid-id, still compares equal to the text it was. */
+function compactTerminalText(raw: string): string {
+  return stripAnsi(raw).replace(/[\x00-\x20]+/g, "").toLowerCase();
+}
+
+/** True only when the output carries the agent's refusal of THIS conversation
+ *  id. The bare phrase is not enough: a resumed conversation replays its own
+ *  history, and one that merely mentions "no conversation found" must not be
+ *  read as the agent refusing it — that would release the id for good. */
+function isResumeRefusal(rawTail: string, agentSessionId: string): boolean {
+  const text = compactTerminalText(rawTail);
+  const id = compactTerminalText(agentSessionId);
+  return text.includes(`${NO_CONVERSATION_FOUND}:${id}`) || text.includes(`${NO_CONVERSATION_FOUND}${id}`);
+}
 /** close()'s wait for handoff placements, kept inside the seconds a supervisor
  *  gives a shutting-down host. A placement is one rename, or a copy across
  *  volumes. */
 const CLOSE_PLACEMENT_WAIT_MS = 3_000;
 const PLACEMENT_LAUNCH_CANCELLED = "The launch was cancelled while the handoff files were being placed.";
-// Upper bound on how long a mode flip or restart waits for the OLD runtime to be really
+// Upper bound on how long a mode flip waits for the OLD runtime to be really
 // gone. A wedged PTY or a driver whose dispose never settles must fail the flip
 // rather than hang it forever.
 const TEARDOWN_TIMEOUT_MS = 15_000;
@@ -554,15 +569,6 @@ export const TEARDOWN_TIMEOUT_ERROR = "timed out tearing down session";
  *  lockstep with `kRestartFailedError` in
  *  app/lib/widgets/session_mode_control.dart. */
 export const RESTART_FAILED_ERROR = "failed to restart session after mode switch";
-
-/** A session verb failure whose `code` reaches the app as `session:result.errorCode`.
- *  `TEARDOWN_TIMEOUT` and `RESTART_FAILED` leave the session stopped; the
- *  refusals are raised before anything was stopped. */
-export class SessionVerbError extends Error {
-  constructor(readonly code: "MEMORY_OFF" | "SCHEDULED_RUN" | "TEARDOWN_TIMEOUT" | "RESTART_FAILED", message: string) {
-    super(message);
-  }
-}
 // Live activity (keystrokes, notification bursts) fires many times a second;
 // coalesce the session:updated emit so the drawer re-sort doesn't thrash.
 const ACTIVITY_EMIT_DEBOUNCE_MS = 750;
@@ -639,11 +645,6 @@ export class SessionManager {
    *  its runtime without restarting anything), so the file as it reads now is
    *  not evidence of what is running. Set and cleared with `terminalRunIds`. */
   private terminalRunAgents = new Map<string, string>();
-  /** Live runs whose launch left the Memory server out because Memory was off.
-   *  A terminal run is marked at spawn, a chat run when its driver computes the
-   *  augmentation (`noteChatRunMemory`). Cleared with the run (`unbindRun`),
-   *  never persisted. */
-  private runsWithoutMemory = new Set<string>();
   private readonly scheduledLaunches = new Map<string, { runtimeGeneration: string; launched: boolean; cancelled: boolean; terminal: boolean }>();
   private readonly scheduleOwnedCheckouts = new Set<string>();
   private readonly setupSettlements = new Map<string, Promise<void>>();
@@ -682,29 +683,9 @@ export class SessionManager {
     this.terminalRunAgents.set(id, agent);
   }
 
-  /**
-   * Records whether a chat run's augmentation withheld Memory. Chat computes it
-   * inside the driver, after `start` has already notified, so this notifies
-   * itself when the mark moves. A run that was unbound or replaced while its
-   * driver was starting is ignored rather than marking its successor.
-   */
-  noteChatRunMemory(id: string, runId: string, withheld: boolean): void {
-    if (!this.isLiveRun(id, runId) || this.entries.get(id)?.mode !== "chat") return;
-    if (this.markRunMemory(id, withheld)) this.notifyObservers();
-  }
-
-  /** Returns whether the mark moved. */
-  private markRunMemory(id: string, withheld: boolean): boolean {
-    if (withheld === this.runsWithoutMemory.has(id)) return false;
-    if (withheld) this.runsWithoutMemory.add(id);
-    else this.runsWithoutMemory.delete(id);
-    return true;
-  }
-
   private unbindRun(id: string): void {
     this.terminalRunIds.delete(id);
     this.terminalRunAgents.delete(id);
-    this.runsWithoutMemory.delete(id);
   }
 
   acceptsHookRun(id: string, runId?: string): boolean {
@@ -794,7 +775,7 @@ export class SessionManager {
   // Callbacks waiting for a session's PTY to actually be gone, keyed by session
   // id and fired from noteExited(). See awaitTerminalExit().
   private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
-  /** Sessions mid-`setMode` or `restartForMemory`, counted rather than flagged. The exit-driven
+  /** Sessions mid-`setMode`, counted rather than flagged. The exit-driven
    *  teardown reads this to tell a runtime swap apart from a session that is
    *  actually going away, and nothing serializes the verb — two clients can have
    *  flips in flight on one session at once, so the first one to finish must not
@@ -816,8 +797,7 @@ export class SessionManager {
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
   // it must never reach that path. Invalidated whenever setAgentSession writes
-  // something new; a `false` from a not-yet-written transcript is never stored
-  // (see agentSessionResumable), which costs only an existsSync. Launches let the provider validate the saved identity, save
+  // something new. Launches let the provider validate the saved identity, save
   // for the one verdict agentSessionGone acts on: a positive disown.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
   /** The latest terminal launch that was handed a saved conversation, until it
@@ -1043,11 +1023,6 @@ export class SessionManager {
   get(id: string): SessionEntry | undefined {
     const e = this.entries.get(id);
     return e ? this.toWire(e) : undefined;
-  }
-
-  /** The persisted chat permission mode, which the wire entry does not carry. */
-  chatModeOf(id: string): string | undefined {
-    return this.entries.get(id)?.config?.mode;
   }
 
   /**
@@ -1438,9 +1413,8 @@ export class SessionManager {
     if (entry.mode === "chat" && entry.tool) {
       const inherited = this.lastUsedConfigForTool(entry.tool);
       // A schedule's permission mode is its own explicit setting. The last-used `mode` is whatever the user picked in
-      // an unrelated chat (auto, acceptEdits), and replaying it would loosen a gated schedule's runs, or hand another
-      // machine's prompt a session that never asks before running tools.
-      if (inherited && (spec?.scheduleOwnerId || spec?.withoutInheritedChatMode)) delete inherited.mode;
+      // an unrelated chat (auto, acceptEdits), and replaying it would loosen a gated schedule's runs.
+      if (inherited && spec?.scheduleOwnerId) delete inherited.mode;
       const config = spec?.scheduleOwnerId && spec.scheduledChatMode ? { ...inherited, mode: spec.scheduledChatMode } : inherited;
       if (config && Object.keys(config).length > 0) entry.config = config;
     }
@@ -2867,7 +2841,6 @@ export class SessionManager {
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
       const runtimeSpec = (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name);
-      this.markRunMemory(id, launch.memoryWithheld === true);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2939,11 +2912,7 @@ export class SessionManager {
           await this.releaseTerminalPreparation(id);
           throw error;
         }).finally(() => {
-          if (this.terminalPreparing.get(id) !== pending) return;
-          this.terminalPreparing.delete(id);
-          // toWire withholds startedWithoutMemory until preparation settles. Nothing
-          // persisted changed, so this skips the flush changed() would add.
-          if (this.runsWithoutMemory.has(id)) this.notifyObservers();
+          if (this.terminalPreparing.get(id) === pending) this.terminalPreparing.delete(id);
         });
         this.terminalPreparing.set(id, pending);
         return pending;
@@ -3183,13 +3152,9 @@ export class SessionManager {
     // Held across the teardown only: the exit-driven handler teardown fires
     // inside the await below, and this is what tells it the session outlives
     // the runtime it is losing.
-    return this.whileFlipping(id, () => this.setModeInner(id, mode, entry, wasRunning));
-  }
-
-  private async whileFlipping<T>(id: string, swap: () => Promise<T>): Promise<T> {
     this.flipping.set(id, (this.flipping.get(id) ?? 0) + 1);
     try {
-      return await swap();
+      return await this.setModeInner(id, mode, entry, wasRunning);
     } finally {
       const left = (this.flipping.get(id) ?? 1) - 1;
       if (left > 0) this.flipping.set(id, left);
@@ -3198,72 +3163,9 @@ export class SessionManager {
   }
 
   /** True while this session is swapping runtimes, i.e. the teardown now in
-   *  flight is a mode flip or restart and not the session going away. */
+   *  flight is a mode flip and not the session going away. */
   isFlipping(id: string): boolean {
     return this.flipping.has(id);
-  }
-
-  /**
-   * Restart a running session so its agent is launched with the Memory
-   * server it was started without. Returns whether it restarted: a session that
-   * no longer needs it (stopped, preparing, already has Memory, not eligible) is
-   * a no-op rather than an interruption, since the caller's list can be stale.
-   * Resume is free through `launchResumeId`, which falls back to a fresh
-   * conversation when the transcript is gone.
-   */
-  async restartForMemory(id: string): Promise<boolean> {
-    const entry = this.entries.get(id);
-    if (!entry) throw new Error(`session not found: ${id}`);
-    if (entry.archived) throw new Error(`cannot restart archived session: ${id}`);
-    if (this.awaitingNativeForkIdentity(entry) || entry.forkNativeMigrationError) {
-      throw new Error("Complete or recover this native fork before restarting it.");
-    }
-    if (!this.launchedWithoutMemory(entry)) return false;
-    if (!memoryLaunchEnabled()) {
-      throw new SessionVerbError("MEMORY_OFF", "Memory is off, so restarting would not add it.");
-    }
-    // stop() would mark the schedule's run interrupted.
-    if (this.activeScheduledRun(id)) {
-      throw new SessionVerbError("SCHEDULED_RUN", "A scheduled run is in progress on this session.");
-    }
-    // Held across the teardown for the same reason as in setMode.
-    await this.whileFlipping(id, async () => {
-      if (!(await this.stopAndAwait(id))) throw new SessionVerbError("TEARDOWN_TIMEOUT", `${TEARDOWN_TIMEOUT_ERROR}: ${id}`);
-      try {
-        await this.start(id);
-      } catch (err) {
-        throw new SessionVerbError("RESTART_FAILED", `failed to restart session: ${id}: ${err}`);
-      }
-    });
-    return true;
-  }
-
-  /** Not while preparing: a spawned run whose readiness is still pending would
-   *  be flagged and then refused by restartForMemory as a no-op. */
-  private launchedWithoutMemory(e: PersistedEntry): boolean {
-    return this.isRunning(e) && !this.terminalPreparing.has(e.id) && this.runsWithoutMemory.has(e.id);
-  }
-
-  /** A scheduled run in progress is excluded: restartForMemory would refuse it. */
-  private startedWithoutMemory(e: PersistedEntry): boolean {
-    return this.launchedWithoutMemory(e) && !this.activeScheduledRun(e.id);
-  }
-
-  /** The sessions toWire flags `startedWithoutMemory`, without building every
-   *  session's wire form. Ordered like {@link list}. */
-  listStartedWithoutMemory(): SessionEntry[] {
-    const out: SessionEntry[] = [];
-    for (const id of this.runsWithoutMemory) {
-      const e = this.entries.get(id);
-      if (e && !e.archived && this.startedWithoutMemory(e)) out.push(this.toWire(e));
-    }
-    out.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
-    return out;
-  }
-
-  private activeScheduledRun(id: string): boolean {
-    const scheduled = this.scheduledLaunches.get(id);
-    return !!scheduled && !scheduled.terminal;
   }
 
   private async setModeInner(
@@ -3276,7 +3178,7 @@ export class SessionManager {
       // Teardown never landed. Leave `mode` untouched: the session is now
       // stopped in its original mode, which is exactly the post-session:stop
       // state, and the caller can retry.
-      throw new SessionVerbError("TEARDOWN_TIMEOUT", `${TEARDOWN_TIMEOUT_ERROR}: ${id}`);
+      throw new Error(`${TEARDOWN_TIMEOUT_ERROR}: ${id}`);
     }
     // Strictly between the stop and the start: both branch on entry.mode, so a
     // flip before the stop tears down the wrong runtime (orphaning a live PTY)
@@ -3296,7 +3198,7 @@ export class SessionManager {
       // one of the two refusals that leaves the session STOPPED. Untagged it
       // reads to the app as an ordinary refusal ("nothing changed"), which
       // would leave the user with a dead session and no reason to restart it.
-      throw new SessionVerbError("RESTART_FAILED", `${RESTART_FAILED_ERROR}: ${id}: ${err}`);
+      throw new Error(`${RESTART_FAILED_ERROR}: ${id}: ${err}`);
     }
   }
 
@@ -3391,12 +3293,13 @@ export class SessionManager {
   }
 
   /**
-   * Recover a resume the agent refused. An agent can report a session id before
-   * any conversation exists behind it, and the next launch's resume then exits
-   * at once. The CLI's own refusal (the spec's `isResumeRefusal`) is a positive
-   * verdict, unlike a missing transcript file, which the resume tests pin as
-   * inconclusive — so only it releases the id, and the session starts a fresh
-   * conversation in place.
+   * Recover a resume the agent refused. A session opened and closed before
+   * anything was sent has an id but no conversation behind it (claude reports
+   * the id at SessionStart, before it writes the transcript), so the next
+   * launch's `--resume` exits at once with "No conversation found". That text
+   * is the agent's own positive verdict, unlike a missing transcript file, which
+   * the resume tests pin as inconclusive — so only it releases the id, and the
+   * session starts a fresh conversation in place.
    *
    * One attempt per launch: the retry launches fresh, registers no resume, and
    * so cannot loop. An exit the user asked for, or one outside the startup
@@ -3409,11 +3312,7 @@ export class SessionManager {
     const entry = this.entries.get(id);
     if (!entry || !readOutputTail || this.stopping.has(id) || this.deleting.has(id) || this.closed) return;
     if (Date.now() - launch.at > RESUME_REFUSAL_WINDOW_MS) return;
-    const agentSessionId = entry.agentSessionId;
-    if (!agentSessionId) return;
-    const tool = this.resumeToolFor(entry);
-    const isRefusal = tool ? (this.opts.agentRuntime ?? agentRuntime).get(tool)?.isResumeRefusal : undefined;
-    if (!isRefusal?.(stripAnsi(readOutputTail()), agentSessionId)) return;
+    if (!entry.agentSessionId || !isResumeRefusal(readOutputTail(), entry.agentSessionId)) return;
     log.warn(`session ${id}: ${entry.tool ?? "agent"} has no conversation ${entry.agentSessionId}; starting a fresh one`);
     entry.agentSessionId = undefined;
     entry.agentTranscriptPath = undefined;
@@ -3508,7 +3407,6 @@ export class SessionManager {
       archived: e.archived,
       running: this.isRunning(e),
       deleting: this.deleting.has(e.id),
-      ...(this.startedWithoutMemory(e) ? { startedWithoutMemory: true } : {}),
       tool: e.tool,
       command: e.command,
       forkSupported,
@@ -3627,12 +3525,7 @@ export class SessionManager {
       agentTranscriptPath: e.agentTranscriptPath,
       adapterOptions: this.opts.adapterOptions,
     }, (this.opts.agentRuntime ?? agentRuntime).get);
-    // A missing transcript is not yet an answer: claude names the file at
-    // SessionStart before writing it, and its per-turn re-reports carry the same
-    // id and path, so setAgentSession never clears a `false` cached that early.
-    if (resumable || !e.agentTranscriptPath) {
-      this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
-    }
+    this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
     return resumable;
   }
 

@@ -2,10 +2,8 @@ import { join } from "node:path";
 import { writeFileSync, unlinkSync, readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
-import { memoryBootstrapFrom } from "antgrid-agents/memory-guidance";
 import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
-import { memoryFailure } from "./memory";
 const log = logger.child({ component: "api-server" });
 import { agentNotification, createMessage, type AbMessage } from "./protocol";
 import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
@@ -14,13 +12,12 @@ import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 import {
   PublishArtifactBodySchema,
-  BusRequestBodySchema,
   SendBodySchema,
-  type SendResultView,
+  ReplyBodySchema,
   type SessionBusApi,
 } from "./session-bus/api";
-import { ARTIFACT_CHUNK_BYTES, BUS_RUNG_REPORT_WAIT_MS } from "./session-bus/constants";
-import { SESSION_BUS_ERRORS, isRefusal, type SessionBusRefusal } from "./session-bus/errors";
+import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
+import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
 import {
   SCHEDULER_AGENT_ERRORS,
   SchedulerRefusal,
@@ -36,14 +33,6 @@ export interface SchedulerCall {
   method: SchedulerAgentMethod;
   params: Record<string, unknown>;
 }
-
-export interface MemoryCall {
-  terminalId?: string;
-  runId?: string;
-  request: unknown;
-}
-
-const MemoryBootstrapRequestSchema = z.strictObject({ runId: z.string().optional() });
 
 const SCHEDULER_ROUTES: Record<string, SchedulerAgentMethod> = {
   list: "list",
@@ -154,7 +143,6 @@ export interface AgentContext {
    *  (or a ZodError the route flattens). Absent means this core has no scheduler
    *  plumbing at all, and every route answers SCHEDULER_UNAVAILABLE. */
   scheduler?: (call: SchedulerCall) => Promise<Record<string, unknown>>;
-  memory?: (call: MemoryCall) => Promise<Record<string, unknown>>;
 }
 
 const VERSION = "0.1.0";
@@ -270,12 +258,7 @@ function textResponse(data: string, status = 200) {
  *  a route and the tool calling it can never disagree about what a code means. */
 function sessionBusJson(result: unknown): Response {
   if (isRefusal(result)) {
-    return json({
-      error: result.error,
-      code: result.code,
-      ...(result.remoteCode ? { remoteCode: result.remoteCode } : {}),
-      ...(result.held ? { held: result.held } : {}),
-    }, SESSION_BUS_ERRORS[result.code]);
+    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
   }
   return json(result);
 }
@@ -284,30 +267,6 @@ function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => u
   const parsed = schema.safeParse(body);
   if (!parsed.success) return json({ error: "Invalid body" }, 400);
   return sessionBusJson(run(parsed.data));
-}
-
-/** Report a receipt after the asynchronous send; later receipts remain visible on the thread. */
-async function sessionBusSend<T>(
-  bus: SessionBusApi,
-  schema: z.ZodType<T>,
-  body: unknown,
-  run: (b: T) => Promise<SendResultView | SessionBusRefusal>,
-): Promise<Response> {
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) return json({ error: "Invalid body" }, 400);
-  const result = await run(parsed.data);
-  if (isRefusal(result)) return sessionBusJson(result);
-  const reached = await bus.awaitRung(result.messageId, BUS_RUNG_REPORT_WAIT_MS);
-  const { heldReason: _held, refusedCode: _refused, retryUntil, ...rest } = result;
-  return json({
-    ...rest,
-    rung: reached.rung,
-    ...(reached.rung === "held" && retryUntil !== undefined ? { retryUntil } : {}),
-    ...(reached.heldReason === undefined ? {} : { heldReason: reached.heldReason }),
-    ...(reached.refusedCode === undefined ? {} : { refusedCode: reached.refusedCode }),
-    sent: reached.rung !== "held",
-    held: reached.rung === "held",
-  });
 }
 
 function schedulerRefusal(code: keyof typeof SCHEDULER_AGENT_ERRORS, message: string): Response {
@@ -689,40 +648,6 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         return json({ ok: true });
       }
 
-      if (path.startsWith("/memory/")) {
-        const op = path.slice("/memory/".length);
-        if (req.method !== "POST") return json({ error: { code: "INVALID_ARGUMENT", message: "Memory requires POST." } }, 405);
-        if (req.headers.get("host") !== `127.0.0.1:${server.port}`
-          || !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
-          return json({ error: { code: "NOT_A_SESSION", message: "Memory requires a live Antgrid session." } }, 403);
-        }
-        if (!ctx.memory) return json({ error: { code: "UNAVAILABLE", message: "Memory is unavailable in this process." } }, 503);
-        let raw: unknown;
-        try { raw = await req.json(); } catch { raw = undefined; }
-        const { runId, ...params } = (typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
-        try {
-          if (op === "bootstrap") MemoryBootstrapRequestSchema.parse(raw);
-          const result = await ctx.memory({
-            terminalId: url.searchParams.get("terminalId") ?? undefined,
-            runId: typeof runId === "string" ? runId : undefined,
-            request: op === "bootstrap" ? { op: "status" } : { ...params, op },
-          });
-          if (op === "bootstrap") {
-            // Hook output may enter provider instructions. Only local settings,
-            // never stored content or service error details, cross this boundary.
-            const bootstrap = memoryBootstrapFrom(result);
-            if (!bootstrap) return json({ error: { code: "UNAVAILABLE", message: "Memory guidance is unavailable." } }, 503);
-            return json(bootstrap);
-          }
-          return json(result);
-        } catch (error) {
-          const failure = memoryFailure(error);
-          const status = failure.code === "BUSY" || failure.code === "UNAVAILABLE" ? 503
-            : failure.code === "NOT_A_SESSION" || failure.code === "FORBIDDEN" ? 403 : 400;
-          return json({ error: failure }, status);
-        }
-      }
-
       // The scheduler tools. Every route is a POST with a JSON body, so a page in
       // the user's browser cannot reach it with a simple cross-origin request, and
       // the Host check refuses a DNS-rebound name pointing at this loopback port.
@@ -774,6 +699,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (req.method === "GET") {
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
           if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
+          if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
           if (rest === "self") return sessionBusJson(bus.self(terminalId));
           if (rest === "thread") {
             // An absent id is passed through as "" rather than answered here:
@@ -805,13 +731,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (rest === "artifacts") {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
         }
-        if (rest === "notify") {
-          return sessionBusSend(bus, SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        if (rest === "post") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.post(terminalId, b));
         }
-        if (rest === "request") {
-          const parsed = BusRequestBodySchema.safeParse(body);
-          if (!parsed.success) return json({ error: "Invalid body" }, 400);
-          return sessionBusJson(await bus.request(terminalId, parsed.data));
+        if (rest === "notify") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "reply") {
+          return sessionBusPost(ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
         }
         return json({ error: "Not found" }, 404);
       }

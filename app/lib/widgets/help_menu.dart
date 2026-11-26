@@ -1,8 +1,11 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/build_info.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_menu.dart';
 import '../providers/app_version.dart';
 import '../providers/support_chat.dart';
 import '../util/external_url.dart';
@@ -11,11 +14,7 @@ import '../update/update_status_dialog.dart';
 import 'log_files_button.dart';
 import 'settings/legal_notices_sheet.dart';
 
-/// The Help submenu of the account menu.
-///
-/// Call it from a build method: the version heading watches
-/// [appVersionLabelProvider], so it fills in while the menu is open.
-CarbonMenuSubmenu helpMenu({
+AbMenuSubmenu helpMenu({
   required BuildContext context,
   required WidgetRef ref,
   Rect? shareOrigin,
@@ -30,44 +29,43 @@ CarbonMenuSubmenu helpMenu({
 
   final logLabel = logFilesActionLabel();
   final container = ref.container;
-  final version = ref.watch(appVersionLabelProvider).asData?.value ?? '';
-  return CarbonMenuSubmenu(
+  return AbMenuSubmenu(
     label: 'Help',
+    icon: AbIcons.info,
     entries: [
-      CarbonMenuItem(
+      AbMenuItem(
         label: 'Getting started',
-        onPressed: () =>
+        onTap: () =>
             run(() => openUrl(context, 'https://antgrid.ai/get-started')),
       ),
-      CarbonMenuItem(
+      AbMenuItem(
         label: 'Chat with support',
-        onPressed: () => run(() => openChat(context, ref)),
+        onTap: () => run(() => openChat(context, ref)),
       ),
-      CarbonMenuItem(
+      AbMenuItem(
         label: 'Support centre',
-        onPressed: () =>
-            run(() => openUrl(context, 'https://antgrid.ai/support')),
+        onTap: () => run(() => openUrl(context, 'https://antgrid.ai/support')),
       ),
-      CarbonMenuItem(
+      AbMenuItem(
         label: '${logLabel[0].toUpperCase()}${logLabel.substring(1)}',
-        onPressed: () => run(
+        onTap: () => run(
           () => openLogs != null
               ? openLogs(context, shareOrigin)
               : runLogFilesAction(context, origin: shareOrigin),
         ),
       ),
-      const CarbonMenuDivider(),
-      CarbonMenuItem(
+      const AbMenuDivider(),
+      AbMenuItem(
         label: 'Source code',
-        onPressed: () => run(() => openUrl(context, BuildInfo.sourceUrl)),
+        onTap: () => run(() => openUrl(context, BuildInfo.sourceUrl)),
       ),
-      CarbonMenuItem(
+      AbMenuItem(
         label: 'Licences & notices',
-        onPressed: () => run(() => showLegalNotices(context)),
+        onTap: () => run(() => showLegalNotices(context)),
       ),
-      CarbonMenuItem(
+      AbMenuItem(
         label: 'Check for updates…',
-        onPressed: () => run(
+        onTap: () => run(
           () => showUpdateStatusDialog(
             context,
             container,
@@ -75,10 +73,24 @@ CarbonMenuSubmenu helpMenu({
           ),
         ),
       ),
-      CarbonMenuGroup(
-        label: version.isEmpty ? 'Version' : 'Version $version',
-        children: const [],
-      ),
+      const AbMenuInfo(label: 'Version', value: _HelpVersion()),
     ],
   );
+}
+
+class _HelpVersion extends ConsumerWidget {
+  const _HelpVersion();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final version = ref.watch(appVersionLabelProvider).asData?.value ?? '';
+    return Text(
+      version,
+      overflow: TextOverflow.ellipsis,
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXs,
+        color: context.antgrid.textMuted,
+      ),
+    );
+  }
 }

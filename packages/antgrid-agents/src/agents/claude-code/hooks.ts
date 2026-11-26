@@ -2,8 +2,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { HookCommand } from "../../hook-command";
 import { materializeJson } from "../launch-inject";
-import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost, type HookStdoutProfile } from "../hook-posts";
-import { MEMORY_SESSION_NOTICE, memorySessionStartOutput } from "../../memory-guidance";
+import { compact, namesTheSession, parseOrEmpty, titlePost, type HookInvocation, type HookPost } from "../hook-posts";
 import type { HookInjectCtx, HookPostCtx, LaunchAugmentation } from "../types";
 
 // The one tool whose whole purpose is to stop and ask the user. Claude renders
@@ -171,11 +170,7 @@ export const turnBoundaryEvents = {
   end: ["stop"],
 } as const;
 
-export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event", "/memory/bootstrap"] as const;
-
-// Claude Code fires SessionStart on startup, resume, clear and compaction, so
-// the notice comes back after a compaction summarises it away.
-export const stdout: HookStdoutProfile = memorySessionStartOutput(MEMORY_SESSION_NOTICE);
+export const posts = ["/session-title", "/turn-start", "/turn-activity", "/notify", "/handler-event"] as const;
 export const observation = { notifications: true, titles: true, handler: true, turnStart: true, turnEnd: true, hookAlive: false } as const;
 
 // StopFailure reasons no amount of waiting fixes. They take the ordinary

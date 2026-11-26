@@ -1,10 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/upload_service.dart';
-import 'attach_progress.dart';
 
 /// Exactly [UploadService.upload]'s signature, so a live service's method
 /// tears off straight into [TerminalAttachmentUploader.resolveUpload].
@@ -16,93 +14,52 @@ typedef UploadRunner =
       void Function(int sent, int total)? onProgress,
     });
 
-/// Attach progress per terminal rather than per view of it. On a phone the
-/// file picker backgrounds the app, the reconnect rebuilds the terminal view,
-/// and the upload finishes in the uploader of a view that is gone — a board
-/// keyed by terminal is how the view built in its place still shows it.
-///
-/// Reference-counted: every view showing a terminal, every attach running
-/// against it and every finished state still on show holds the key, and the
-/// entry goes when the last one lets go.
-class TerminalAttachBoard {
-  final Map<String, _Entry> _entries = {};
+/// Where an attach is in the round trip. [staging] and [finishing] are the
+/// request/response hops either side of the chunk stream and report no
+/// fraction: a sub-chunk screenshot emits exactly one progress tick, so a
+/// bar pinned at 0% for both hops is all a user would ever see of it.
+enum AttachPhase { staging, sending, finishing, done }
 
-  bool _reserve(String key, Object owner) {
-    final entry = _entries[key];
-    final progress = entry?.progress.value;
-    if (entry?.owner != null ||
-        (progress != null && progress.phase != AttachPhase.done)) {
-      return false;
-    }
-    acquire(key);
-    _entries[key]!.owner = owner;
-    return true;
-  }
+@immutable
+class AttachProgress {
+  const AttachProgress({
+    required this.fileName,
+    required this.phase,
+    this.sent = 0,
+    this.total = 0,
+  });
 
-  void _releaseReservation(String key, Object owner) {
-    if (!identical(_entries[key]?.owner, owner)) return;
-    _entries[key]!.owner = null;
-    release(key);
-  }
+  final String fileName;
+  final AttachPhase phase;
+  final int sent;
+  final int total;
 
-  ValueNotifier<AttachProgress?> acquire(String key) {
-    final entry = _entries.putIfAbsent(key, _Entry.new);
-    entry.holders++;
-    return entry.progress;
-  }
-
-  void release(String key) {
-    final entry = _entries[key];
-    if (entry == null || --entry.holders > 0) return;
-    _entries.remove(key);
-    entry.progress.dispose();
-  }
-
-  /// Whether a view, not just this attach's own holds, is showing [key].
-  bool shownElsewhere(String key, {required int ownHolds}) =>
-      (_entries[key]?.holders ?? 0) > ownHolds;
+  /// Null while the size of the current step is unknown — see [AttachPhase].
+  double? get fraction =>
+      phase == AttachPhase.sending && total > 0 ? sent / total : null;
 }
-
-final class _Entry {
-  final ValueNotifier<AttachProgress?> progress = ValueNotifier(null);
-  int holders = 0;
-  Object? owner;
-}
-
-final terminalAttachBoardProvider = Provider<TerminalAttachBoard>(
-  (ref) => TerminalAttachBoard(),
-);
 
 /// Uploads bytes to the bridge's staging dir and types the returned host path
 /// into the terminal. The single pipeline behind every attach gesture (the
 /// attach button, an image paste, a file drop) so they cannot diverge on the
 /// busy state, the size cap, or the inserted text.
 ///
-/// [attach] never throws or returns a path: every outcome leaves through
-/// [insert], [onError] or the [board], so a `void` callback can fire it
-/// through `detached(...)` with nothing left to handle.
+/// Never throws and never returns a path: every outcome leaves through
+/// [insert], [onError] or [progress], so a `void` callback can fire it through
+/// `detached(...)` with nothing left to handle.
 class TerminalAttachmentUploader {
   TerminalAttachmentUploader({
-    required this.board,
-    required this.boardKey,
     required this.resolveUpload,
     required this.insert,
     required this.onError,
   });
-
-  final TerminalAttachBoard board;
-
-  /// The [board] key of the terminal an attach starting now would type into.
-  final String Function() boardKey;
 
   /// Resolved per call, never captured: an upload takes seconds, and the
   /// checkout's service bundle can be swept out from under one in that window.
   final UploadRunner? Function() resolveUpload;
 
   /// Receives the ready-to-type text, quotes and trailing space included.
-  /// May wait (a terminal still re-attaching after a reconnect); the strip
-  /// stays up until it settles, and a throw is reported like any failure.
-  final FutureOr<void> Function(String text) insert;
+  final void Function(String text) insert;
 
   /// Receives [uploadErrorText] copy for every failure.
   final void Function(String message) onError;
@@ -112,32 +69,18 @@ class TerminalAttachmentUploader {
   /// to linger over the output it overlays.
   static const Duration kDoneHold = Duration(milliseconds: 1200);
 
+  /// Null while idle. Both the progress strip and every attach affordance's
+  /// disabled state read this, so "busy" has one definition.
+  final ValueNotifier<AttachProgress?> progress = ValueNotifier(null);
+
+  bool _inFlight = false;
   bool _disposed = false;
   bool _disposeRequested = false;
   int _holders = 0;
-  String? _batchKey;
-  bool _attaching = false;
-  ({Timer timer, String key, VoidCallback clear})? _pendingClear;
+  int _generation = 0;
+  Timer? _clearTimer;
 
-  /// Reserves the terminal even while a batch is reading its next file. The
-  /// board also excludes attachments started by a replacement view.
-  Future<void> exclusive(Future<void> Function() operation) =>
-      keepAliveDuring(() async {
-        final key = boardKey();
-        if (_batchKey != null || !board._reserve(key, this)) {
-          onError(
-            uploadErrorText(const UploadException('BUSY', ''), 'clipboard'),
-          );
-          return;
-        }
-        _batchKey = key;
-        try {
-          await operation();
-        } finally {
-          _batchKey = null;
-          board._releaseReservation(key, this);
-        }
-      });
+  bool get busy => _inFlight;
 
   /// A native picker can outlive the terminal view during reconnection.
   Future<void> keepAliveDuring(Future<void> Function() operation) async {
@@ -157,6 +100,10 @@ class TerminalAttachmentUploader {
     String? mimeType,
   }) async {
     if (_disposed) return;
+    if (_inFlight) {
+      onError(uploadErrorText(const UploadException('BUSY', ''), fileName));
+      return;
+    }
     // Checked here rather than left to the bridge: the bytes are already in app
     // memory, and the wire round trip only ends in the same TOO_LARGE.
     if (bytes.length > UploadService.kMaxUploadBytes) {
@@ -165,71 +112,53 @@ class TerminalAttachmentUploader {
       );
       return;
     }
-    final key = boardKey();
-    final inBatch = _batchKey == key;
-    if (_attaching || (!inBatch && !board._reserve(key, this))) {
-      onError(uploadErrorText(const UploadException('BUSY', ''), fileName));
+    final run = resolveUpload();
+    if (run == null) {
+      onError(uploadErrorText(const UploadException('OFFLINE', ''), fileName));
       return;
     }
-    _attaching = true;
-    final progress = board.acquire(key);
-    try {
-      final run = resolveUpload();
-      if (run == null) {
-        onError(
-          uploadErrorText(const UploadException('OFFLINE', ''), fileName),
-        );
-        return;
-      }
 
-      _settlePendingClear();
-      progress.value = AttachProgress.staging(fileName);
-      try {
-        final path = await run(
-          fileName: fileName,
-          bytes: bytes,
-          mimeType: mimeType,
-          onProgress: (sent, total) => progress.value = AttachProgress.tick(
+    _inFlight = true;
+    _clearTimer?.cancel();
+    final generation = ++_generation;
+    _publish(
+      generation,
+      AttachProgress(fileName: fileName, phase: AttachPhase.staging),
+    );
+    try {
+      final path = await run(
+        fileName: fileName,
+        bytes: bytes,
+        mimeType: mimeType,
+        onProgress: (sent, total) => _publish(
+          generation,
+          AttachProgress(
             fileName: fileName,
+            phase: sent >= total ? AttachPhase.finishing : AttachPhase.sending,
             sent: sent,
             total: total,
           ),
-        );
-        await insert('"$path" ');
-        final done = AttachProgress(
-          fileName: fileName,
-          phase: AttachPhase.done,
-        );
-        progress.value = done;
-        // Its own hold, so the finished state outlives this attach's.
-        board.acquire(key);
-        _pendingClear = (
-          timer: Timer(kDoneHold, _settlePendingClear),
-          key: key,
-          clear: () {
-            if (identical(progress.value, done)) progress.value = null;
-            board.release(key);
-          },
-        );
-      } catch (error) {
-        // The strip has no room for a failure state that a snackbar states
-        // better, and leaving a dead bar over the output would outlive the
-        // read.
-        progress.value = null;
-        onError(uploadErrorText(error, fileName));
-      }
+        ),
+      );
+      insert('"$path" ');
+      _publish(
+        generation,
+        AttachProgress(fileName: fileName, phase: AttachPhase.done),
+      );
+      _clearTimer = Timer(kDoneHold, () => _publish(generation, null));
+    } catch (error) {
+      // The strip has no room for a failure state that a snackbar states
+      // better, and leaving a dead bar over the output would outlive the read.
+      _publish(generation, null);
+      onError(uploadErrorText(error, fileName));
     } finally {
-      board.release(key);
-      _attaching = false;
-      if (!inBatch) board._releaseReservation(key, this);
+      _inFlight = false;
     }
   }
 
-  void _settlePendingClear() {
-    final pending = _pendingClear;
-    _pendingClear = null;
-    pending?.timer.cancel();
-    pending?.clear();
+  void _publish(int generation, AttachProgress? value) {
+    if (_disposed || generation != _generation) return;
+    progress.value = value;
   }
 
   void dispose() {
@@ -237,11 +166,7 @@ class TerminalAttachmentUploader {
     if (_holders > 0) return;
     if (_disposed) return;
     _disposed = true;
-    // A view still showing the terminal keeps the finished state up for the
-    // whole hold; with nobody watching there is nothing left to hold for.
-    final key = _pendingClear?.key;
-    if (key == null || !board.shownElsewhere(key, ownHolds: 1)) {
-      _settlePendingClear();
-    }
+    _clearTimer?.cancel();
+    progress.dispose();
   }
 }

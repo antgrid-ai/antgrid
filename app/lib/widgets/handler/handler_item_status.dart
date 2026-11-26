@@ -1,8 +1,9 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
 import '../../billing/pricing_visibility.dart';
 import '../../design/ab_colors.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 
 /// The Handler surface's shared status vocabulary — the words and colours every
@@ -11,55 +12,14 @@ import '../../models/handler_state.dart';
 /// on desktop: two of them describing the same session in different words is
 /// read as two different sessions.
 
-/// How loudly a status is spoken, independent of any palette.
-///
-/// The Handler surface is painted by two design systems while it migrates, and
-/// the words must not diverge between them: this is the one place a status is
-/// given a tone, and each palette only resolves the tone to a colour.
-enum HandlerTone { quiet, secondary, accent, success, warning, error }
-
-/// Tone for one backlog item's status word.
-HandlerTone handlerItemTone(String status) => switch (status) {
-  'done' => HandlerTone.success,
-  'failed' => HandlerTone.error,
-  'blocked' => HandlerTone.warning,
-  'active' => HandlerTone.accent,
-  _ => HandlerTone.quiet,
+/// Palette for one backlog item's status word.
+Color handlerItemStatusColor(AbColors p, String status) => switch (status) {
+  'done' => p.success,
+  'failed' => p.error,
+  'blocked' => p.warning,
+  'active' => p.accent,
+  _ => p.textMuted,
 };
-
-/// A tone as text or glyph ink on a Carbon surface.
-Color handlerToneColor(CarbonColors c, HandlerTone tone) => switch (tone) {
-  HandlerTone.quiet => c.textHelper,
-  HandlerTone.secondary => c.textSecondary,
-  HandlerTone.accent => c.linkPrimary,
-  HandlerTone.success => c.supportSuccess,
-  HandlerTone.warning => c.supportCautionMajor,
-  HandlerTone.error => c.textError,
-};
-
-/// A tone as a Carbon tag fill.
-CarbonTagColor handlerToneTagColor(HandlerTone tone) => switch (tone) {
-  HandlerTone.quiet => CarbonTagColor.gray,
-  HandlerTone.secondary => CarbonTagColor.coolGray,
-  HandlerTone.accent => CarbonTagColor.blue,
-  HandlerTone.success => CarbonTagColor.green,
-  HandlerTone.warning => CarbonTagColor.warmGray,
-  HandlerTone.error => CarbonTagColor.red,
-};
-
-Color _abToneColor(AbColors p, HandlerTone tone) => switch (tone) {
-  HandlerTone.quiet => p.textMuted,
-  HandlerTone.secondary => p.textSecondary,
-  HandlerTone.accent => p.accent,
-  HandlerTone.success => p.success,
-  HandlerTone.warning => p.warning,
-  HandlerTone.error => p.error,
-};
-
-/// Palette for one backlog item's status word, on a surface still painted by
-/// the Antgrid palette.
-Color handlerItemStatusColor(AbColors p, String status) =>
-    _abToneColor(p, handlerItemTone(status));
 
 /// The status an item carries until something happens to it, which on a fresh
 /// backlog is every row at once.
@@ -68,13 +28,13 @@ const handlerDefaultItemStatus = 'queued';
 /// Floor for the status column, so `done` and `blocked` leave their item texts
 /// on the same edge. The status word is a row's leading widget, and letting its
 /// own length set the indent lines up no two items. Sized for the longest
-/// status in today's vocabulary at the Carbon code size.
+/// status in today's vocabulary at mono [AbTokens.fontXxs].
 ///
 /// A floor, not a fixed width: `status` is parsed as free text and
-/// [handlerItemTone] has a fallback arm, so a word this constant never
+/// [handlerItemStatusColor] has a fallback arm, so a word this constant never
 /// anticipated widens its own row rather than breaking across three lines
-/// inside a fixed box.
-const handlerStatusColumnWidth = CarbonSpacing.spacing09;
+/// inside a 44px box.
+const handlerStatusColumnWidth = 44.0;
 
 /// The column itself, so every word that stands in it — item status or not —
 /// is one description of one thing. A row hand-rolling the same floor, tier and
@@ -85,24 +45,19 @@ Widget _statusColumn(Widget child) => ConstrainedBox(
   child: Align(alignment: Alignment.centerRight, child: child),
 );
 
-Widget _statusWord(BuildContext context, String word, HandlerTone tone) {
-  final theme = CarbonTheme.of(context);
-  return Text(
-    word,
-    maxLines: 1,
-    softWrap: false,
-    overflow: TextOverflow.ellipsis,
-    style: theme.typography.code.copyWith(
-      color: handlerToneColor(theme.colors, tone),
-    ),
-  );
-}
+Widget _statusWord(String word, Color color) => Text(
+  word,
+  maxLines: 1,
+  softWrap: false,
+  overflow: TextOverflow.ellipsis,
+  style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs, color: color),
+);
 
 /// One backlog item's status, in a column of its own — for the Handler card,
 /// where every item is one line and a column is the only place a second fact
 /// can stand. The backlog drawer gives each item a line under its text and puts
 /// the same word there, beside what happened; what stands in ITS leading column
-/// is [HandlerRunNumber]. The words and the tones are shared either way, which
+/// is [HandlerRunNumber]. The words and the colours are shared either way, which
 /// is what the surfaces owe each other — the same item described in two
 /// vocabularies reads as two different items.
 ///
@@ -120,7 +75,7 @@ class HandlerItemStatusLabel extends StatelessWidget {
   Widget build(BuildContext context) => _statusColumn(
     status == handlerDefaultItemStatus
         ? const SizedBox.shrink()
-        : _statusWord(context, status, handlerItemTone(status)),
+        : _statusWord(status, handlerItemStatusColor(context.antgrid, status)),
   );
 }
 
@@ -138,7 +93,7 @@ const handlerPendingInstructionLabel = 'sending';
 /// A floor, not a fixed width, for the reason [handlerStatusColumnWidth] is one:
 /// a backlog long enough to run past three digits widens its own row rather than
 /// clipping the one thing every dependency on the sheet points at.
-const handlerRunNumberWidth = CarbonSpacing.spacing06;
+const handlerRunNumberWidth = 18.0;
 
 /// The run-order column, so a number and the gap a row without one leaves are
 /// one description of one thing.
@@ -183,19 +138,22 @@ class HandlerRunNumber extends StatelessWidget {
   final String status;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    return _runColumn(
-      Text(
-        '$number',
-        maxLines: 1,
-        softWrap: false,
-        style: theme.typography.code.copyWith(
-          color: handlerToneColor(theme.colors, handlerItemTone(status)),
-        ),
+  Widget build(BuildContext context) => _runColumn(
+    Text(
+      '$number',
+      maxLines: 1,
+      softWrap: false,
+      // On the title's baseline, not centred in its band. A 10px mono numeral
+      // and 14px sans prose are two faces at two sizes, and each finds its own
+      // baseline inside a box of the same height — leaving the number floating
+      // above the words it numbers by whatever the two fonts' metrics differ by.
+      strutStyle: AbListRow.titleStrut,
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXxs,
+        color: handlerItemStatusColor(context.antgrid, status),
       ),
-    );
-  }
+    ),
+  );
 }
 
 /// The same column with nothing in it, for a row that has no place in the order
@@ -232,31 +190,24 @@ String handlerRunStateLabel(HandlerRunState state, {bool asksOnly = false}) =>
 /// is moving or the user is wanted; watching is deliberately quiet, because it
 /// is the state a session sits in for hours.
 ///
-/// An ask drops to [HandlerTone.secondary] rather than to the quiet tier
+/// An ask drops to [AbColors.textSecondary] rather than to the muted tier
 /// `watching` gets: it is still something the user is expected to answer, so it
 /// must not read as background, but it is not the stopped agent that earns the
 /// accent. The tone is the only part of the split a user takes in without
 /// reading, so it has to move with the word.
-HandlerTone handlerRunStateTone(
-  HandlerRunState state, {
-  bool asksOnly = false,
-}) => switch (state) {
-  HandlerRunState.watching => HandlerTone.quiet,
-  HandlerRunState.handling => HandlerTone.accent,
-  HandlerRunState.needsYou =>
-    asksOnly ? HandlerTone.secondary : HandlerTone.accent,
-  HandlerRunState.parked => HandlerTone.warning,
-};
-
-/// [handlerRunStateTone] on a surface still painted by the Antgrid palette.
 Color handlerRunStateColor(
   AbColors p,
   HandlerRunState state, {
   bool asksOnly = false,
-}) => _abToneColor(p, handlerRunStateTone(state, asksOnly: asksOnly));
+}) => switch (state) {
+  HandlerRunState.watching => p.textMuted,
+  HandlerRunState.handling => p.accent,
+  HandlerRunState.needsYou => asksOnly ? p.textSecondary : p.accent,
+  HandlerRunState.parked => p.warning,
+};
 
 /// The word one armed session is reported with on a surface that stays on
-/// screen, and the tone it is spoken in.
+/// screen, and the tone it is painted in.
 ///
 /// [handlerRunStateLabel] answers for the run state alone, and for three
 /// sessions that answer is a lie. An agent that reports nothing the handler can
@@ -270,7 +221,8 @@ Color handlerRunStateColor(
 /// has already happened: a session cannot be handling a pause that never
 /// reached the handler, so a coverage caveat there would describe its past
 /// instead of its present.
-({String label, HandlerTone tone}) handlerSessionStatusTone(
+({String label, Color tone}) handlerSessionStatusWord(
+  AbColors p,
   HandlerSessionState session,
 ) {
   // `asksOnly` reads the rows the capability gate has already been over, so a
@@ -279,38 +231,28 @@ Color handlerRunStateColor(
   if (session.runState != HandlerRunState.watching) {
     return (
       label: handlerRunStateLabel(session.runState, asksOnly: asksOnly),
-      tone: handlerRunStateTone(session.runState, asksOnly: asksOnly),
+      tone: handlerRunStateColor(p, session.runState, asksOnly: asksOnly),
     );
   }
   if (session.observability == HandlerObservability.unsupported) {
-    return (label: 'Not watched', tone: HandlerTone.warning);
+    return (label: 'Not watched', tone: p.warning);
   }
   return switch (session.availability?.state) {
     // Null is "nobody said" and keeps the ordinary word: an older bridge that
     // never reports availability must not read as a broken one.
     null || HandlerAvailabilityState.available => (
       label: handlerRunStateLabel(HandlerRunState.watching),
-      tone: handlerRunStateTone(HandlerRunState.watching),
+      tone: handlerRunStateColor(p, HandlerRunState.watching),
     ),
     HandlerAvailabilityState.unavailable => (
       label: 'Monitoring unavailable',
-      tone: HandlerTone.warning,
+      tone: p.warning,
     ),
     HandlerAvailabilityState.preparing || HandlerAvailabilityState.unknown => (
       label: 'Waiting for agent',
-      tone: HandlerTone.warning,
+      tone: p.warning,
     ),
   };
-}
-
-/// [handlerSessionStatusTone] on a surface still painted by the Antgrid
-/// palette.
-({String label, Color tone}) handlerSessionStatusWord(
-  AbColors p,
-  HandlerSessionState session,
-) {
-  final word = handlerSessionStatusTone(session);
-  return (label: word.label, tone: _abToneColor(p, word.tone));
 }
 
 /// What a park is BLAMED on, in the words every surface that names one uses.

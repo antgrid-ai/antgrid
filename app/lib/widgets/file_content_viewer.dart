@@ -1,22 +1,28 @@
 import 'dart:async';
 
-import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 import 'package:re_editor/re_editor.dart';
+import 'package:re_highlight/styles/vs2015.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_scrollbar.dart';
+import '../design/widgets/ab_search_field.dart';
+import '../design/widgets/ab_toolbar.dart';
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import '../util/detached.dart';
-import 'carbon_code_style.dart';
-import 'carbon_empty_state.dart';
-import 'carbon_send_to_agent_button.dart';
 import 'code_syntax.dart';
 import 'file_download.dart';
 import 'send_capture_to_agent.dart';
+import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'viewer_header.dart';
 import 'viewer_support.dart';
@@ -76,11 +82,9 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   int _syncGeneration = 0;
   Timer? _editorReadyTimer;
   bool _showSearch = false;
-  // Escape closes the bar even with a query typed; CarbonSearch alone would
-  // spend the first Escape clearing it and ignore the second.
-  late final FocusNode _searchFocusNode = FocusNode(onKeyEvent: _onSearchKey);
+  final FocusNode _searchFocusNode = FocusNode();
 
-  /// Anchors the follow-up comment popover under [CarbonSendToAgentButton] instead
+  /// Anchors the follow-up comment popover under [SendToAgentButton] instead
   /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
   final LayerLink _sendToAgentLink = LayerLink();
 
@@ -195,12 +199,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     _markedLine = line;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final sc = _scrollController?.verticalScroller;
-      if (!mounted || sc == null || !sc.hasClients) return;
+      if (sc == null || !sc.hasClients) return;
       final viewportHeight = sc.position.viewportDimension;
-      final lineHeight = CarbonCodeStyle.of(
-        context,
-      ).lineHeight(MediaQuery.textScalerOf(context));
-      final offset = (line - 1) * lineHeight - (viewportHeight / 2) + lineHeight;
+      final offset =
+          (line - 1) * kCodeLineHeight - (viewportHeight / 2) + kCodeLineHeight;
       sc.animateTo(
         offset.clamp(sc.position.minScrollExtent, sc.position.maxScrollExtent),
         duration: const Duration(milliseconds: 300),
@@ -261,14 +263,6 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     }
   }
 
-  KeyEventResult _onSearchKey(FocusNode node, KeyEvent event) {
-    if (event.logicalKey != LogicalKeyboardKey.escape) {
-      return KeyEventResult.ignored;
-    }
-    if (event is KeyDownEvent && _showSearch) _toggleSearch();
-    return KeyEventResult.handled;
-  }
-
   void _toggleSearch() {
     setState(() {
       _showSearch = !_showSearch;
@@ -314,9 +308,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
           painter: _LineMarkPainter(
             layout: layout,
             lineIndex: line - 1,
-            color: CarbonTheme.of(
-              context,
-            ).colors.interactive.withValues(alpha: 0.18),
+            color: context.antgrid.accent.withValues(alpha: 0.18),
           ),
         ),
       ),
@@ -407,13 +399,13 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   @override
   Widget build(BuildContext context) {
     if (widget.isLoading) {
-      return const ViewerLoadingState();
+      return const AbLoading();
     }
 
     if (widget.fileContent == null) {
-      return const CarbonEmptyState(
-        icon: CarbonIcons.document,
-        heading: 'Select a file to view',
+      return const AbEmptyState(
+        icon: AbIcons.files,
+        title: 'Select a file to view',
       );
     }
 
@@ -423,20 +415,16 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       return _buildError(content.error!);
     }
 
-    final theme = CarbonTheme.of(context);
-    final colors = theme.colors;
-
     if (_controller == null) {
       return Center(
         child: Text(
           'No content',
-          style: theme.typography.body.copyWith(color: colors.textSecondary),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
       );
     }
 
     final lang = codeLanguageForPath(content.path);
-    final codeStyle = CarbonCodeStyle.of(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -476,30 +464,22 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                         scrollbarBuilder: (context, child, details) {
                           final horizontal =
                               details.direction == AxisDirection.right;
-                          return RawScrollbar(
+                          return AbScrollbar(
                             controller: horizontal
                                 ? _scrollController!.horizontalScroller
                                 : _scrollController!.verticalScroller,
                             scrollbarOrientation: horizontal
                                 ? ScrollbarOrientation.bottom
                                 : ScrollbarOrientation.right,
-                            thumbVisibility: true,
-                            thickness: CarbonSpacing.spacing03,
-                            crossAxisMargin: CarbonSpacing.spacing01,
-                            thumbColor: colors.borderStrong01,
                             child: child,
                           );
                         },
                         style: CodeEditorStyle(
-                          fontSize: codeStyle.text.fontSize,
-                          fontFamily: codeStyle.text.fontFamily,
-                          fontFamilyFallback: codeStyle.text.fontFamilyFallback,
-                          fontHeight: codeStyle.text.height,
-                          textColor: colors.textPrimary,
-                          hintTextColor: colors.textPlaceholder,
-                          backgroundColor: colors.background,
-                          selectionColor: colors.highlight,
-                          cursorColor: colors.textPrimary,
+                          fontSize: kCodeFontSize,
+                          fontFamily: AbTokens.fontMono,
+                          fontFamilyFallback: AbTokens.fontMonoFallbacks,
+                          fontHeight: kCodeFontHeight,
+                          backgroundColor: context.antgrid.bgDeepest,
                           codeTheme: lang != null
                               ? CodeHighlightTheme(
                                   languages: {
@@ -507,7 +487,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                                       mode: lang.mode,
                                     ),
                                   },
-                                  theme: codeStyle.highlightTheme,
+                                  theme: vs2015Theme,
                                 )
                               : null,
                         ),
@@ -554,12 +534,12 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                       _lineLayout != null)
                     _buildLineMark(_markedLine!, _lineLayout!),
                   if (!_editorReady)
-                    ColoredBox(
-                      color: colors.background,
-                      child: const ViewerLoadingState(),
+                    Container(
+                      color: context.antgrid.bgDeepest,
+                      child: const AbLoading(),
                     ),
                   if (showSendButton)
-                    CarbonSendToAgentButton(
+                    SendToAgentButton(
                       link: _sendToAgentLink,
                       onPressed: () => detached(
                         'FileContentViewer',
@@ -578,35 +558,32 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
 
   Widget _buildHeader(FileContent content) {
     final embedded = ViewerChrome.embeddedIn(context);
-    return ViewerToolbar(
-      children: [
-        if (embedded)
-          const Spacer()
-        else
-          Expanded(
-            child: Align(
+    return AbToolbar.actions(
+      center: embedded
+          ? const SizedBox.shrink()
+          : Align(
               alignment: Alignment.centerLeft,
               child: ViewerPathBreadcrumb(path: content.path),
             ),
-          ),
-        ViewerIconButton(
-          icon: CarbonIcons.search,
-          label: 'Search in file',
-          selected: _showSearch,
-          onPressed: _toggleSearch,
+      trailing: [
+        AbIconButton(
+          icon: AbIcons.search,
+          tone: _showSearch ? AbIconButtonTone.accent : AbIconButtonTone.normal,
+          onTap: _toggleSearch,
+          tooltip: 'Search in file',
         ),
         if (widget.onShowPreview != null)
-          ViewerIconButton(
-            icon: CarbonIcons.view,
-            label: 'Show preview',
-            onPressed: widget.onShowPreview,
+          AbIconButton(
+            icon: AbIcons.preview,
+            onTap: widget.onShowPreview,
+            tooltip: 'Show preview',
           ),
         if (!embedded) FileDownloadButton(content: content),
         if (!embedded)
-          ViewerIconButton(
-            icon: CarbonIcons.close,
-            label: 'Close file',
-            onPressed: widget.onClose,
+          AbIconButton(
+            icon: AbIcons.close,
+            onTap: widget.onClose,
+            tooltip: 'Close file',
           ),
       ],
     );
@@ -616,62 +593,66 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     final fc = _findController;
     if (fc == null) return const SizedBox.shrink();
 
-    return ViewerToolbar(
-      children: [
-        Expanded(
-          child: CarbonSearch(
-            controller: fc.findInputController,
-            focusNode: _searchFocusNode,
-            placeholder: 'Find...',
-            semanticLabel: 'Find in file',
-            // No onChanged needed — CodeFindController already listens
-            // to its own findInputController and triggers search internally.
-            onSubmitted: (_) => fc.nextMatch(),
-          ),
-        ),
+    return AbToolbar.actions(
+      center: AbSearchField(
+        controller: fc.findInputController,
+        focusNode: _searchFocusNode,
+        hint: 'Find...',
+        prefixIcon: null,
+        showClearButton: false,
+        debounce: null,
+        // No onChanged needed — CodeFindController already listens
+        // to its own findInputController and triggers search internally.
+        onSubmitted: (_) => fc.nextMatch(),
+      ),
+      trailing: [
         ValueListenableBuilder<CodeFindValue?>(
           valueListenable: fc,
           builder: (context, value, _) {
-            final theme = CarbonTheme.of(context);
             final result = value?.result;
-            final hasQuery = (value?.option.pattern ?? '').isNotEmpty;
-            final matches = result?.matches.length ?? 0;
-            final empty = matches == 0;
-            final text = !empty
-                ? '${result!.index + 1}/$matches'
-                : hasQuery
-                ? '0/0'
-                : '';
-            return ConstrainedBox(
-              constraints: const BoxConstraints(
-                minWidth: CarbonSpacing.spacing09 + CarbonSpacing.spacing03,
-              ),
+            if (result == null || result.matches.isEmpty) {
+              final hasQuery = (value?.option.pattern ?? '').isNotEmpty;
+              return SizedBox(
+                width: 56,
+                child: Text(
+                  hasQuery ? '0/0' : '',
+                  textAlign: TextAlign.center,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: hasQuery
+                        ? context.antgrid.error
+                        : context.antgrid.textDisabled,
+                  ),
+                ),
+              );
+            }
+            return SizedBox(
+              width: 56,
               child: Text(
-                text,
+                '${result.index + 1}/${result.matches.length}',
                 textAlign: TextAlign.center,
-                style: theme.typography.helper.copyWith(
-                  color: empty && hasQuery
-                      ? theme.colors.textError
-                      : theme.colors.textSecondary,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: context.antgrid.textSecondary,
                 ),
               ),
             );
           },
         ),
-        ViewerIconButton(
-          icon: CarbonIcons.chevronUp,
-          label: 'Previous match',
-          onPressed: () => fc.previousMatch(),
+        AbIconButton(
+          icon: AbIcons.arrowUp,
+          onTap: () => fc.previousMatch(),
+          tooltip: 'Previous match',
         ),
-        ViewerIconButton(
-          icon: CarbonIcons.chevronDown,
-          label: 'Next match',
-          onPressed: () => fc.nextMatch(),
+        AbIconButton(
+          icon: AbIcons.arrowDown,
+          onTap: () => fc.nextMatch(),
+          tooltip: 'Next match',
         ),
-        ViewerIconButton(
-          icon: CarbonIcons.close,
-          label: 'Close search',
-          onPressed: _toggleSearch,
+        AbIconButton(
+          icon: AbIcons.close,
+          onTap: _toggleSearch,
+          tooltip: 'Close search',
         ),
       ],
     );
@@ -680,9 +661,51 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   Widget _buildError(String error) {
     final errorLower = error.toLowerCase();
     if (errorLower.contains('not found') || errorLower.contains('deleted')) {
-      return ViewerDeletedState(onClose: widget.onClose);
+      return AbEmptyState(
+        icon: AbIcons.close,
+        title: 'This file was deleted',
+        action: GestureDetector(
+          onTap: widget.onClose,
+          child: Text(
+            'Close',
+            style: AbTokens.sansStyle(color: context.antgrid.accent),
+          ),
+        ),
+      );
     }
-    return ViewerErrorNotice(message: error);
+    // Boxed error variant \u2014 intentionally not AbEmptyState (only site).
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.all(24), // 24px non-ladder error card margin
+        padding: const EdgeInsets.all(AbTokens.space16),
+        decoration: BoxDecoration(
+          color: context.antgrid.bgSurface,
+          border: Border.all(color: context.antgrid.borderDefault),
+          borderRadius: AbTokens.borderRadius8,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '!',
+              style: TextStyle(
+                fontSize: AbTokens.fontDisplayMd,
+                color: context.antgrid.error,
+              ),
+            ),
+            const SizedBox(height: AbTokens.space12),
+            Text(
+              error,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontBody,
+                color: context.antgrid.textSecondary,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

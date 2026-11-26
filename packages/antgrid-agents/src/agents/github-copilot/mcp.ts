@@ -1,6 +1,5 @@
 import { join } from "node:path";
 import { materializeJson, NO_INJECTION, toPosixPath } from "../launch-inject";
-import { mcpCommands } from "../mcp-commands";
 import type { LaunchAugmentation, McpInjectCtx } from "../types";
 
 /**
@@ -20,13 +19,12 @@ import type { LaunchAugmentation, McpInjectCtx } from "../types";
  * tree via `--plugin-dir`, and a `.mcp.json` inside it would register the
  * server a second time.
  */
-export function inject(ctx: McpInjectCtx): LaunchAugmentation {
-  const { abDir } = ctx;
+export function inject({ abDir, mcpCommand }: McpInjectCtx): LaunchAugmentation {
   const configPath = join(abDir, "mcp", "copilot.json");
   const config = {
-    mcpServers: Object.fromEntries(mcpCommands(ctx).map(([name, command]) => [name,
-      { type: "local", command: command.binary, args: [...command.preargs], tools: ["*"] },
-    ])),
+    mcpServers: {
+      antgrid: { type: "local", command: mcpCommand.binary, args: [...mcpCommand.preargs], tools: ["*"] },
+    },
   };
   if (!materializeJson("Copilot MCP config", { [configPath]: config })) return NO_INJECTION;
   return { args: ["--additional-mcp-config", `@${toPosixPath(configPath)}`], env: {} };

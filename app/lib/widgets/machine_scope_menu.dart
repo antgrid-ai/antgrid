@@ -1,8 +1,16 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:collection/collection.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_status_tone.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_separator.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../models/agent_work_status.dart';
 import '../models/drawer_entry.dart';
 import '../models/recent_session_row.dart';
@@ -16,32 +24,17 @@ import '../providers/project_work_status.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/agent_transport.dart' show selectedTargetProvider;
 import '../providers/ui_attention_providers.dart';
-import '../util/detached.dart';
+import 'drawer_entry_row.dart' show DrawerRemoveButton;
+import 'new_session/environment_menu.dart' show PanelRow, PanelSectionHeader;
 import '../util/relative_time.dart';
-import 'drawer_entry_row.dart' show confirmRemoveDrawerEntry;
-import 'machine_summary_tile.dart';
 
 /// The sidebar's machine scope switcher: what the scope shows, and how much of
-/// it is alive. Opens the scope menu ([machineScopeEntries]).
-class MachineScopeButton extends ConsumerStatefulWidget {
+/// it is alive. Opens [MachineScopePanel].
+class MachineScopeButton extends ConsumerWidget {
   const MachineScopeButton({super.key});
 
   @override
-  ConsumerState<MachineScopeButton> createState() => _MachineScopeButtonState();
-}
-
-class _MachineScopeButtonState extends ConsumerState<MachineScopeButton> {
-  final _menu = CarbonPopupController();
-
-  @override
-  void dispose() {
-    _menu.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final nav = CarbonSideNavScope.of(context);
+  Widget build(BuildContext context, WidgetRef ref) {
     final machines = ref.watch(machineDirectoryProvider);
     final scope = ref.watch(machineScopeProvider);
     final inScope = ref.watch(scopedMachineIdsProvider);
@@ -51,121 +44,122 @@ class _MachineScopeButtonState extends ConsumerState<MachineScopeButton> {
         .fold<int>(0, (n, v) => n + v.liveCount);
     final label = machineScopeLabel(machines, scope);
     final summary = '${online.length} online · $running running';
-    final notifier = ref.read(machineScopeProvider.notifier);
-    final container = ref.container;
     return Padding(
-      padding: EdgeInsetsDirectional.fromSTEB(
-        nav.inset,
-        CarbonSpacing.spacing03,
-        nav.endInset,
-        CarbonSpacing.spacing02,
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.drawerGutter,
+        AbTokens.space8,
+        AbTokens.drawerGutter,
+        AbTokens.space4,
       ),
-      child: CarbonMenu(
-        controller: _menu,
-        // Pinned at the sidebar's foot, so there is no room below.
-        preferAbove: true,
-        // Live, so ticking several machines does not reopen the menu each time,
-        // and a machine coming online while it is open moves in place.
-        closeOnToggle: false,
-        minWidth: 260,
-        semanticLabel: 'Machine scope',
-        entries: machineScopeEntries(
-          machines: machines,
-          scope: scope,
-          rows: ref.watch(recentSessionsProvider),
-          statuses: ref.watch(recentSessionStatusesProvider),
-          entries: ref.watch(drawerEntriesProvider),
-          onToggle: (m) => notifier.toggle(m.id, online: m.online),
-          onSelectAll: () =>
-              notifier.selectAll([for (final m in machines) m.id]),
-          onHideOffline: notifier.setHideOffline,
-          onForget: (entry) => detached(
-            'MachineScopeButton',
-            'forget machine failed',
-            () => confirmRemoveDrawerEntry(context, container, entry),
+      child: Builder(
+        builder: (anchorContext) => Semantics(
+          button: true,
+          label: 'Machine scope: $label, $summary',
+          excludeSemantics: true,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(color: context.antgrid.borderDefault),
+              borderRadius: AbTokens.borderRadius5,
+            ),
+            child: AbListRow(
+              leading: AbIcon(
+                AbIcons.deviceDesktop,
+                size: AbTokens.iconButtonGlyph,
+                color: context.antgrid.textSecondary,
+              ),
+              title: Text(
+                label,
+                style: AbTokens.sansStyle(fontSize: AbTokens.fontMd),
+              ),
+              subtitle: Text(summary),
+              trailing: AbIcon(
+                AbIcons.chevronDown,
+                size: AbTokens.fontSm,
+                color: context.antgrid.textMuted,
+              ),
+              density: AbRowDensity.sm,
+              horizontalPadding: AbTokens.space8,
+              hoverable: true,
+              onTap: () async {
+                final anchor = abMenuAnchorRect(anchorContext);
+                if (anchor == null) return;
+                await showAbPanel<void>(
+                  context: anchorContext,
+                  anchorRect: anchor,
+                  // Pinned at the sidebar's foot, so there is no room below.
+                  preferred: AbMenuPlacement.above,
+                  width: 300,
+                  builder: (_) => const MachineScopePanel(),
+                );
+              },
+            ),
           ),
-          onManage: () => openMachineManagement(container),
-        ),
-        child: MachineSummaryTile(
-          leading: const CarbonIcon(CarbonIcons.screen),
-          title: label,
-          summary: summary,
-          semanticLabel: 'Machine scope: $label, $summary',
-          onPressed: _menu.toggle,
         ),
       ),
     );
   }
 }
 
-/// One check item per machine, then the scope-wide toggles.
-///
-/// A machine's status line rides the item's trailing text, and a machine whose
-/// remote access is off carries the lock: both say what checking it would show.
-/// Forgetting a remote machine is a submenu rather than an item per machine,
-/// so the destructive action is never one slip from a checkbox.
-List<CarbonMenuEntry> machineScopeEntries({
-  required List<MachineInfo> machines,
-  required MachineScope scope,
-  required List<RecentSessionRow> rows,
-  required Map<String, AgentWorkStatus> statuses,
-  required List<DrawerEntry> entries,
-  required ValueChanged<MachineInfo> onToggle,
-  required VoidCallback onSelectAll,
-  required ValueChanged<bool> onHideOffline,
-  required ValueChanged<RemoteAgentEntry> onForget,
-  required VoidCallback onManage,
-}) {
-  final forgettable = [
-    for (final m in machines)
-      if (entries.firstWhereOrNull((e) => e.machineUuid == m.id)
-          case final RemoteAgentEntry e)
-        e,
-  ];
-  return [
-    CarbonMenuGroup(
-      label: 'Machines',
+/// One checkbox row per machine, then the scope-wide toggles. Live, so a
+/// machine coming online while the menu is open moves without reopening it.
+class MachineScopePanel extends ConsumerWidget {
+  const MachineScopePanel({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final machines = ref.watch(machineDirectoryProvider);
+    final scope = ref.watch(machineScopeProvider);
+    final rows = ref.watch(recentSessionsProvider);
+    final statuses = ref.watch(recentSessionStatusesProvider);
+    final entries = ref.watch(drawerEntriesProvider);
+    final notifier = ref.read(machineScopeProvider.notifier);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const PanelSectionHeader('Machines'),
         for (final m in machines)
-          CarbonMenuCheckItem(
-            label: m.isLocal ? '${m.name} (this machine)' : m.name,
+          _ScopeMachineRow(
+            key: ValueKey(m.id),
+            machine: m,
             checked: scope.isChecked(m.id, online: m.online),
-            icon: m.remoteAccessEnabled == false
-                ? const CarbonIcon(CarbonIcons.locked)
-                : null,
-            shortcut: [
-              machineStatusLine(m, rows, statuses),
-              if (m.remoteAccessEnabled == false) 'remote off',
-            ].join(' · '),
-            onChanged: (_) => onToggle(m),
+            hiddenAsOffline: scope.hideOffline && !m.online,
+            status: machineStatusLine(m, rows, statuses),
+            entry: entries.firstWhereOrNull((e) => e.machineUuid == m.id),
+            onToggle: () => notifier.toggle(m.id, online: m.online),
           ),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: AbTokens.space4),
+          child: AbSeparator.horizontal(weight: AbSeparatorWeight.strong),
+        ),
+        PanelRow(
+          icon: AbIcons.check,
+          label: 'Select all',
+          mono: false,
+          selected: false,
+          onTap: () => notifier.selectAll([for (final m in machines) m.id]),
+        ),
+        PanelRow(
+          icon: AbIcons.eyeClosed,
+          label: 'Hide offline machines',
+          mono: false,
+          selected: scope.hideOffline,
+          onTap: () => notifier.setHideOffline(!scope.hideOffline),
+        ),
+        PanelRow(
+          icon: AbIcons.settings,
+          label: 'Manage machines…',
+          mono: false,
+          selected: false,
+          onTap: () {
+            Navigator.of(context).pop();
+            openMachineManagement(ref.container);
+          },
+        ),
       ],
-    ),
-    const CarbonMenuDivider(),
-    CarbonMenuItem(label: 'Select all', onPressed: onSelectAll),
-    CarbonMenuCheckItem(
-      label: 'Hide offline machines',
-      checked: scope.hideOffline,
-      onChanged: onHideOffline,
-    ),
-    if (forgettable.isNotEmpty)
-      CarbonMenuSubmenu(
-        label: 'Forget machine',
-        entries: [
-          for (final e in forgettable)
-            CarbonMenuItem(
-              label: e.displayName,
-              kind: CarbonMenuItemKind.danger,
-              onPressed: () => onForget(e),
-            ),
-        ],
-      ),
-    CarbonMenuItem(
-      label: 'Manage machines…',
-      icon: const CarbonIcon(CarbonIcons.settings),
-      onPressed: onManage,
-    ),
-  ];
+    );
+  }
 }
 
 /// The machine's state in a few words: "2 running", "Online · idle",
@@ -231,3 +225,129 @@ void openMachineManagement(ProviderContainer container) {
       );
 }
 
+class _ScopeMachineRow extends StatefulWidget {
+  const _ScopeMachineRow({
+    super.key,
+    required this.machine,
+    required this.checked,
+    required this.hiddenAsOffline,
+    required this.status,
+    required this.entry,
+    required this.onToggle,
+  });
+
+  final MachineInfo machine;
+  final bool checked;
+  final bool hiddenAsOffline;
+  final String status;
+
+  /// The drawer entry behind a remote machine, which is what "forget" acts on.
+  final DrawerEntry? entry;
+  final VoidCallback onToggle;
+
+  @override
+  State<_ScopeMachineRow> createState() => _ScopeMachineRowState();
+}
+
+class _ScopeMachineRowState extends State<_ScopeMachineRow> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.machine;
+    final p = context.antgrid;
+    final remote = switch (m.remoteAccessEnabled) {
+      true => 'remote on',
+      false => 'remote off',
+      null => null,
+    };
+    final entry = widget.entry;
+    final forget = (_hovered || _focused) && entry is RemoteAgentEntry;
+    return Semantics(
+      checked: widget.checked,
+      label: '${m.name}, ${m.online ? 'online' : 'offline'}, ${widget.status}',
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: Opacity(
+          // Still choosable — the box is the user's pick — but visibly not
+          // what the scope shows while "Hide offline" is on.
+          opacity: widget.hiddenAsOffline ? AbTokens.opacityDisabled : 1,
+          child: AbListRow(
+            leading: AbStatusDot(
+              tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
+              style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
+            ),
+            title: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    m.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontSm,
+                      color: p.textPrimary,
+                    ),
+                  ),
+                ),
+                if (m.isLocal) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  Text(
+                    'this machine',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: p.textMuted,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            subtitle: Text(widget.status),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (forget)
+                  DrawerRemoveButton(entry: entry)
+                else if (remote != null) ...[
+                  if (m.remoteAccessEnabled == false) ...[
+                    AbIcon(
+                      AbIcons.lock,
+                      size: AbTokens.fontXs,
+                      color: p.textMuted,
+                    ),
+                    const SizedBox(width: AbTokens.space4),
+                  ],
+                  Text(
+                    remote,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: p.textMuted,
+                    ),
+                  ),
+                ],
+                const SizedBox(width: AbTokens.space8),
+                SizedBox(
+                  width: AbTokens.fontSm,
+                  child: widget.checked
+                      ? AbIcon(
+                          AbIcons.check,
+                          size: AbTokens.fontSm,
+                          color: p.accent,
+                        )
+                      : null,
+                ),
+              ],
+            ),
+            density: AbRowDensity.sm,
+            horizontalPadding: AbTokens.space8,
+            hoverable: true,
+            contentFloor: AbRowContentFloor.iconButton,
+            onFocusChange: (v) => setState(() => _focused = v),
+            onTap: widget.onToggle,
+          ),
+        ),
+      ),
+    );
+  }
+}

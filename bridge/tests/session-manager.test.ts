@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import { SessionManager, isDefaultSessionName } from "../src/session-manager";
 import { buildSpawnEnv } from "../src/terminal-session";
-import { opencodeTestRuntime } from "./support/opencode-runtime";
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), "antgrid-sess-"));
@@ -1310,25 +1309,6 @@ describe("SessionManager start/stop", () => {
     sm.flushNow();
   });
 
-  it("agentSessionResumable turns true once a transcript reported before it existed is written", () => {
-    const sm = new SessionManager({
-      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
-      agentSpec: { command: "claude", name: "claude-code" },
-      sendMessage: () => {},
-    });
-    const s = sm.create("t", { tool: "claude-code" });
-    const transcript = join(dir, "late.jsonl");
-    // Claude's SessionStart names the transcript before writing it.
-    sm.setAgentSession(s.id, "sess-1", transcript);
-    expect(sm.get(s.id)?.agentSessionResumable).toBe(false);
-
-    writeFileSync(transcript, "{}\n");
-    // Every later turn re-reports the same id and path, which changes nothing.
-    sm.setAgentSession(s.id, "sess-1", transcript);
-    expect(sm.get(s.id)?.agentSessionResumable).toBe(true);
-    sm.flushNow();
-  });
-
   it("agentSessionResumable is false for a session that never resumes", () => {
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
@@ -1624,16 +1604,15 @@ describe("SessionManager initial prompt", () => {
     }
   });
 
-  it("opencode gets --prompt <text>", async () => {
+  it("opencode gets --prompt <text>", () => {
     const term = makeFakeTerm();
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
-      agentRuntime: opencodeTestRuntime,
       sendMessage: () => {},
     });
     const s = sm.create(undefined, { tool: "opencode" });
-    await sm.start(s.id, "do the thing");
+    sm.start(s.id, "do the thing");
     const args = term.spawns[0].args!;
     const i = args.indexOf("--prompt");
     expect(i).toBeGreaterThanOrEqual(0);

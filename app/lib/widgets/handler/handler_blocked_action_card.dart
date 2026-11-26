@@ -1,6 +1,9 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_button.dart';
 import '../../models/handler_state.dart';
 import 'handler_layout.dart';
 
@@ -50,35 +53,38 @@ class HandlerBlockedActionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final colors = theme.colors;
+    final p = context.antgrid;
     final e = escalation;
-    final helper = theme.typography.helper.copyWith(color: colors.textSecondary);
     // The same full-bleed band the decision card uses, so a report and a card
     // stacked in one section share a left edge and one background fill.
-    return HandlerBand(
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: handlerGutter,
+        vertical: AbTokens.space12,
+      ),
+      decoration: BoxDecoration(
+        color: p.bgSurface,
+        border: Border(
+          top: BorderSide(color: p.borderDefault),
+          bottom: BorderSide(color: p.borderDefault),
+        ),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              HandlerRail(
-                icon: CarbonIcons.security,
-                color: colors.supportWarning,
-              ),
-              const SizedBox(width: CarbonSpacing.spacing03),
+              HandlerRail(icon: AbIcons.shield, color: p.warning),
+              const SizedBox(width: AbTokens.space8),
               Expanded(
                 child: Text(
                   e.question,
-                  style: theme.typography.body.copyWith(
-                    color: colors.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
                 ),
               ),
               if (trailing != null) ...[
-                const SizedBox(width: CarbonSpacing.spacing03),
+                const SizedBox(width: AbTokens.space8),
                 trailing!,
               ],
             ],
@@ -89,45 +95,56 @@ class HandlerBlockedActionCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (e.floorRule != null) ...[
-                  const SizedBox(height: CarbonSpacing.spacing01),
+                  const SizedBox(height: AbTokens.space2),
                   Text(
                     'Safety floor: ${e.floorRule}',
-                    style: helper.copyWith(fontWeight: FontWeight.w600),
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      fontWeight: FontWeight.w600,
+                      color: p.warning,
+                    ),
                   ),
                 ],
-                const SizedBox(height: CarbonSpacing.spacing01),
-                Text(e.reasoning, style: helper),
+                const SizedBox(height: AbTokens.space2),
+                Text(
+                  e.reasoning,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
+                ),
                 if (e.draftReply.isNotEmpty) ...[
-                  const SizedBox(height: CarbonSpacing.spacing03),
-                  Text('Handler wanted to send', style: helper),
-                  const SizedBox(height: CarbonSpacing.spacing01),
+                  const SizedBox(height: AbTokens.space8),
+                  Text(
+                    'Handler wanted to send',
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.textMuted,
+                    ),
+                  ),
+                  const SizedBox(height: AbTokens.space2),
                   Text(
                     e.draftReply,
-                    // Verbatim what would have landed in the session, not
-                    // chrome. Unbounded for the same reason the decision
-                    // card's choice text is — an ellipsis hides the half the
-                    // user has to read to judge the refusal.
-                    style: theme.typography.code.copyWith(
-                      color: colors.textSecondary,
+                    // Mono: this is verbatim what would have landed in the
+                    // session, not chrome. Unbounded for the same reason the
+                    // decision card's choice text is — an ellipsis hides the
+                    // half the user has to read to judge the refusal.
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.textMuted,
                     ),
                   ),
                 ],
-                const SizedBox(height: CarbonSpacing.spacing04),
-                Wrap(
-                  spacing: CarbonSpacing.spacing03,
-                  runSpacing: CarbonSpacing.spacing03,
+                const SizedBox(height: AbTokens.space8),
+                Row(
                   children: [
-                    CarbonButton(
+                    AbButton(
                       label: handlerDismissLabel,
-                      size: CarbonButtonSize.small,
-                      onPressed: onDismiss,
+                      variant: AbButtonVariant.primary,
+                      onTap: onDismiss,
                     ),
-                    CarbonButton(
-                      label: handlerReplyInsteadLabel,
-                      kind: CarbonButtonKind.tertiary,
-                      size: CarbonButtonSize.small,
-                      onPressed: onReply,
-                    ),
+                    const SizedBox(width: AbTokens.space8),
+                    AbButton(label: handlerReplyInsteadLabel, onTap: onReply),
                   ],
                 ),
               ],

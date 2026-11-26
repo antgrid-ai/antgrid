@@ -1,8 +1,8 @@
-import 'dart:math' as math;
-
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_tooltip.dart';
 import '../../models/scheduler.dart';
 import 'scheduler_format.dart';
 
@@ -40,8 +40,6 @@ class SchedulerLaneStrip extends StatelessWidget {
   static const _laneHeight = 22.0;
   static const _axisHeight = 16.0;
   static const _dense = 12;
-  static const _dot = 8.0;
-  static const _denseDot = 6.0;
   static const _horizon = Duration(hours: 24);
 
   double _fraction(DateTime t) =>
@@ -68,9 +66,7 @@ class SchedulerLaneStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final colors = t.colors;
-    final level = CarbonLayer.of(context);
+    final p = context.antgrid;
     final built = schedulerLanes(schedules, now);
     if (built.lanes.isEmpty) return const SizedBox.shrink();
     final summary = schedulerHorizonSummary(schedules, now);
@@ -78,16 +74,13 @@ class SchedulerLaneStrip extends StatelessWidget {
     final midnight = schedulerNextMidnight(now, viewerZone);
     final midnightAt = _fraction(midnight);
     final ticks = _ticks();
-    final mono = t.typography.code.copyWith(color: colors.textSecondary);
-    // Touch density's code role is taller than the compact axis; size the
-    // axis to its own labels so they never sit on the first lane.
-    final axisHeight = math.max(
-      _axisHeight,
-      (mono.fontSize! * (mono.height ?? 1)).ceilToDouble(),
+    final mono = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXxs,
+      color: p.textSecondary,
     );
 
     Widget axis(double width) => SizedBox(
-      height: axisHeight,
+      height: _axisHeight,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -106,7 +99,7 @@ class SchedulerLaneStrip extends StatelessWidget {
               translation: const Offset(-0.5, 0),
               child: Text(
                 schedulerWeekday(midnight, viewerZone),
-                style: mono.copyWith(color: colors.textPrimary),
+                style: mono.copyWith(color: p.textPrimary),
               ),
             ),
           ),
@@ -121,23 +114,21 @@ class SchedulerLaneStrip extends StatelessWidget {
             left: tick.at * width,
             top: 0,
             bottom: 0,
-            child: Container(width: 1, color: t.borderSubtle(level)),
+            child: Container(width: 1, color: p.borderDefault),
           ),
         Positioned(
           left: midnightAt * width,
           top: 0,
           bottom: 0,
-          child: Container(width: 1, color: t.borderStrong(level)),
+          child: Container(width: 1, color: p.borderStrong),
         ),
       ],
     );
 
     Widget lane(SchedulerLane lane, double width) {
       final dense = lane.dots.length > _dense;
-      final size = dense ? _denseDot : _dot;
-      final color = dense
-          ? colors.iconSecondary.withValues(alpha: 0.55)
-          : colors.supportInfo;
+      final size = dense ? AbTokens.dotSizeSm : AbTokens.dotSizeMd;
+      final color = dense ? p.textSecondary.withValues(alpha: 0.55) : p.accent;
       return Row(
         children: [
           SizedBox(
@@ -146,16 +137,19 @@ class SchedulerLaneStrip extends StatelessWidget {
               lane.schedule.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: t.typography.label.copyWith(color: colors.textSecondary),
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textSecondary,
+              ),
             ),
           ),
-          const SizedBox(width: CarbonSpacing.spacing04),
+          const SizedBox(width: AbTokens.space12),
           SizedBox(
             width: width,
             height: _laneHeight,
             child: DecoratedBox(
               decoration: BoxDecoration(
-                border: Border(top: BorderSide(color: t.borderSubtle(level))),
+                border: Border(top: BorderSide(color: p.bgRaised)),
               ),
               child: Stack(
                 children: [
@@ -164,7 +158,7 @@ class SchedulerLaneStrip extends StatelessWidget {
                     Positioned(
                       left: _fraction(dot) * width - size / 2,
                       top: (_laneHeight - size) / 2,
-                      child: CarbonTooltip(
+                      child: AbTooltip(
                         message:
                             '${schedulerWeekday(dot, viewerZone)} ${schedulerClock(dot, viewerZone)}',
                         child: Container(
@@ -185,24 +179,37 @@ class SchedulerLaneStrip extends StatelessWidget {
       );
     }
 
-    final strong = t.typography.label.copyWith(color: colors.textPrimary);
-    final soft = t.typography.label.copyWith(color: colors.textSecondary);
-    return CarbonLayerSurface(
+    final strong = AbTokens.sansStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textPrimary,
+    );
+    final soft = AbTokens.sansStyle(
+      fontSize: AbTokens.fontSm,
+      color: p.textSecondary,
+    );
+    return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: CarbonSpacing.spacing05,
-        vertical: CarbonSpacing.spacing04,
+        horizontal: AbTokens.space16,
+        vertical: AbTokens.space12,
+      ),
+      decoration: BoxDecoration(
+        color: p.bgSurface,
+        border: Border.all(color: p.borderDefault),
+        borderRadius: AbTokens.borderRadius8,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: CarbonSpacing.spacing03,
+        spacing: AbTokens.space8,
         children: [
           Row(
-            spacing: CarbonSpacing.spacing04,
+            spacing: AbTokens.space12,
             children: [
               Text(
                 'Next 24 hours',
-                style: t.typography.heading.copyWith(
-                  color: colors.textPrimary,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontMd,
+                  fontWeight: FontWeight.w600,
+                  color: p.textPrimary,
                 ),
               ),
               Expanded(
@@ -214,8 +221,9 @@ class SchedulerLaneStrip extends StatelessWidget {
                     children: [
                       TextSpan(
                         text: '${summary.runs}${summary.capped ? '+' : ''}',
-                        style: t.typography.code.copyWith(
-                          color: colors.textPrimary,
+                        style: AbTokens.monoStyle(
+                          fontSize: AbTokens.fontSm,
+                          color: p.textPrimary,
                         ),
                       ),
                       const TextSpan(text: ' runs'),
@@ -225,8 +233,9 @@ class SchedulerLaneStrip extends StatelessWidget {
                         const TextSpan(text: ' '),
                         TextSpan(
                           text: schedulerRelative(next.dots.first, now),
-                          style: t.typography.code.copyWith(
-                            color: colors.textPrimary,
+                          style: AbTokens.monoStyle(
+                            fontSize: AbTokens.fontSm,
+                            color: p.textPrimary,
                           ),
                         ),
                       ],
@@ -240,7 +249,7 @@ class SchedulerLaneStrip extends StatelessWidget {
           LayoutBuilder(
             builder: (context, constraints) {
               final width =
-                  (constraints.maxWidth - _labelWidth - CarbonSpacing.spacing04).clamp(
+                  (constraints.maxWidth - _labelWidth - AbTokens.space12).clamp(
                     0.0,
                     double.infinity,
                   );
@@ -249,14 +258,14 @@ class SchedulerLaneStrip extends StatelessWidget {
                 children: [
                   Padding(
                     padding: const EdgeInsets.only(
-                      left: _labelWidth + CarbonSpacing.spacing04,
+                      left: _labelWidth + AbTokens.space12,
                     ),
                     child: SizedBox(width: width, child: axis(width)),
                   ),
                   for (final l in built.lanes) lane(l, width),
                   if (built.more > 0)
                     Padding(
-                      padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
+                      padding: const EdgeInsets.only(top: AbTokens.space4),
                       child: Text('+${built.more} more', style: soft),
                     ),
                 ],

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
@@ -6,11 +6,10 @@ import { join } from "node:path";
 import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
 import { suppressesOscNotifications, suppressesOscTitle } from "../../packages/antgrid-agents/src/known-agents";
 import { augmentAgentLaunch } from "../src/agent-runtime";
-import { setMemoryLaunchGate } from "../src/agent-host";
 import { augmentAgentLaunch as augmentWithRegistry } from "antgrid-agents/agent-launch-augmenter";
 import { type HookCommand } from "../src/hook-command";
 import { cursorHookCommand } from "../../packages/antgrid-agents/src/agents/cursor-agent/global-hooks";
-import { codexChatAugmentArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
+import { codexNotifyOnlyArgs } from "../../packages/antgrid-agents/src/agents/codex/driver";
 import { pluginDirArg } from "../../packages/antgrid-agents/src/agents/claude-code/driver";
 import { AGENTS } from "../src/agent-runtime";
 import { overrideCursorHelp } from "../../packages/antgrid-agents/src/agents/cursor-agent/help";
@@ -24,11 +23,6 @@ const CURSOR_HELP = "--trust\n--plugin-dir <dir>";
 beforeAll(() => overrideCursorHelp(CURSOR_HELP));
 afterAll(() => overrideCursorHelp(undefined));
 afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
-// The memory server is registered only once the user has enabled memory; tests
-// that describe the registered shape opt in, and the "off" suite opts out.
-let releaseMemoryGate: (() => void) | undefined;
-beforeEach(() => { releaseMemoryGate = setMemoryLaunchGate(() => true); });
-afterEach(() => releaseMemoryGate?.());
 
 const HOOK_COMMAND: HookCommand = {
   binary: "C:\\Program Files\\Antgrid\\antgrid-bridge.exe",
@@ -66,7 +60,7 @@ describe("augmentAgentLaunch", () => {
     const a = augmentAgentLaunch("claude-code", { abDir: abdir(), self: BRIDGE_SELF });
     expect(a.args[0]).toBe("--plugin-dir");
     expect(a.args[1].replace(/\\/g, "/")).toMatch(/\/plugin\/claude$/);
-    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
+    expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
     const hooks = JSON.parse(readFileSync(join(a.args[1], "hooks", "hooks.json"), "utf8"));
     // PostToolUse and PostToolUseFailure each carry a second, catch-all group
@@ -128,8 +122,8 @@ describe("augmentAgentLaunch", () => {
     const cfgPath = a.env.OPENCODE_CONFIG;
     expect(cfgPath).toBeTruthy();
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    expect(Array.isArray(cfg.plugins)).toBe(true);
-    expect(cfg.plugins[0]).toMatch(/^file:\/\/.*opencode$/);
+    expect(Array.isArray(cfg.plugin)).toBe(true);
+    expect(cfg.plugin[0]).toMatch(/^file:\/\/.*opencode\/plugin\.ts$/);
   });
 
   test("opencode respects a user-set OPENCODE_CONFIG", () => {
@@ -138,46 +132,13 @@ describe("augmentAgentLaunch", () => {
     );
     // Only the hook channel yields; the MCP entry travels in its own variable.
     expect(launch.args).toEqual([]);
-    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT", "ANTGRID_MEMORY_MCP"]);
+    expect(Object.keys(launch.env)).toEqual(["OPENCODE_CONFIG_CONTENT"]);
     expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid).toEqual({
       type: "local", command: [HOOK_COMMAND.binary, "mcp"],
     });
     expect(launch.observation).toEqual(NO_OBSERVATION);
     expect(suppressesOscNotifications("opencode", launch.observation)).toBe(false);
     expect(suppressesOscTitle("opencode", launch.observation)).toBe(false);
-  });
-
-  test("opencode chat with Memory off loads no plugin", () => {
-    const release = setMemoryLaunchGate(() => false);
-    try {
-      const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
-        abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
-      }));
-      expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
-      expect(launch.env.ANTGRID_OPENCODE_CHAT).toBeUndefined();
-      expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp.antgrid.command).toEqual([HOOK_COMMAND.binary, "mcp"]);
-      expect(launch.observation).toEqual(NO_OBSERVATION);
-    } finally { release(); }
-  });
-
-  test("opencode chat with Memory on loads the plugin in its non-reporting mode", () => {
-    const launch = withUserEnv({}, () => augmentAgentLaunch("opencode", {
-      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
-    }));
-    expect(launch.args).toEqual([]);
-    expect(launch.env.ANTGRID_OPENCODE_CHAT).toBe("1");
-    expect(launch.env.ANTGRID_MEMORY_MCP).toBe("1");
-    expect(JSON.parse(readFileSync(launch.env.OPENCODE_CONFIG, "utf8")).plugins[0]).toMatch(/^file:\/\/.*opencode$/);
-    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).mcp["antgrid-memory"]).toBeDefined();
-    expect(launch.observation).toEqual(NO_OBSERVATION);
-  });
-
-  test("opencode chat with Memory on still yields to a user-set OPENCODE_CONFIG", () => {
-    const launch = withUserEnv({ OPENCODE_CONFIG: "/user/own.json" }, () => augmentAgentLaunch("opencode", {
-      abDir: abdir(), self: BRIDGE_SELF, mode: "chat",
-    }));
-    expect(launch.env.OPENCODE_CONFIG).toBeUndefined();
-    expect(launch.env.ANTGRID_OPENCODE_CHAT).toBeUndefined();
   });
 
   test("unknown tool has no injection", () => {
@@ -189,7 +150,7 @@ describe("augmentAgentLaunch", () => {
     const cursorDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir, self: BRIDGE_SELF });
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-    expect(a.env).toEqual({ ANTGRID_MEMORY_MCP: "1" });
+    expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
 
     const hooks = JSON.parse(readFileSync(join(cursorDir, "hooks.json"), "utf8"));
@@ -238,7 +199,7 @@ describe("augmentAgentLaunch", () => {
     // hooks channel, and the spawn must not regress to a trust prompt.
     expect(a).toEqual({
       args: ["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")],
-      env: { ANTGRID_MEMORY_MCP: "1" },
+      env: {},
       notificationsInjected: false,
       observation: NO_OBSERVATION,
     });
@@ -358,7 +319,7 @@ describe("augmentAgentLaunch MCP injection", () => {
     // One token, not a separated pair: `--mcp-config` is variadic, and a
     // session's own args are folded in directly after this, so the separated
     // form reads the user's first word as another config path.
-    expect(a.args).toEqual(["--plugin-dir", pluginDir, `--mcp-config=${configPath}`, "--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save"]);
+    expect(a.args).toEqual(["--plugin-dir", pluginDir, `--mcp-config=${configPath}`]);
     // The trap this layout exists to avoid: `--plugin-dir` also loads a
     // `.mcp.json` inside the plugin tree, so a config written there would
     // register the same server twice under two different tool-name prefixes.
@@ -376,16 +337,6 @@ describe("augmentAgentLaunch MCP injection", () => {
           // Symbolic, not resolved: claude expands these against its own
           // environment at spawn, which is what lets one file serve every
           // terminal on the machine.
-          env: {
-            ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
-            ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
-            ANTGRID_RUN_ID: "${ANTGRID_RUN_ID}",
-          },
-        },
-        "antgrid-memory": {
-          type: "stdio",
-          command: HOOK_COMMAND.binary,
-          args: ["memory-mcp"],
           env: {
             ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
             ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
@@ -410,13 +361,10 @@ describe("augmentAgentLaunch MCP injection", () => {
     expect(a.args.join(" ")).not.toMatch(/\bnode(?:\.exe)?\b/i);
   });
 
-  test("codex chat mode keeps MCP overrides and drops unsupported TUI hooks", () => {
+  test("codex chat mode drops the mcp overrides rather than choking on them", () => {
     const a = augmentAgentLaunch("codex", { abDir: abdir(), self: BRIDGE_SELF });
     const notify = a.args[1];
-    const args = codexChatAugmentArgs(a.args);
-    expect(args.slice(0, 2)).toEqual(["-c", notify]);
-    expect(args).toContain('mcp_servers.antgrid.command="C:/Program Files/Antgrid/antgrid-bridge.exe"');
-    expect(args.some((arg) => arg.startsWith("hooks."))).toBe(false);
+    expect(codexNotifyOnlyArgs(a.args)).toEqual(["-c", notify]);
   });
 
   test("one `self` decides both commands, so a spawn cannot mix compiled and dev", () => {
@@ -504,7 +452,7 @@ describe("augmentAgentLaunch MCP injection", () => {
     // of ENOTDIR while `<abDir>/mcp/claude.json` writes fine.
     writeFileSync(join(abDir, "plugin"), "");
     const a = augmentAgentLaunch("claude-code", { abDir, self: BRIDGE_SELF });
-    expect(a.args).toEqual([`--mcp-config=${join(abDir, "mcp", "claude.json")}`, "--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save"]);
+    expect(a.args).toEqual([`--mcp-config=${join(abDir, "mcp", "claude.json")}`]);
     expect(a.notificationsInjected).toBe(false);
     // Reading `args[indexOf("--plugin-dir") + 1]` unchecked lands on args[0]
     // here and launches `claude --plugin-dir --mcp-config`, turning a session
@@ -528,7 +476,6 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
   afterEach(() => overrideCursorHelp(CURSOR_HELP));
 
   const ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "mcp"] };
-  const MEMORY_ENTRY = { type: "local", command: [HOOK_COMMAND.binary, "memory-mcp"] };
   const FAMILY = [
     { tool: "opencode", envVar: "OPENCODE_CONFIG_CONTENT" },
     { tool: "kilo", envVar: "KILO_CONFIG_CONTENT" },
@@ -541,7 +488,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       );
 
     test(`${tool} adds mcp.antgrid as separate command fields`, () => {
-      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY } });
+      expect(JSON.parse(augmentWith().env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
     });
 
     test(`${tool} keeps a user's ${envVar} keys and their own mcp servers`, () => {
@@ -551,7 +498,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       }));
       expect(JSON.parse(a.env[envVar])).toEqual({
         model: "x/y",
-        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY },
+        mcp: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY },
       });
     });
 
@@ -561,17 +508,8 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
       }
     });
 
-    if (tool === "opencode") test("opencode preserves native 2.x MCP configuration and replaces its own servers", () => {
-      const a = augmentWith(JSON.stringify({ mcp: {
-        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: { type: "remote", url: "stale" } },
-      } }));
-      expect(JSON.parse(a.env[envVar])).toEqual({ mcp: {
-        timeout: { startup: 1234 }, servers: { mine: { type: "local", command: ["mine"] }, antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY },
-      } });
-    });
-
     test(`${tool} treats a blank ${envVar} as unset`, () => {
-      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY, "antgrid-memory": MEMORY_ENTRY } });
+      expect(JSON.parse(augmentWith("  ").env[envVar])).toEqual({ mcp: { antgrid: ENTRY } });
     });
   }
 
@@ -584,10 +522,7 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     // there would register the server twice.
     expect(a.args).toContain(join(abDir, "plugin", "copilot"));
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
-      mcpServers: {
-        antgrid: { type: "local", command: HOOK_COMMAND.binary, args: ["mcp"], tools: ["*"] },
-        "antgrid-memory": { type: "local", command: HOOK_COMMAND.binary, args: ["memory-mcp"], tools: ["*"] },
-      },
+      mcpServers: { antgrid: { type: "local", command: HOOK_COMMAND.binary, args: ["mcp"], tools: ["*"] } },
     });
   });
 
@@ -612,15 +547,6 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
         antgrid: {
           command: HOOK_COMMAND.binary,
           args: ["mcp"],
-          env: {
-            ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
-            ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
-            ANTGRID_RUN_ID: "${env:ANTGRID_RUN_ID}",
-          },
-        },
-        "antgrid-memory": {
-          command: HOOK_COMMAND.binary,
-          args: ["memory-mcp"],
           env: {
             ANTGRID_API_PORT: "${env:ANTGRID_API_PORT}",
             ANTGRID_TERMINAL_ID: "${env:ANTGRID_TERMINAL_ID}",
@@ -657,91 +583,5 @@ describe("augmentAgentLaunch MCP injection for the per-spawn carriers", () => {
     const abDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", { abDir, cursorDir: abdir(), self: BRIDGE_SELF });
     expect(a.args).toEqual(["--trust", "--plugin-dir", join(abDir, "plugin", "cursor")]);
-  });
-});
-
-describe("augmentAgentLaunch with memory disabled", () => {
-  afterEach(() => overrideCursorHelp(CURSOR_HELP));
-
-  const texts = (dir: string): string => readdirSync(dir, { recursive: true, withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => readFileSync(join(entry.parentPath, entry.name), "utf8")).join("\n");
-  const launchText = (tool: string, memory: boolean, mode?: "chat") => {
-    const release = setMemoryLaunchGate(() => memory);
-    try {
-      const abDir = abdir();
-      const launch = withUserEnv({}, () => augmentAgentLaunch(tool, { abDir, cursorDir: abdir(), self: BRIDGE_SELF, mode }));
-      return { launch, text: JSON.stringify({ args: launch.args, env: launch.env }) + texts(abDir) };
-    } finally { release(); }
-  };
-
-  for (const tool of ["claude-code", "codex", "opencode", "kilo", "github-copilot", "cursor-agent"]) {
-    test(`${tool} registers only antgrid and no guidance flag`, () => {
-      const off = launchText(tool, false);
-      expect(off.text).toContain("mcp");
-      expect(off.text).not.toContain("memory-mcp");
-      expect(off.text).not.toMatch(/(?<!MEMORY_MCP_SERVER = ")antgrid-memory(?! tools)/);
-      expect(off.launch.env.ANTGRID_MEMORY_MCP).toBeUndefined();
-      expect(off.launch.memoryWithheld).toBe(true);
-      const on = launchText(tool, true);
-      expect(on.text).toContain("memory-mcp");
-      expect(on.launch.env.ANTGRID_MEMORY_MCP).toBe("1");
-      expect(on.launch.memoryWithheld).toBeUndefined();
-    });
-  }
-
-  test("a profile that failed soft is not reported as withheld, since a relaunch would not fix it", () => {
-    const spec = AGENTS["claude-code"];
-    const a = augmentWithRegistry("claude-code", {
-      abDir: abdir(), hookCommand: HOOK_COMMAND,
-      mcpCommand: { binary: HOOK_COMMAND.binary, preargs: ["mcp"] },
-    }, () => ({ ...spec, mcp: { inject: () => NO_INJECTION } }));
-    expect(a.memoryWithheld).toBeUndefined();
-  });
-
-  describe("the hook profile's memoryRegistered", () => {
-    const seen = (mcp: (() => LaunchAugmentation) | undefined, memory: boolean): boolean | undefined => {
-      let got: boolean | undefined;
-      const spec = AGENTS["claude-code"];
-      const release = setMemoryLaunchGate(() => memory);
-      try {
-        augmentWithRegistry("claude-code", {
-          abDir: abdir(), hookCommand: HOOK_COMMAND,
-          mcpCommand: { binary: HOOK_COMMAND.binary, preargs: ["mcp"] },
-          memoryMcpCommand: memory ? { binary: HOOK_COMMAND.binary, preargs: ["memory-mcp"] } : undefined,
-        }, () => ({
-          ...spec,
-          ...(mcp ? { mcp: { inject: mcp } } : {}),
-          hooks: { ...spec.hooks!, inject: (ctx) => { got = ctx.memoryRegistered; return NO_INJECTION; } },
-        }));
-      } finally { release(); }
-      return got;
-    };
-    test("is true only when the memory server was really injected", () => {
-      expect(seen(undefined, true)).toBe(true);
-    });
-    test("is false with Memory off", () => {
-      expect(seen(undefined, false)).toBe(false);
-    });
-    test("is false when the MCP profile failed soft", () => {
-      expect(seen(() => NO_INJECTION, true)).toBe(false);
-    });
-    test("is false when the MCP profile threw", () => {
-      expect(seen(() => { throw new Error("boom"); }, true)).toBe(false);
-    });
-  });
-
-  test("a chat spawn follows the Memory gate like a terminal spawn", () => {
-    const off = launchText("claude-code", false, "chat");
-    expect(off.text).toContain("mcp");
-    expect(off.text).not.toContain("memory-mcp");
-    expect(off.launch.args.some((arg) => arg.startsWith("--allowedTools"))).toBe(false);
-    expect(off.launch.env.ANTGRID_MEMORY_MCP).toBeUndefined();
-    expect(off.launch.memoryWithheld).toBe(true);
-    const on = launchText("claude-code", true, "chat");
-    expect(on.text).toContain("memory-mcp");
-    expect(on.launch.args).toContain("--allowedTools=mcp__antgrid-memory__memory_search,mcp__antgrid-memory__memory_get,mcp__antgrid-memory__memory_save");
-    expect(on.launch.env.ANTGRID_MEMORY_MCP).toBe("1");
-    expect(on.launch.memoryWithheld).toBeUndefined();
   });
 });

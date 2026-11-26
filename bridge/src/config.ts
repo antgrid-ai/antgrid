@@ -73,17 +73,16 @@ export const WorktreeSetupSchema = z.object({
   onFailure: z.enum(["warn"]).optional(),
   /** Whether this session's agent WAITS for the run.
    *
-   *  `immediate` (the default) launches it alongside the first step, so the
-   *  agent is live in a tree that is not provisioned yet. Nothing orders the
-   *  two PTYs: the agent can beat a `copy:` step that brings `.env` in, and can
-   *  run before dependencies are installed. A project whose agent must not see
-   *  a half-built tree sets `afterSetup`, which queues the start until the run
-   *  settles.
+   *  `immediate` launches it alongside the first step, so it is live in a tree
+   *  that is not provisioned yet — nothing orders the two PTYs, and a project
+   *  whose first step copies `.env` in should expect the agent to beat it. That
+   *  is why the default keeps the wait rather than inheriting it from how fast
+   *  a given project's steps happen to be.
    *
    *  An enum rather than a boolean because the useful third answer is a step
    *  name ("clear the cheap prep, not the installs"), which widens this to a
    *  union without breaking the `.strict()` object around it. */
-  startAgent: z.enum(["afterSetup", "immediate"]).default("immediate"),
+  startAgent: z.enum(["afterSetup", "immediate"]).default("afterSetup"),
 }).strict();
 
 export const WorktreeBlockSchema = z.object({

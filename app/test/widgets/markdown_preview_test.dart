@@ -1,24 +1,15 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 import 'package:visibility_detector/visibility_detector.dart';
-import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/models/file_tree_models.dart';
-import 'package:antgrid/widgets/carbon_code_style.dart';
 import 'package:antgrid/widgets/markdown_outline.dart';
 import 'package:antgrid/widgets/markdown_document_config.dart' show joinSoftBreaks;
 import 'package:antgrid/widgets/markdown_preview.dart';
 import 'package:antgrid/widgets/file_content_viewer.dart';
 import 'package:antgrid/widgets/viewer_support.dart';
-
-Widget _scope(BuildContext context, Widget? child) =>
-    AbCarbonScope(child: child!);
-
-Finder _button(String label) => find.byWidgetPredicate(
-  (w) => w is CarbonButton && w.semanticLabel == label,
-);
 
 void main() {
   setUpAll(() {
@@ -32,7 +23,6 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: MarkdownPreview(
               content: const FileContent(
@@ -53,7 +43,6 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: MarkdownPreview(
               content: const FileContent(
@@ -78,7 +67,6 @@ void main() {
     (tester) async {
       Widget host(int? line) => ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: MarkdownPreview(
               key: const ValueKey('readme.md'),
@@ -112,7 +100,6 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: MarkdownPreview(
               content: const FileContent(
@@ -133,7 +120,6 @@ void main() {
   Widget host(FileContent content, {ValueChanged<String>? onOpenFile}) =>
       ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: MarkdownPreview(content: content, onOpenFile: onOpenFile),
           ),
@@ -159,7 +145,7 @@ void main() {
     await tester.pumpWidget(host(outlined));
     await tester.pumpAndSettle();
     expect(find.byType(MarkdownOutline), findsOneWidget);
-    expect(_button('Hide outline'), findsOneWidget);
+    expect(find.byTooltip('Hide outline'), findsOneWidget);
   });
 
   testWidgets('hides the outline when the reader closes it', (tester) async {
@@ -167,10 +153,10 @@ void main() {
     await tester.pumpWidget(host(outlined));
     await tester.pumpAndSettle();
 
-    await tester.tap(_button('Hide outline'));
+    await tester.tap(find.byTooltip('Hide outline'));
     await tester.pumpAndSettle();
     expect(find.byType(MarkdownOutline), findsNothing);
-    expect(_button('Show outline'), findsOneWidget);
+    expect(find.byTooltip('Show outline'), findsOneWidget);
   });
 
   testWidgets('offers no outline for a document with too few headings', (
@@ -191,7 +177,7 @@ void main() {
     // 'Hide outline' is what the toggle would say here: the pane is wide and
     // the reader has not touched it, so asserting on 'Show outline' would pass
     // for any document at all.
-    expect(_button('Hide outline'), findsNothing);
+    expect(find.byTooltip('Hide outline'), findsNothing);
   });
 
   testWidgets('keeps the outline off the document on a narrow pane', (
@@ -202,7 +188,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(MarkdownOutline), findsNothing);
 
-    await tester.tap(_button('Show outline'));
+    await tester.tap(find.byTooltip('Show outline'));
     await tester.pumpAndSettle();
     expect(find.byType(MarkdownOutline), findsOneWidget);
   });
@@ -244,7 +230,7 @@ void main() {
     // Default 800x600 surface — the outline opens over the document.
     await tester.pumpWidget(host(outlined));
     await tester.pumpAndSettle();
-    await tester.tap(_button('Show outline'));
+    await tester.tap(find.byTooltip('Show outline'));
     await tester.pumpAndSettle();
 
     await tester.tap(
@@ -314,11 +300,8 @@ void main() {
     // The package resolves inline code as `codeConfig.style.merge(parentStyle)`
     // and `merge` gives the argument the last word, so a CodeConfig alone sets
     // `flutter test` in the paragraph's own sans face.
-    final type = CarbonTheme.of(
-      tester.element(find.byType(MarkdownPreview)),
-    ).typography;
-    expect(families['flutter test'], type.code.fontFamily);
-    expect(families['run '], type.body.fontFamily);
+    expect(families['flutter test'], AbTokens.fontMono);
+    expect(families['run '], AbTokens.fontSans);
   });
 
   testWidgets('gives every code fence a copy button', (tester) async {
@@ -332,7 +315,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(_button('Copy'), findsOneWidget);
+    expect(find.byTooltip('Copy'), findsOneWidget);
   });
 
   testWidgets('renders a table rather than a run of pipes', (tester) async {
@@ -405,7 +388,6 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
-          builder: _scope,
             home: Scaffold(
               body: Align(
                 alignment: Alignment.topLeft,
@@ -486,131 +468,5 @@ void main() {
       final number = tester.getRect(find.text('12', findRichText: true));
       expect((countHeader.right - number.right).abs(), lessThan(1));
     });
-  });
-
-  testWidgets('a brightness switch rebuilds the cached document', (
-    tester,
-  ) async {
-    Widget themed(Brightness brightness) => ProviderScope(
-      child: MaterialApp(
-        theme: ThemeData(brightness: brightness),
-        themeAnimationDuration: Duration.zero,
-        builder: _scope,
-        home: const Scaffold(
-          body: MarkdownPreview(
-            content: FileContent(
-              path: 'readme.md',
-              content: '# Hello\n\nand `code`\n',
-              size: 40,
-            ),
-          ),
-        ),
-      ),
-    );
-
-    Color? colorOf(String text) {
-      Color? found;
-      for (final rich in tester.widgetList<RichText>(find.byType(RichText))) {
-        rich.text.visitChildren((span) {
-          if (span is TextSpan && span.text == text) found = span.style?.color;
-          return true;
-        });
-      }
-      return found;
-    }
-
-    for (final brightness in [
-      Brightness.light,
-      Brightness.dark,
-      Brightness.light,
-    ]) {
-      await tester.pumpWidget(themed(brightness));
-      await tester.pumpAndSettle();
-      final colors = CarbonTheme.of(
-        tester.element(find.byType(MarkdownPreview)),
-      ).colors;
-      expect(colorOf('Hello'), colors.textPrimary, reason: brightness.name);
-    }
-  });
-
-  testWidgets('code fences take the Carbon code face', (tester) async {
-    await tester.pumpWidget(
-      host(
-        const FileContent(
-          path: 'readme.md',
-          content: '```\nplain fence\n```\n',
-          size: 20,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    String? family;
-    for (final rich in tester.widgetList<RichText>(find.byType(RichText))) {
-      rich.text.visitChildren((span) {
-        if (span is TextSpan && span.text == 'plain fence') {
-          family = span.style?.fontFamily;
-        }
-        return true;
-      });
-    }
-    expect(
-      family,
-      CarbonTheme.of(
-        tester.element(find.byType(MarkdownPreview)),
-      ).typography.code.fontFamily,
-    );
-  });
-
-  testWidgets('a tagged fence keeps its palette colours', (tester) async {
-    await tester.pumpWidget(
-      host(
-        const FileContent(
-          path: 'readme.md',
-          content: '```dart\nfinal x = 1;\n```\n',
-          size: 24,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    final style = CarbonCodeStyle.of(
-      tester.element(find.byType(MarkdownPreview)),
-    );
-    Color? color;
-    for (final rich in tester.widgetList<RichText>(find.byType(RichText))) {
-      rich.text.visitChildren((span) {
-        if (span is TextSpan && span.text == 'final') {
-          color = span.style?.color;
-        }
-        return true;
-      });
-    }
-    expect(color, style.highlightTheme['keyword']!.color);
-  });
-
-  testWidgets('an untagged fence is not highlighted as Dart', (tester) async {
-    await tester.pumpWidget(
-      host(
-        const FileContent(
-          path: 'readme.md',
-          content: '```\nfinal x = 1;\n```\n',
-          size: 20,
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    final colors = CarbonTheme.of(
-      tester.element(find.byType(MarkdownPreview)),
-    ).colors;
-    final seen = <Color?>{};
-    for (final rich in tester.widgetList<RichText>(find.byType(RichText))) {
-      rich.text.visitChildren((span) {
-        if (span is TextSpan && (span.text ?? '').contains('final')) {
-          seen.add(span.style?.color);
-        }
-        return true;
-      });
-    }
-    expect(seen, isNotEmpty);
-    expect(seen.every((c) => c == colors.textPrimary), isTrue);
   });
 }

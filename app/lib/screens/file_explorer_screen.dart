@@ -1,8 +1,5 @@
-import 'dart:async';
-
-import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
@@ -23,20 +20,26 @@ import '../widgets/file_viewer_router.dart';
 import '../widgets/search_result_list.dart';
 import '../models/search_models.dart';
 import '../services/search_service.dart';
-import '../design/ab_carbon.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_chip.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_search_field.dart';
+import '../design/widgets/ab_separator.dart';
+import '../design/widgets/ab_toolbar.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
-import '../widgets/carbon_empty_state.dart';
 import '../widgets/file_search_bar.dart';
-import '../widgets/git_change_list.dart' show CarbonPullToRefresh;
 import '../widgets/ab_status_helpers.dart' show caughtErrorCopy;
 
 /// The main file explorer screen with an inline search panel that can be
 /// toggled via a search icon. When search is inactive, shows the file tree.
 /// When active, search input + results replace the tree.
-///
-/// One [AbCarbonScope] at the root, for the tree, the search panel and the file
-/// viewers beside them, so the surface never changes theme as data arrives.
 class FileExplorerScreen extends ConsumerStatefulWidget {
   const FileExplorerScreen({super.key});
 
@@ -155,13 +158,9 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     // so a lease taken first sends that request under the wrong flag and the
     // setting then re-lists the whole tree to correct it.
     final treeStateAsync = ref.watch(fileTreeStateProvider);
-    // watch, not the `ref.read` in [_onScreen]: the registered `active` flags
-    // below have to be recomputed when this tab goes on or off screen.
-    final onScreen =
-        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files;
     _treeInterest.update(
       fileService,
-      onScreen &&
+      ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files &&
           ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed,
     );
     // Watched rather than listened to, because this is also the retry trigger:
@@ -176,49 +175,40 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
         _drainPendingFilePath();
       });
     }
-    final Widget content;
     if (fileService == null) {
-      content = const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...'));
-    } else {
-      content = BackHandler(
-        priority: BackPriority.fileViewer,
-        active:
-            onScreen && treeStateAsync.value?.files.selectedFilePath != null,
-        onBack: _backFromViewer,
-        child: BackHandler(
-          priority: BackPriority.fileSearch,
-          active: onScreen && _searchOpen,
-          onBack: _backFromSearch,
-          child: treeStateAsync.when(
-            loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small, message: 'loading files...')),
-            error: (error, _) => CarbonEmptyState(
-              error: true,
-              heading: "Couldn't load files",
-              body: caughtErrorCopy(error, 'Try again in a moment.'),
-            ),
-            data: (state) => _FileExplorerBody(
-              state: state,
-              fileService: fileService,
-              searchOpen: _searchOpen,
-              onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
-              onCloseSearch: () => setState(() => _searchOpen = false),
-              filterQuery: _filterQuery,
-              filterResults: _filterResults,
-              filterLoading: _filterLoading,
-              filterError: _filterError,
-              onFilterQueryChanged: _onFilterQueryChanged,
-            ),
-          ),
-        ),
-      );
+      return const AbLoading(message: 'loading files...');
     }
-    return AbCarbonScope(
-      child: Builder(
-        builder: (context) => ColoredBox(
-          color: CarbonTheme.of(context).colors.background,
-          // IndexedStack keeps this screen mounted while another workspace
-          // view is up, and a spinner would keep ticking unseen.
-          child: TickerMode(enabled: onScreen, child: content),
+    // watch, not the `ref.read` in [_onScreen]: the registered `active` flags
+    // below have to be recomputed when this tab goes on or off screen.
+    final onScreen =
+        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files;
+
+    return BackHandler(
+      priority: BackPriority.fileViewer,
+      active: onScreen && treeStateAsync.value?.files.selectedFilePath != null,
+      onBack: _backFromViewer,
+      child: BackHandler(
+        priority: BackPriority.fileSearch,
+        active: onScreen && _searchOpen,
+        onBack: _backFromSearch,
+        child: treeStateAsync.when(
+          loading: () => const AbLoading(message: 'loading files...'),
+          error: (error, _) => AbEmptyState.error(
+            title: "Couldn't load files",
+            subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
+          ),
+          data: (state) => _FileExplorerBody(
+            state: state,
+            fileService: fileService,
+            searchOpen: _searchOpen,
+            onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
+            onCloseSearch: () => setState(() => _searchOpen = false),
+            filterQuery: _filterQuery,
+            filterResults: _filterResults,
+            filterLoading: _filterLoading,
+            filterError: _filterError,
+            onFilterQueryChanged: _onFilterQueryChanged,
+          ),
         ),
       ),
     );
@@ -344,31 +334,34 @@ class _FileExplorerBody extends ConsumerWidget {
   }
 
   Widget _buildActionBar(BuildContext context) {
-    return _Toolbar(
-      children: [
-        // The filter shares this row rather than taking one of its own beneath
-        // it: stacked, the two put a pair of magnifiers directly above each
-        // other, one filtering names and one searching contents. Dropped while
-        // the content-search panel is open — that panel carries its own field,
-        // and the tree this one filters is not on screen behind it.
-        Expanded(
-          child: searchOpen
-              ? const SizedBox.shrink()
-              : FileSearchBar(
-                  currentQuery: filterQuery,
-                  onQueryChanged: onFilterQueryChanged,
-                ),
+    return AbToolbar.actions(
+      // The filter shares this row rather than taking one of its own beneath
+      // it: stacked, the two put a pair of magnifiers directly above each
+      // other, one filtering names and one searching contents. Dropped while
+      // the content-search panel is open — that panel carries its own field,
+      // and the tree this one filters is not on screen behind it.
+      center: searchOpen
+          ? null
+          : FileSearchBar(
+              currentQuery: filterQuery,
+              // Zero here on purpose: [FileService.find] debounces already,
+              // and stacking the two put the first request ~550ms after the
+              // last keystroke while the @-mention panel paid only 250ms for
+              // the same search.
+              debounce: Duration.zero,
+              onQueryChanged: onFilterQueryChanged,
+            ),
+      trailing: [
+        AbIconButton(
+          icon: AbIcons.refresh,
+          onTap: () => fileService.requestFullTree(),
+          tooltip: 'Refresh',
         ),
-        _ToolbarButton(
-          icon: CarbonIcons.renew,
-          label: 'Refresh',
-          onPressed: () => fileService.requestFullTree(),
-        ),
-        _ToolbarButton(
-          icon: CarbonIcons.search,
-          label: 'Search in files',
-          selected: searchOpen,
-          onPressed: onToggleSearch,
+        AbIconButton(
+          icon: AbIcons.search,
+          tone: searchOpen ? AbIconButtonTone.accent : AbIconButtonTone.normal,
+          onTap: onToggleSearch,
+          tooltip: 'Search in files',
         ),
       ],
     );
@@ -393,14 +386,13 @@ class _FileExplorerBody extends ConsumerWidget {
     // its own consumer, so Riverpod may rebuild it against a session the parent
     // hasn't yet re-gated on — and the façade throws once that session is gone.
     final searchService = serviceWhenReady(ref, searchServiceProvider);
-    if (searchService == null) return const Center(child: CarbonLoading(size: CarbonLoadingSize.small));
+    if (searchService == null) return const AbLoading();
 
     return stateAsync.when(
-      loading: () => const Center(child: CarbonLoading(size: CarbonLoadingSize.small)),
-      error: (error, _) => CarbonEmptyState(
-        error: true,
-        heading: 'Search failed',
-        body: caughtErrorCopy(error, 'Try again in a moment.'),
+      loading: () => const AbLoading(),
+      error: (error, _) => AbEmptyState.error(
+        title: 'Search failed',
+        subtitle: caughtErrorCopy(error, 'Try again in a moment.'),
       ),
       data: (searchState) => _SearchPanel(
         searchState: searchState,
@@ -437,7 +429,7 @@ class _FileExplorerBody extends ConsumerWidget {
               onFilterQueryChanged(null);
             },
           )
-        : CarbonPullToRefresh(
+        : RefreshIndicator(
             onRefresh: () async {
               fileService.requestFullTree();
               await Future.delayed(const Duration(milliseconds: 500));
@@ -503,125 +495,47 @@ class _FileExplorerBody extends ConsumerWidget {
       );
     }
 
-    return const CarbonEmptyState(
-      icon: CarbonIcons.document,
-      heading: 'Select a file to view',
-    );
+    return const AbEmptyState.compact(title: 'Select a file to view');
   }
 
   Widget _buildSideBySideLayout(BuildContext context, WidgetRef ref) {
-    final theme = CarbonTheme.of(context);
     return Row(
       children: [
         SizedBox(width: 280, child: _buildTreePanel(context, ref)),
-        SizedBox(
-          width: CarbonBorders.hairline,
-          child: ColoredBox(
-            color: theme.borderStrong(CarbonLayer.of(context)),
-          ),
-        ),
+        const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
         Expanded(child: _buildContentArea(context)),
       ],
     );
   }
 
   Widget _buildViewerPage(BuildContext context) {
-    final theme = CarbonTheme.of(context);
     return Column(
       children: [
-        _Toolbar(
-          children: [
-            _ToolbarButton(
-              icon: CarbonIcons.arrowLeft,
-              label: 'Back to file tree',
-              onPressed: () => fileService.clearViewingFile(),
-            ),
-            Expanded(
-              child: Text(
+        Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space4,
+            vertical: AbTokens.space2,
+          ),
+          child: Row(
+            children: [
+              AbIconButton(
+                icon: AbIcons.back,
+                onTap: () => fileService.clearViewingFile(),
+                tooltip: 'Back to file tree',
+              ),
+              const SizedBox(width: AbTokens.space4),
+              const Text(
                 'File Explorer',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.typography.control.copyWith(
-                  color: theme.colors.textSecondary,
+                style: TextStyle(
+                  fontSize: AbTokens.fontBody,
+                  color: Colors.grey,
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         Expanded(child: _buildContentArea(context)),
       ],
-    );
-  }
-}
-
-/// The action row above the tree: a layer-coloured strip with a hairline under
-/// it, whose controls sit one layer up.
-class _Toolbar extends StatelessWidget {
-  const _Toolbar({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        CarbonLayerSurface(
-          padding: const EdgeInsets.symmetric(
-            horizontal: CarbonSpacing.spacing03,
-            vertical: CarbonSpacing.spacing02,
-          ),
-          child: Row(spacing: CarbonSpacing.spacing02, children: children),
-        ),
-        SizedBox(
-          height: CarbonBorders.hairline,
-          child: ColoredBox(color: theme.borderSubtle(CarbonLayer.of(context))),
-        ),
-      ],
-    );
-  }
-}
-
-/// A ghost icon-only button with its name in a tooltip. [selected] makes it a
-/// toggle that shows its state; null is a plain action.
-class _ToolbarButton extends StatelessWidget {
-  const _ToolbarButton({
-    this.icon,
-    this.glyph,
-    required this.label,
-    this.selected,
-    required this.onPressed,
-  }) : assert(icon != null || glyph != null);
-
-  final CarbonIcons? icon;
-
-  /// Text standing in for an icon Carbon does not have.
-  final String? glyph;
-  final String label;
-  final bool? selected;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final glyph = this.glyph;
-    final icon = this.icon;
-    return CarbonButton.iconOnly(
-      icon: glyph != null
-          ? Builder(
-              builder: (context) => Text(
-                glyph,
-                style: CarbonTheme.of(context).typography.code.copyWith(
-                  color: IconTheme.of(context).color,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            )
-          : CarbonIcon(icon!),
-      semanticLabel: label,
-      size: CarbonButtonSize.small,
-      selected: selected,
-      onPressed: onPressed,
     );
   }
 }
@@ -652,63 +566,49 @@ class _FileFilterResults extends StatelessWidget {
       // list; rendering them alike had the user retrying a search that broke.
       final failure = error;
       if (failure != null && !loading) {
-        return CarbonEmptyState(error: true, heading: 'Search failed: $failure');
+        return AbEmptyState.error(title: 'Search failed: $failure');
       }
-      return CarbonEmptyState(
-        icon: loading ? null : CarbonIcons.search,
-        iconWidget: loading
-            ? const CarbonSpinner(size: CarbonSpacing.spacing07)
-            : null,
-        heading: loading ? 'Searching…' : 'No matching files',
+      return AbEmptyState(
+        icon: AbIcons.search,
+        title: loading ? 'Searching…' : 'No matching files',
       );
     }
-    return CarbonTreeView(
-      semanticLabel: 'Matching files',
+    return ListView.builder(
       itemCount: entries.length,
       itemBuilder: (context, index) {
         final entry = entries[index];
-        return CarbonTreeNodeData(
-          id: (entry.isDir, entry.path),
-          label: entry.path,
-          leading: entry.isDir ? const CarbonIcon(CarbonIcons.folder) : null,
-          content: _PathLabel(path: entry.path, ignored: entry.ignored),
+        return AbListRow(
+          density: AbRowDensity.sm,
+          onTap: entry.isDir
+              ? () => onTapDirectory(entry.path)
+              : () => onTapFile(entry.path),
+          leading: entry.isDir
+              ? AbIcon(
+                  AbIcons.folder,
+                  size: AbTokens.fontSm,
+                  color: context.antgrid.textMuted,
+                )
+              : const SizedBox(width: AbTokens.fontSm),
+          title: Text(
+            entry.path,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontSm,
+              // Same token the tree dims an ignored row with — this list
+              // stands in for the tree while a query is active, so the two
+              // must agree about what a path is.
+              color: entry.ignored
+                  ? context.antgrid.textMuted
+                  : context.antgrid.textPrimary,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
         );
       },
-      onActivate: (id) {
-        if (id case (final bool isDir, final String path)) {
-          isDir ? onTapDirectory(path) : onTapFile(path);
-        }
-      },
     );
   }
 }
 
-/// A path in the mono face, dimmed when git ignores it. Same dim the tree
-/// gives an ignored row — this list stands in for the tree while a query is
-/// active, so the two must agree about what a path is.
-class _PathLabel extends StatelessWidget {
-  const _PathLabel({required this.path, required this.ignored});
-
-  final String path;
-  final bool ignored;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final inherited = DefaultTextStyle.of(context).style;
-    return Text(
-      path,
-      maxLines: 1,
-      softWrap: false,
-      overflow: TextOverflow.ellipsis,
-      style: theme.typography.code.copyWith(
-        color: ignored ? theme.colors.textPlaceholder : inherited.color,
-      ),
-    );
-  }
-}
-
-/// The search panel content, extracted to manage its own text controller.
+/// The search panel content, extracted to manage its own TextField controller.
 class _SearchPanel extends StatefulWidget {
   final SearchState searchState;
   final SearchService searchService;
@@ -727,20 +627,13 @@ class _SearchPanel extends StatefulWidget {
 }
 
 class _SearchPanelState extends State<_SearchPanel> {
-  // Carbon's search never debounces, and a content search walks the whole
-  // checkout.
-  static const _searchDebounce = Duration(milliseconds: 400);
-
   late final TextEditingController _controller;
   late final FocusNode _focusNode;
-  Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.searchState.query);
-    // Sits on the field's own focus node, so it answers before the search
-    // field's clear-first Escape does: one press closes the panel.
     _focusNode = FocusNode(
       onKeyEvent: (node, event) {
         if (event is KeyDownEvent &&
@@ -755,99 +648,104 @@ class _SearchPanelState extends State<_SearchPanel> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
     _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
 
   void _onQueryChanged(String value) {
-    _debounce?.cancel();
-    _debounce = Timer(_searchDebounce, () => widget.searchService.search(value));
+    widget.searchService.search(value);
   }
 
   @override
   Widget build(BuildContext context) {
     final state = widget.searchState;
     final searchService = widget.searchService;
-    final theme = CarbonTheme.of(context);
-    final error = state.error;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
     return Column(
       children: [
-        CarbonLayerSurface(
-          padding: const EdgeInsets.all(CarbonSpacing.spacing03),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: CarbonSpacing.spacing02,
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AbTokens.space8,
+            AbTokens.space6,
+            AbTokens.space8,
+            3,
+          ), // 3px non-ladder bottom for tighter feel
+          child: AbSearchField(
+            controller: _controller,
+            focusNode: _focusNode,
+            hint: 'Search in files...',
+            height: AbTokens.rowHeightXs,
+            autofocus: true,
+            debounce: const Duration(milliseconds: 400),
+            onChanged: _onQueryChanged,
+          ),
+        ),
+        // Options row
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space8,
+            vertical: 1,
+          ), // 1px row inset
+          child: Row(
             children: [
-              CarbonSearch(
-                controller: _controller,
-                focusNode: _focusNode,
-                placeholder: 'Search in files...',
-                semanticLabel: 'Search in files',
-                size: CarbonFieldSize.small,
-                autofocus: true,
-                busy: state.isSearching,
-                onChanged: _onQueryChanged,
+              Tooltip(
+                message: 'Case Sensitive',
+                child: AbChip.toggle(
+                  label: 'Aa',
+                  selected: state.caseSensitive,
+                  onTap: searchService.toggleCaseSensitive,
+                ),
               ),
-              Row(
-                spacing: CarbonSpacing.spacing02,
-                children: [
-                  _ToolbarButton(
-                    icon: CarbonIcons.letterAa,
-                    label: 'Case Sensitive',
-                    selected: state.caseSensitive,
-                    onPressed: searchService.toggleCaseSensitive,
-                  ),
-                  _ToolbarButton(
-                    glyph: '.*',
-                    label: 'Regex',
-                    selected: state.regex,
-                    onPressed: searchService.toggleRegex,
-                  ),
-                  _ToolbarButton(
-                    icon: CarbonIcons.stringText,
-                    label: 'Whole Word',
-                    selected: state.wholeWord,
-                    onPressed: searchService.toggleWholeWord,
-                  ),
-                  const Spacer(),
-                  if (!state.isSearching && state.query.isNotEmpty)
-                    Flexible(
-                      child: CarbonTag(
-                        label:
-                            error ??
-                            '${state.totalMatches} in ${state.totalFiles} files',
-                        color: error != null
-                            ? CarbonTagColor.red
-                            : CarbonTagColor.gray,
-                        size: CarbonTagSize.small,
-                      ),
+              // 3px: tighter than space4, deliberately compact between toggle chips.
+              const SizedBox(width: 3),
+              Tooltip(
+                message: 'Regex',
+                child: AbChip.toggle(
+                  label: '.*',
+                  selected: state.regex,
+                  onTap: searchService.toggleRegex,
+                ),
+              ),
+              // 3px: tighter than space4, deliberately compact between toggle chips.
+              const SizedBox(width: 3),
+              Tooltip(
+                message: 'Whole Word',
+                child: AbChip.toggle(
+                  label: 'W',
+                  selected: state.wholeWord,
+                  onTap: searchService.toggleWholeWord,
+                ),
+              ),
+              const Spacer(),
+              if (state.isSearching)
+                AbLoadingDot(size: 12, color: context.antgrid.accent)
+              else if (state.query.isNotEmpty)
+                Flexible(
+                  child: Text(
+                    state.error ??
+                        '${state.totalMatches} in ${state.totalFiles} files',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: state.error != null
+                          ? colorScheme.error
+                          : colorScheme.onSurfaceVariant,
+                      fontSize: AbTokens.fontXxs,
                     ),
-                ],
-              ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
             ],
           ),
         ),
-        SizedBox(
-          height: CarbonBorders.hairline,
-          child: ColoredBox(color: theme.borderSubtle(CarbonLayer.of(context))),
-        ),
+        const AbSeparator.horizontal(),
         Expanded(
           child: state.query.isEmpty
-              ? const CarbonEmptyState(
-                  icon: CarbonIcons.search,
-                  heading: 'Search across all files',
-                )
+              ? const AbEmptyState.compact(title: 'Search across all files')
               : state.results.isEmpty && !state.isSearching
-              ? CarbonEmptyState(
-                  icon: CarbonIcons.search,
-                  heading: 'No results for "${state.query}"',
-                )
+              ? AbEmptyState.compact(title: 'No results for "${state.query}"')
               : SearchResultList(
-                  key: const PageStorageKey('search_results'),
                   results: state.results,
                   query: state.query,
                   isRegex: state.regex,

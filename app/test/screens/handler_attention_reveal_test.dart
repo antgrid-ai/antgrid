@@ -9,9 +9,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/sessions_service.dart';
-import 'package:antgrid/widgets/session_overflow_menu.dart';
 import 'package:antgrid/widgets/workspace_panel.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -59,27 +57,6 @@ Future<void> _settle(WidgetTester tester) async {
   for (var i = 0; i < 5; i++) {
     await tester.pump(const Duration(milliseconds: 200));
   }
-}
-
-/// The brand dot on the kebab: an 8px disc in the Carbon brand fill, painted
-/// outside the trigger's layout. Found by what it draws, not by a key.
-Finder _attentionDot() {
-  final brand = {
-    CarbonThemeData.forBrightness(Brightness.light).colors.backgroundBrand,
-    CarbonThemeData.forBrightness(Brightness.dark).colors.backgroundBrand,
-  };
-  return find.descendant(
-    of: find.byType(SessionOverflowButton),
-    matching: find.byWidgetPredicate(
-      (w) =>
-          w is DecoratedBox &&
-          w.decoration is BoxDecoration &&
-          brand.contains((w.decoration as BoxDecoration).color) &&
-          w.child is SizedBox &&
-          (w.child as SizedBox).width == CarbonSpacing.spacing03 &&
-          (w.child as SizedBox).height == CarbonSpacing.spacing03,
-    ),
-  );
 }
 
 int _panelIndex(WidgetTester tester) => tester
@@ -166,7 +143,7 @@ void main() {
       await _giveSavedTab(tester, container);
       expect(_panelIndex(tester), isNot(WorkspaceView.handler.index));
 
-      await tester.tap(find.byType(CarbonOverflowMenu));
+      await tester.tap(find.byTooltip('Session options'));
       await _settle(tester);
       await tester.tap(find.text('Answer another session'));
       await _settle(tester);
@@ -182,7 +159,7 @@ void main() {
     tester,
   ) async {
     await _withShell(tester, (container) async {
-      expect(_attentionDot(), findsOneWidget);
+      expect(find.byKey(const Key('session-attention-dot')), findsOneWidget);
 
       container.read(activeSessionIdProvider.notifier).set('t2');
       await _settle(tester);
@@ -190,7 +167,7 @@ void main() {
       // t2's own count belongs to the badge over its Handler tab now. A dot
       // still pointing away from the session in focus would send the user
       // looking for a second waiting session that does not exist.
-      expect(_attentionDot(), findsNothing);
+      expect(find.byKey(const Key('session-attention-dot')), findsNothing);
     });
   });
 }

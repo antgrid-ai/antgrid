@@ -6,17 +6,11 @@ import type { DriverCtx } from "../types";
 // codex app-server rejects the -c hooks.* args that augmentAgentLaunch emits for
 // the interactive TUI (its -c parser errors on hooks.state={...} — "expected a
 // map"). Titles only need the top-level notify=[...] program, which app-server
-// DOES honor. MCP overrides use that same supported top-level config channel.
-export function codexChatAugmentArgs(augArgs: string[]): string[] {
-  const args: string[] = [];
-  for (let i = 0; i < augArgs.length - 1; i++) {
-    if (augArgs[i] !== "-c") continue;
-    const setting = augArgs[++i]!;
-    if (setting.startsWith("notify=") || setting.startsWith("mcp_servers.")) {
-      args.push("-c", setting);
-    }
-  }
-  return args;
+// DOES honor, so slice out just that -c pair. See the chat-mode title spike.
+export function codexNotifyOnlyArgs(augArgs: string[]): string[] {
+  const i = augArgs.findIndex((a) => a.startsWith("notify="));
+  if (i < 1) return [];
+  return [augArgs[i - 1], augArgs[i]]; // ["-c", "notify=[...]"]
 }
 
 // Unified exec (exec_command/write_stdin with persistent background sessions)
@@ -50,8 +44,6 @@ export function createDriver(
     onClose: (handler) => { registrations.push((ep) => ep.onClose(handler)); },
     dispose: () => { closed = true; spawned?.endpoint.dispose(); },
   };
-  // Assigned in start(), after the driver is built; only read from inside it.
-  let guidance: Promise<string | undefined> | undefined;
   const driver = new CodexDriver({
     onAgentSession: ctx.onAgentSession,
     sessionId: ctx.sessionId,
@@ -63,7 +55,6 @@ export function createDriver(
     // and let the original error surface instead of hanging startChat.
     diagnoseStartFailure: () =>
       spawned ? Promise.race([spawned.failureDiagnosis, Bun.sleep(1_500).then(() => null)]) : Promise.resolve(null),
-    memoryGuidance: () => guidance ?? Promise.resolve(undefined),
   });
   // Tie the spawned process lifetime to the driver's dispose. dispose
   // resolves only once codex has fully exited (spawned.kill awaits
@@ -83,8 +74,6 @@ export function createDriver(
     if (signal?.aborted) return Promise.reject(signal.reason);
     return starting ??= (async () => {
       const chatAug = ctx.chatAugment();
-      // Started before the spawn so Memory's status read overlaps codex startup.
-      guidance = ctx.memoryGuidance?.();
       spawned = spawn({
         cwd: ctx.projectPath,
         args: [
@@ -92,7 +81,7 @@ export function createDriver(
           ...(ctx.approvalPolicy === "bypass"
             ? ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"']
             : []),
-          ...codexChatAugmentArgs(chatAug.args),
+          ...codexNotifyOnlyArgs(chatAug.args),
         ],
         env: chatAug.env,
       });

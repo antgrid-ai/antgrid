@@ -354,7 +354,8 @@ Future<void> retryMobileMachine(ProviderContainer c) async {
 }
 
 /// Each of these would otherwise hold the old machine's socket open: an open
-/// project, and the focused workspace.
+/// project, and the focused workspace. Pinned projects stay — the session bus
+/// pins one only while an agent exchange rides it.
 void _releaseMachine(ProviderContainer c, String machineId) {
   final focus = c.read(selectedTargetProvider);
   if (focus != null &&
@@ -363,8 +364,11 @@ void _releaseMachine(ProviderContainer c, String machineId) {
     c.read(selectedTargetProvider.notifier).set(null);
   }
   final registry = c.read(projectSessionRegistryProvider.notifier);
+  final pinned = registry.registry.pinnedProjects;
   for (final id in c.read(projectSessionRegistryProvider)) {
-    if (id.contains('.') && baseDeviceUuid(id) == machineId) {
+    if (id.contains('.') &&
+        baseDeviceUuid(id) == machineId &&
+        !pinned.contains(id)) {
       registry.forceEvict(id);
     }
   }

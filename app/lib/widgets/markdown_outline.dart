@@ -1,6 +1,9 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:markdown_widget/markdown_widget.dart';
+
+import '../design/ab_colors.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_list_row.dart';
 
 /// The [TocController] a [MarkdownOutline] reads, extended with the two things
 /// the package keeps to itself.
@@ -8,8 +11,8 @@ import 'package:markdown_widget/markdown_widget.dart';
 /// [MarkdownWidget] publishes the heading list and the scroll position only
 /// into its controller — the first through [setTocList], the second through
 /// [onIndexChanged] — and its own `TocWidget` is the sole consumer of either.
-/// Overriding both is what lets the rail be built here instead, out of a
-/// Carbon tree view rather than `TocWidget`'s Material `ListTile`.
+/// Overriding both is what lets the rail be built here instead, out of the
+/// app's own row widget rather than `TocWidget`'s Material `ListTile`.
 class MarkdownTocController extends TocController {
   MarkdownTocController({required this.onHeadingCount});
 
@@ -66,36 +69,27 @@ class MarkdownOutline extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final headings = controller.tocList;
-    // The rail does not scroll itself to the active entry: the tree reveals
-    // only the row keyboard focus moves to, and following the mark would need
-    // the row extent and a scroll controller, which is only worth it for a
-    // document with more headings than the rail can hold.
+    // The rail does not scroll itself to the active entry. Nothing here knows a
+    // row's height — density and the text scaler both move it — so following
+    // the mark needs a per-row key and `ensureVisible`, which is only worth it
+    // for a document with more headings than the rail can hold.
     return ValueListenableBuilder<int>(
       valueListenable: controller.topVisibleIndex,
       builder: (context, topVisible, _) {
         final active = activeOutlineIndex(headings, topVisible);
-        return CarbonTreeView(
-          semanticLabel: 'Outline',
-          padding: const EdgeInsets.symmetric(
-            vertical: CarbonSpacing.spacing02,
-          ),
+        return ListView.builder(
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
           itemCount: headings.length,
-          itemBuilder: (context, index) {
-            final heading = headings[index];
-            final level = headingTag2Level[heading.node.headingConfig.tag] ?? 1;
-            return CarbonTreeNodeData(
-              id: index,
-              label: markdownHeadingText(heading.node),
-              depth: level - 1,
-              active: index == active,
-            );
-          },
-          // No local selection to set: the jump moves the document, the
-          // document reports its new position, and the mark follows.
-          onSelect: (id) {
-            controller.jumpToIndex(headings[id as int].widgetIndex);
-            onJump?.call();
-          },
+          itemBuilder: (context, index) => _OutlineRow(
+            heading: headings[index],
+            selected: index == active,
+            onTap: () {
+              // No local selection to set: the jump moves the document, the
+              // document reports its new position, and the mark follows.
+              controller.jumpToIndex(headings[index].widgetIndex);
+              onJump?.call();
+            },
+          ),
         );
       },
     );
@@ -122,6 +116,46 @@ int activeOutlineIndex(List<Toc> headings, int topWidgetIndex) {
     active = i;
   }
   return active;
+}
+
+class _OutlineRow extends StatelessWidget {
+  const _OutlineRow({
+    required this.heading,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Toc heading;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.antgrid;
+    final level = headingTag2Level[heading.node.headingConfig.tag] ?? 1;
+
+    return AbListRow(
+      density: AbRowDensity.sm,
+      horizontalPadding: AbTokens.space8,
+      selected: selected,
+      selectionStyle: AbRowSelection.accentBar,
+      hoverable: true,
+      title: Padding(
+        padding: EdgeInsets.only(left: AbTokens.space8 * (level - 1)),
+        child: Text(
+          markdownHeadingText(heading.node),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: selected ? c.textPrimary : c.textMuted,
+            fontWeight: level == 1 ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+      ),
+      onTap: onTap,
+    );
+  }
 }
 
 /// The plain text of a heading, for an outline label or an anchor slug.

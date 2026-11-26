@@ -1,14 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show RenderParagraph;
-import 'package:flutter/services.dart' show FontLoader, rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart' show SvgPicture;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -16,7 +11,10 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart'
     show AppleLogoPainter;
 
 import 'package:antgrid/demo/demo_identity.dart';
-import 'package:antgrid/providers/demo_mode.dart';
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/design/widgets/ab_password_field.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/screens/sign_in_screen.dart';
 import 'package:antgrid/services/auth_service.dart';
@@ -158,19 +156,12 @@ AuthService _authFor(
   authenticateInApp: authenticateInApp ?? (_, _) async => null,
 );
 
-/// Carbon draws the password field itself, so it is told apart from the
-/// address field by its variant rather than by a widget type of its own.
-final _passwordField = find.byWidgetPredicate(
-  (w) => w is CarbonTextInput && w.variant == CarbonTextInputVariant.password,
-  description: 'password CarbonTextInput',
-);
-
 Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
 
 Widget _wrapService(
   AuthService auth, {
   LastAuthMethodStore? store,
-  Brightness brightness = Brightness.dark,
+  AbColors palette = kDefaultPalette,
 }) {
   return ProviderScope(
     overrides: [
@@ -180,9 +171,9 @@ Widget _wrapService(
       ),
     ],
     child: MaterialApp(
-      theme: brightness == Brightness.dark
-          ? ThemeData.dark()
-          : ThemeData.light(),
+      theme: ThemeData.dark().copyWith(
+        extensions: <ThemeExtension<dynamic>>[palette],
+      ),
       home: const SignInScreen(),
     ),
   );
@@ -209,7 +200,7 @@ Future<List<String>> _pumpScreen(
   Future<bool> Function(Uri url)? launchUrl,
   AppleCredentialRequest? requestAppleCredential,
   InAppWebAuth? authenticateInApp,
-  Brightness brightness = Brightness.dark,
+  AbColors palette = kDefaultPalette,
 }) async {
   final paths = <String>[];
   final tickets = storage ?? (_GatedStorage(null)..gate.complete());
@@ -224,36 +215,12 @@ Future<List<String>> _pumpScreen(
         authenticateInApp: authenticateInApp,
       ),
       store: store,
-      brightness: brightness,
+      palette: palette,
     ),
   );
   // Let the (empty) restore resolve so it cannot land mid-test.
   await tester.pump();
   return paths;
-}
-
-/// Registers the real IBM Plex Sans. The test font gives every glyph the same
-/// advance, which would send the method row down its stacked fallback at any
-/// width and hide the one-row branches.
-Future<void> _loadPlex(WidgetTester tester) => tester.runAsync(() async {
-  final loader = FontLoader(
-    'packages/${CarbonTypography.package}/${CarbonTypography.sansFamily}',
-  );
-  for (final file in ['IBMPlexSans-Regular.ttf', 'IBMPlexSans-SemiBold.ttf']) {
-    loader.addFont(
-      rootBundle.load('packages/${CarbonTypography.package}/assets/fonts/$file'),
-    );
-  }
-  await loader.load();
-});
-
-/// True when [label] laid out on a single line.
-bool _singleLine(WidgetTester tester, String label) {
-  final paragraph = tester.renderObject<RenderParagraph>(find.text(label));
-  final boxes = paragraph.getBoxesForSelection(
-    TextSelection(baseOffset: 0, extentOffset: label.length),
-  );
-  return boxes.map((b) => b.top.round()).toSet().length == 1;
 }
 
 /// Types [email] into step 1 and commits it. Deliberately NOT `pumpAndSettle`:
@@ -398,9 +365,9 @@ void main() {
     testWidgets('asks for an address and nothing else', (tester) async {
       final paths = await _pumpScreen(tester);
 
-      expect(find.byType(CarbonTextInput), findsOneWidget);
+      expect(find.byType(AbTextField), findsOneWidget);
       expect(
-        _passwordField,
+        find.byType(AbPasswordField),
         findsNothing,
         reason:
             'offering a password here would ask the user a question about '
@@ -472,7 +439,7 @@ void main() {
       await _continueWith(tester, 'User@Example.com');
 
       expect(find.text('Enter your password'), findsOneWidget);
-      expect(_passwordField, findsOneWidget);
+      expect(find.byType(AbPasswordField), findsOneWidget);
       expect(
         paths,
         isEmpty,
@@ -635,22 +602,15 @@ void main() {
       expect(store.memory['user@example.com'], AuthMethod.apple);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-    for (final brightness in Brightness.values) {
-      testWidgets('the Apple button is pure black or white on ${brightness.name}', (
+    for (final MapEntry(key: preset, value: palette) in kPresets.entries) {
+      testWidgets('the Apple button is pure black or white on ${preset.name}', (
         tester,
       ) async {
-        // The test font runs about twice as wide as a real one, so at 1x the
-        // title wraps onto a second line and stretches the button, which no
-        // device font does at this width.
-        tester.platformDispatcher.textScaleFactorTestValue = 0.5;
-        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-        await _pumpScreen(tester, brightness: brightness);
+        await _pumpScreen(tester, palette: palette);
 
-        // Apple's rule, not a theme token: black fill with white ink on a
-        // light ground, white fill with black ink on a dark one.
-        final light = brightness == Brightness.light;
-        final fill = light ? const Color(0xFF000000) : const Color(0xFFFFFFFF);
-        final ink = light ? const Color(0xFFFFFFFF) : const Color(0xFF000000);
+        final ink = palette.bgSurface.computeLuminance() > 0.5
+            ? const Color(0xFF000000)
+            : const Color(0xFFFFFFFF);
         final title = tester.widget<Text>(find.text('Continue with Apple'));
         expect(title.style?.color, ink);
         final logo = tester
@@ -659,310 +619,8 @@ void main() {
             .whereType<AppleLogoPainter>()
             .single;
         expect(logo.color, ink);
-        final applePx = tester.getRect(
-          find.byKey(const ValueKey('sign-in-apple')),
-        );
-        expect(
-          title.style!.fontSize! / applePx.height,
-          closeTo(0.43, 0.02),
-          reason: "Apple's title-to-button-height proportion",
-        );
-        expect(
-          title.style?.fontFamily,
-          isNull,
-          reason: 'the system font, not Carbon Plex',
-        );
-        final box = tester.widget<Container>(
-          find.byKey(const ValueKey('sign-in-apple')),
-        );
-        expect(box.color, fill);
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
-
-    testWidgets(
-      'the Apple button spans the column and is no shorter than a method button',
-      (tester) async {
-        await _pumpScreen(tester);
-
-        final logos = tester
-            .widgetList<CustomPaint>(find.byType(CustomPaint))
-            .map((p) => p.painter)
-            .whereType<AppleLogoPainter>();
-        expect(
-          logos,
-          hasLength(1),
-          reason: "Apple's own artwork, not a Carbon icon",
-        );
-
-        final apple = tester.getRect(
-          find.byKey(const ValueKey('sign-in-apple')),
-        );
-        final column = tester.getRect(
-          find.widgetWithText(CarbonButton, 'Continue'),
-        );
-        expect(apple.left, column.left);
-        expect(apple.right, column.right);
-        for (final label in ['GitHub', 'Google', 'Password']) {
-          final method = tester.getRect(
-            find.widgetWithText(CarbonButton, label),
-          );
-          expect(
-            apple.height,
-            greaterThanOrEqualTo(method.height),
-            reason: 'Apple may not be less prominent than $label',
-          );
-          expect(apple.bottom, lessThanOrEqualTo(method.top));
-        }
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    Future<void> sizeView(WidgetTester tester, Size size, [double scale = 1]) {
-      tester.view.physicalSize = size;
-      tester.view.devicePixelRatio = 1;
-      tester.platformDispatcher.textScaleFactorTestValue = scale;
-      addTearDown(() {
-        tester.view.resetPhysicalSize();
-        tester.view.resetDevicePixelRatio();
-        tester.platformDispatcher.clearTextScaleFactorTestValue();
-      });
-      return _loadPlex(tester);
-    }
-
-    Rect methodRect(WidgetTester tester, String label) =>
-        tester.getRect(find.widgetWithText(CarbonButton, label));
-
-    // GitHub and Google are SVG brand glyphs, Password a Carbon icon.
-    Finder glyph(String label) => find.descendant(
-      of: find.widgetWithText(CarbonButton, label),
-      matching: find.byWidgetPredicate((w) => w is CarbonIcon || w is SvgPicture),
-    );
-
-    void expectOneSharedRow(WidgetTester tester, {required bool icons}) {
-      final labels = ['GitHub', 'Google', 'Password'];
-      final rects = [for (final l in labels) methodRect(tester, l)];
-      final column = tester.getRect(
-        find.widgetWithText(CarbonButton, 'Continue'),
-      );
-      expect(rects[1].top, rects[0].top);
-      expect(rects[2].top, rects[0].top);
-      expect(rects[1].height, rects[0].height);
-      expect(rects[2].height, rects[0].height);
-      expect(rects[0].left, column.left);
-      expect(rects[2].right, column.right);
-      for (var i = 0; i < 2; i++) {
-        // One shared rule: each button's outline sits on its neighbour's.
-        expect(
-          rects[i].right - rects[i + 1].left,
-          closeTo(CarbonBorders.hairline, 0.01),
-          reason: '${labels[i]} and ${labels[i + 1]} must share one rule',
-        );
-      }
-      for (var i = 0; i < labels.length; i++) {
-        final l = labels[i];
-        expect(_singleLine(tester, l), isTrue, reason: '$l must not wrap');
-        final text = tester.getRect(find.text(l));
-        if (!icons) {
-          expect(glyph(l), findsNothing, reason: '$l is the label-only tier');
-          expect(
-            text.center.dx,
-            closeTo(rects[i].center.dx, 1),
-            reason: '$l is centred',
-          );
-          continue;
-        }
-        final icon = tester.getRect(glyph(l));
-        expect(icon.right, lessThan(text.left), reason: 'icon before $l');
-        expect(
-          text.left - icon.right,
-          CarbonSpacing.spacing03,
-          reason: '8 between the icon and $l',
-        );
-        expect(
-          (icon.left - rects[i].left) - (rects[i].right - text.right),
-          closeTo(0, 1),
-          reason: 'the icon and $l are centred as a pair',
-        );
-      }
-    }
-
-    testWidgets(
-      'on a phone the three methods are one row of touching buttons, icon before label',
-      (tester) async {
-        await sizeView(tester, const Size(390, 844));
-        await _pumpScreen(tester);
-        expect(tester.takeException(), isNull);
-        expectOneSharedRow(tester, icons: true);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    testWidgets(
-      'on desktop the three methods are one row of touching buttons, icon before label',
-      (tester) async {
-        await sizeView(tester, const Size(1040, 720));
-        await _pumpScreen(tester);
-        expect(tester.takeException(), isNull);
-        expectOneSharedRow(tester, icons: true);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.windows),
-    );
-
-    testWidgets(
-      'a wide touch screen keeps the three methods on one row with icons',
-      (tester) async {
-        await sizeView(tester, const Size(600, 900));
-        await _pumpScreen(tester);
-        expect(tester.takeException(), isNull);
-        expectOneSharedRow(tester, icons: true);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    for (final scale in [1.0, 2.0]) {
-      testWidgets(
-        'the methods never clip at 320 wide, touch, ${scale}x text',
-        (tester) async {
-          await sizeView(tester, const Size(320, 640), scale);
-          await _pumpScreen(tester);
-          expect(tester.takeException(), isNull);
-
-          final column = tester.getRect(
-            find.widgetWithText(CarbonButton, 'Continue'),
-          );
-          final rects = <Rect>[];
-          for (final label in ['GitHub', 'Google', 'Password']) {
-            final button = methodRect(tester, label);
-            final text = tester.getRect(find.text(label));
-            expect(button.left, greaterThanOrEqualTo(column.left));
-            expect(button.right, lessThanOrEqualTo(column.right));
-            expect(text.left, greaterThanOrEqualTo(button.left));
-            expect(text.right, lessThanOrEqualTo(button.right));
-            expect(_singleLine(tester, label), isTrue, reason: '$label wraps');
-            rects.add(button);
-          }
-          // On one row or stacked, they read GitHub, Google, Password.
-          for (var i = 1; i < rects.length; i++) {
-            expect(
-              rects[i].top > rects[i - 1].top ||
-                  rects[i].left > rects[i - 1].left,
-              isTrue,
-              reason: 'method ${i + 1} must follow method $i in reading order',
-            );
-          }
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
-    }
-
-    testWidgets(
-      'a narrow phone drops the icons before the row, keeping labels centred',
-      (tester) async {
-        await sizeView(tester, const Size(320, 640));
-        await _pumpScreen(tester);
-        expect(tester.takeException(), isNull);
-        expectOneSharedRow(tester, icons: false);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    // Element order is paint order in the row's stack, so the last method in
-    // tree order is the one whose edge shows on the shared rule.
-    List<String> paintOrder(WidgetTester tester) => [
-      for (final b in tester.widgetList<CarbonButton>(
-        find.byType(CarbonButton),
-      ))
-        if (['GitHub', 'Google', 'Password'].contains(b.label)) b.label!,
-    ];
-
-    testWidgets(
-      'a pressed method paints over its neighbour so its whole border shows',
-      (tester) async {
-        await sizeView(tester, const Size(390, 844));
-        await _pumpScreen(tester);
-        expect(paintOrder(tester), ['GitHub', 'Google', 'Password']);
-
-        final press = await tester.startGesture(
-          tester.getCenter(find.widgetWithText(CarbonButton, 'GitHub')),
-        );
-        await tester.pump();
-        expect(paintOrder(tester).last, 'GitHub');
-        expectOneSharedRow(tester, icons: true);
-
-        await press.up();
-        await tester.pump();
-        expect(paintOrder(tester), ['GitHub', 'Google', 'Password']);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    testWidgets(
-      'a hovered method paints over its neighbour so its whole border shows',
-      (tester) async {
-        await sizeView(tester, const Size(1040, 720));
-        await _pumpScreen(tester);
-        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-        addTearDown(mouse.removePointer);
-        await mouse.addPointer(location: Offset.zero);
-        await mouse.moveTo(
-          tester.getCenter(find.widgetWithText(CarbonButton, 'Google')),
-        );
-        await tester.pump();
-        expect(paintOrder(tester).last, 'Google');
-
-        await mouse.moveTo(Offset.zero);
-        await tester.pump();
-        expect(paintOrder(tester), ['GitHub', 'Google', 'Password']);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.windows),
-    );
-
-    testWidgets(
-      'at 2x text on a narrow screen the methods stack in reading order with icons',
-      (tester) async {
-        await sizeView(tester, const Size(320, 640), 2);
-        await _pumpScreen(tester);
-        expect(tester.takeException(), isNull);
-
-        final column = tester.getRect(
-          find.widgetWithText(CarbonButton, 'Continue'),
-        );
-        var previousBottom = double.negativeInfinity;
-        for (final l in ['GitHub', 'Google', 'Password']) {
-          final rect = methodRect(tester, l);
-          expect(rect.left, column.left);
-          expect(rect.right, column.right);
-          expect(rect.top, greaterThanOrEqualTo(previousBottom));
-          expect(glyph(l), findsOneWidget, reason: 'stacked $l keeps its icon');
-          previousBottom = rect.bottom;
-        }
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
-
-    for (final brightness in Brightness.values) {
-      testWidgets('the demo tile title is drawn in the primary text colour on '
-          '${brightness.name}', (tester) async {
-        await _pumpScreen(tester, brightness: brightness);
-        final theme = CarbonTheme.of(tester.element(find.text(kDemoEntryLabel)));
-        final title = tester.widget<Text>(find.text(kDemoEntryLabel));
-        expect(title.style?.color, theme.colors.textPrimary);
-      });
-    }
-
-    testWidgets('the demo tile enters the demo', (tester) async {
-      await _pumpScreen(tester);
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(SignInScreen)),
-      );
-      expect(container.read(demoModeProvider), isFalse);
-
-      await tester.ensureVisible(find.text(kDemoEntryLabel));
-      await tester.tap(find.text(kDemoEntryLabel));
-      await tester.pump();
-
-      expect(container.read(demoModeProvider), isTrue);
-    });
 
     testWidgets('the Apple button signs in and records the hint', (
       tester,
@@ -1178,7 +836,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('Enter your password'), findsOneWidget);
-      expect(_passwordField, findsOneWidget);
+      expect(find.byType(AbPasswordField), findsOneWidget);
       expect(
         paths,
         isEmpty,
@@ -1207,7 +865,7 @@ void main() {
 
       expect(find.text('Enter a valid email'), findsOneWidget);
       expect(
-        _passwordField,
+        find.byType(AbPasswordField),
         findsNothing,
         reason:
             'step 2 renders the address as settled text with no field to '
@@ -1652,7 +1310,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Invalid email or password'), findsOneWidget);
-        expect(_passwordField, findsOneWidget);
+        expect(find.byType(AbPasswordField), findsOneWidget);
         expect(
           store.memory,
           isEmpty,
@@ -1680,18 +1338,8 @@ void main() {
         findsNWidgets(2),
         reason: 'the heading, plus the same words as an inline error',
       );
-      expect(_passwordField, findsOneWidget);
+      expect(find.byType(AbPasswordField), findsOneWidget);
       expect(paths, isEmpty);
-      expect(
-        find.descendant(
-          of: find.byWidgetPredicate(
-            (w) => w is Semantics && w.properties.liveRegion == true,
-          ),
-          matching: find.text('Enter your password'),
-        ),
-        findsOneWidget,
-        reason: 'a screen reader must hear the error the field now carries',
-      );
     });
 
     testWidgets('taking the link instead re-remembers the link method', (

@@ -3,7 +3,7 @@ import { delimiter, join } from "node:path";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createAgentRunScope } from "antgrid-agents/contracts";
-import { opencodeTestRuntime } from "./support/opencode-runtime";
+import { prepareTerminalLaunch } from "../src/agent-runtime";
 import * as pathProbe from "../src/path-probe";
 import { SessionManager } from "../src/session-manager";
 
@@ -55,7 +55,6 @@ async function startWithPrompt(prompt: string) {
   const sm = new SessionManager({
     projectId: "p1", storeDir: tempDir("ab-win-prompt-"), projectPath: tmpdir(),
     terminalManager: tm, agentSpec: { command: "claude", name: "claude" }, sendMessage: () => {},
-    agentRuntime: opencodeTestRuntime,
   });
   const s = sm.create(undefined, { tool: "opencode" });
   await sm.start(s.id, prompt);
@@ -119,7 +118,7 @@ describe("promptArgCount", () => {
   async function prepare(initialPrompt: string | undefined, rawArgs?: string) {
     const storeDir = tempDir("ab-win-prompt-store-");
     const scope = createAgentRunScope({ runId: "run", isCurrent: () => true, emit: () => {} });
-    return opencodeTestRuntime.prepareTerminal({
+    return prepareTerminalLaunch({
       tool: "opencode",
       configured: { name: "opencode", command: "opencode" },
       rawArgs,

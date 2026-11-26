@@ -1,5 +1,4 @@
 import 'package:antgrid/demo/fixtures/demo_scheduler_fixtures.dart';
-import 'package:antgrid/demo/demo_identity.dart' show kDemoAgentLabels;
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/auth.dart';
@@ -92,11 +91,11 @@ void main() {
   group('agent labels', () {
     test('are the sample labels in demo', () {
       demo(true);
-      expect(c.read(agentLabelsProvider), kDemoAgentLabels);
+      expect(c.read(schedulerAgentLabelsProvider), kDemoSchedulerAgentLabels);
     });
 
     test('come from the catalog outside demo', () {
-      expect(c.read(agentLabelsProvider), {'codex': 'Codex CLI'});
+      expect(c.read(schedulerAgentLabelsProvider), {'codex': 'Codex CLI'});
     });
   });
 

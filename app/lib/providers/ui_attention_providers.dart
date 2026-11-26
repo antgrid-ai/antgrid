@@ -31,13 +31,8 @@ enum WorkbenchSurface {
   workspace,
   newSession,
   scheduler,
-  memory,
   appSettings,
-  remoteDevices;
-
-  /// About the machine rather than any one project, so it replaces the
-  /// workspace even while a project is focused.
-  bool get machineWide => this == scheduler || this == memory;
+  remoteDevices,
 }
 
 /// The top-level workbench surface rendered beside the project drawer.

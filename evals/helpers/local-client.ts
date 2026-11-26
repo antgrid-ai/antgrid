@@ -10,9 +10,10 @@ export class LocalTestClient {
   private ws: WebSocket | null = null;
   private listeners = new Set<(msg: AbMessage, channel: string) => void>();
 
-  /** `capabilities` mirrors the desktop app's hello envelope. The bridge
-   *  ignores it for session-bus traffic, which never rides a loopback owner;
-   *  omitted entirely, the hello has no `capabilities` key. */
+  /** `capabilities` mirrors the desktop app's hello envelope — a loopback owner
+   *  only receives session-bus frames once it declares itself the carrier
+   *  (`sessionBusCarrier: true`). Omitted entirely, the hello has no
+   *  `capabilities` key, which is a valid non-carrier owner. */
   async connect(
     disc: LocalConnectInfo,
     opts: { capabilities?: Record<string, unknown> } = {},

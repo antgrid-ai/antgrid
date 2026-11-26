@@ -1,13 +1,18 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_toolbar.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
-import '../util/detached.dart';
 import 'copy_path.dart';
 import 'file_download.dart';
-import 'viewer_support.dart';
 
 /// Marks a subtree whose host already draws the file's title bar (name, path,
 /// download, close), so the viewers inside keep only their own tools. The
@@ -23,26 +28,6 @@ class ViewerChrome extends InheritedWidget {
   bool updateShouldNotify(ViewerChrome oldWidget) => false;
 }
 
-/// The row every viewer's tools sit in: a first-layer strip one control tall,
-/// so ghost buttons keep their own hit areas and the strip follows density.
-class ViewerToolbar extends StatelessWidget {
-  const ViewerToolbar({super.key, required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    return CarbonLayerSurface(
-      padding: const EdgeInsets.symmetric(horizontal: CarbonSpacing.spacing02),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: theme.controlHeight),
-        child: Row(spacing: CarbonSpacing.spacing02, children: children),
-      ),
-    );
-  }
-}
-
 /// Shared header for media/preview viewers. [trailing] holds optional actions
 /// (e.g. a preview/source toggle) placed left of Download and close.
 Widget buildViewerHeader({
@@ -54,9 +39,11 @@ Widget buildViewerHeader({
     builder: (context) {
       if (ViewerChrome.embeddedIn(context)) {
         if (trailing.isEmpty) return const SizedBox.shrink();
-        return ViewerToolbar(children: [const Spacer(), ...trailing]);
+        return AbToolbar.custom(
+          children: [const Spacer(), ...trailing],
+        );
       }
-      return ViewerToolbar(
+      return AbToolbar.custom(
         children: [
           Expanded(
             child: Align(
@@ -67,11 +54,7 @@ Widget buildViewerHeader({
           ...trailing,
           FileDownloadButton(content: content),
           if (onClose != null)
-            ViewerIconButton(
-              icon: CarbonIcons.close,
-              label: 'Close file',
-              onPressed: onClose,
-            ),
+            AbIconButton(icon: AbIcons.close, onTap: onClose),
         ],
       );
     },
@@ -97,6 +80,8 @@ class ViewerPathBreadcrumb extends StatefulWidget {
 }
 
 class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
+  bool _hovered = false;
+
   /// The focused checkout's root, from its `agent:status`. Read at click time
   /// through the container rather than watched, so rendering the crumb needs
   /// no `ProviderScope` and a status frame never rebuilds it.
@@ -111,12 +96,7 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
     }
   }
 
-  void _copy(String path) => detached('ViewerPathBreadcrumb', 'copy path', () async {
-    if (!mounted) return;
-    await copyPathWithToast(context, path);
-  });
-
-  void _showMenu() {
+  Future<void> _showMenu() async {
     final box = context.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
     final root = _checkoutRoot();
@@ -125,54 +105,48 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
         : (root == null || root.isEmpty)
         ? null
         : joinCheckoutPath(root, widget.path);
-    showCarbonMenuAt(
-      context,
-      box.localToGlobal(Offset(0, box.size.height)),
-      [
+    final pick = await showAbMenu<String>(
+      context: context,
+      anchorRect: box.localToGlobal(Offset.zero) & box.size,
+      entries: [
         // An image outside the checkout has no relative form, so the only
         // copy on offer is the absolute path it already is.
         if (!isAbsoluteViewerPath(widget.path))
-          CarbonMenuItem(
+          AbMenuItem(
             label: 'Copy relative path',
-            icon: const CarbonIcon(CarbonIcons.copy),
-            onPressed: () => _copy(widget.path),
+            icon: AbIcons.copy,
+            value: widget.path,
           ),
-        // Kept visible while an older bridge reports no checkout root, which
-        // is the only way the app learns where the checkout lives, so the
-        // reason is on the row rather than the item silently missing.
-        CarbonMenuItem(
+        AbMenuItem(
           label: 'Copy absolute path',
-          icon: const CarbonIcon(CarbonIcons.copy),
-          onPressed: absolute == null ? null : () => _copy(absolute),
+          icon: AbIcons.copy,
+          value: absolute ?? '',
+          enabled: absolute != null,
+          // An older bridge reports no checkout root, and the app has no
+          // other way to learn where the checkout lives.
           disabledReason: 'This agent does not report where its checkout is.',
         ),
       ],
-      semanticLabel: 'Copy path',
     );
+    if (!mounted || pick == null || pick.isEmpty) return;
+    await copyPathWithToast(context, pick);
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final colors = theme.colors;
+    final p = context.antgrid;
     final parts = _segments(widget.path).toList();
-    final folder = theme.typography.code.copyWith(color: colors.textSecondary);
-    final file = theme.typography.code.copyWith(
-      color: colors.textPrimary,
+    final folder = AbTokens.monoStyle(color: p.textMuted);
+    final file = AbTokens.monoStyle(
+      color: p.textPrimary,
       fontWeight: FontWeight.w600,
     );
     final crumbs = <Widget>[
       for (final (i, part) in parts.indexed) ...[
         if (i > 0)
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: CarbonSpacing.spacing01,
-            ),
-            child: CarbonIcon(
-              CarbonIcons.chevronRight,
-              size: CarbonSpacing.spacing04,
-              color: colors.iconSecondary,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
+            child: AbIcon(AbIcons.chevronRight, size: 12, color: p.textMuted),
           ),
         Text(
           i == parts.length - 1 ? part : _shortenFolder(part),
@@ -180,32 +154,34 @@ class _ViewerPathBreadcrumbState extends State<ViewerPathBreadcrumb> {
         ),
       ],
     ];
-    return CarbonTooltip(
+    return AbTooltip(
       message: 'Copy path',
-      child: CarbonInteraction(
-        onPressed: _showMenu,
+      child: Semantics(
+        button: true,
         label: 'Copy path ${widget.path}',
-        excludeChildSemantics: true,
-        builder: (context, state, child) => CarbonFocusRing(
-          visible: state.focusVisible,
-          child: Container(
-            constraints: BoxConstraints(minHeight: theme.smallControlHeight),
-            padding: const EdgeInsets.symmetric(
-              horizontal: CarbonSpacing.spacing03,
-            ),
-            color: state.hovered ? colors.layerHover01 : null,
-            child: Align(
-              widthFactor: 1,
-              heightFactor: 1,
-              alignment: Alignment.centerLeft,
-              child: child,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _showMenu,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AbTokens.space6,
+                vertical: AbTokens.space2,
+              ),
+              decoration: BoxDecoration(
+                color: _hovered ? p.bgHover : null,
+                borderRadius: AbTokens.borderRadius5,
+              ),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                reverse: true,
+                child: Row(mainAxisSize: MainAxisSize.min, children: crumbs),
+              ),
             ),
           ),
-        ),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          reverse: true,
-          child: Row(mainAxisSize: MainAxisSize.min, children: crumbs),
         ),
       ),
     );

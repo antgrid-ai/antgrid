@@ -2,7 +2,10 @@ import 'dart:convert';
 
 import 'package:antgrid/demo/demo_identity.dart' show kDemoProjectId;
 import 'package:antgrid/design/ab_theme.dart';
-
+import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_list_row.dart';
+import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/scheduler.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
@@ -23,7 +26,6 @@ import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/screens/scheduler_screen.dart';
 import 'package:antgrid/widgets/scheduler/schedule_editor.dart';
 import 'package:antgrid/widgets/scheduler/scheduler_format.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show RpcException;
 import 'package:flutter/material.dart';
@@ -266,43 +268,38 @@ void main() {
         ),
       );
       await tester.pump();
-      CarbonSideNavLink linkOf(String label) => tester.widget<CarbonSideNavLink>(
-        find.byWidgetPredicate(
-          (w) => w is CarbonSideNavLink && w.label == label,
-        ),
-      );
-      final newSession = find.byWidgetPredicate(
-        (w) => w is CarbonSideNavLink && w.label == 'New session',
-      );
-      final scheduler = find.byWidgetPredicate(
-        (w) => w is CarbonSideNavLink && w.label == 'Scheduler',
-      );
+      final newSession = find.widgetWithText(AbListRow, 'New Session');
+      final scheduler = find.widgetWithText(AbListRow, 'Scheduler');
       expect(newSession, findsOneWidget);
       expect(scheduler, findsOneWidget);
-      expect(find.widgetWithText(CarbonButton, 'New session'), findsNothing);
-      expect(find.widgetWithText(CarbonButton, 'Scheduler'), findsNothing);
-      expect(linkOf('New session').large, linkOf('Scheduler').large);
-      expect(linkOf('New session').current, isFalse);
-      expect(tester.getSize(newSession).height, greaterThanOrEqualTo(44));
-      expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(44));
+      expect(find.widgetWithText(AbButton, 'New Session'), findsNothing);
+      expect(find.widgetWithText(AbButton, 'Scheduler'), findsNothing);
+      final newSessionRow = tester.widget<AbListRow>(newSession);
+      final schedulerRow = tester.widget<AbListRow>(scheduler);
+      expect(newSessionRow.density, schedulerRow.density);
+      expect(newSessionRow.horizontalPadding, schedulerRow.horizontalPadding);
+      expect(newSessionRow.selectionStyle, AbRowSelection.surface);
+      expect(newSessionRow.hoverable, isTrue);
+      expect(tester.getSize(newSession).height, greaterThanOrEqualTo(48));
+      expect(tester.getSize(scheduler).height, greaterThanOrEqualTo(48));
       expect(
         tester.getBottomLeft(newSession).dy,
-        lessThanOrEqualTo(tester.getTopLeft(scheduler).dy),
+        lessThan(tester.getTopLeft(scheduler).dy),
       );
       container
           .read(workbenchSurfaceProvider.notifier)
           .set(WorkbenchSurface.scheduler);
       await tester.pump();
-      expect(linkOf('Scheduler').current, isTrue);
-      expect(linkOf('New session').current, isFalse);
+      expect(tester.widget<AbListRow>(scheduler).selected, isTrue);
+      expect(tester.widget<AbListRow>(newSession).selected, isFalse);
       await tester.tap(newSession);
       await tester.pump();
       expect(
         container.read(workbenchSurfaceProvider),
         WorkbenchSurface.newSession,
       );
-      expect(linkOf('New session').current, isTrue);
-      expect(linkOf('Scheduler').current, isFalse);
+      expect(tester.widget<AbListRow>(newSession).selected, isTrue);
+      expect(tester.widget<AbListRow>(scheduler).selected, isFalse);
     },
   );
 
@@ -355,9 +352,7 @@ void main() {
     expect(find.text('Open session'), findsOneWidget);
     await tester.tap(
       find.byWidgetPredicate(
-        (w) =>
-            w is CarbonOverflowMenu &&
-            w.semanticLabel == 'Actions for Daily review',
+        (w) => w is AbIconButton && w.tooltip == 'Actions for Daily review',
       ),
     );
     await tester.pumpAndSettle();
@@ -371,10 +366,7 @@ void main() {
       ),
       isTrue,
     );
-    await tester.tap(find.descendant(
-        of: find.byType(CarbonContentSwitcher<bool>),
-        matching: find.text('Runs'),
-      ));
+    await tester.tap(find.text('RUNS'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Permission required'), findsOneWidget);
     expect(find.textContaining('Needs input'), findsWidgets);
@@ -397,12 +389,12 @@ void main() {
       host.offline = true;
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
-      final add = tester.widget<CarbonButton>(
+      final add = tester.widget<AbIconButton>(
         find.byWidgetPredicate(
-          (w) => w is CarbonButton && w.semanticLabel == 'New schedule',
+          (w) => w is AbIconButton && w.tooltip == 'New schedule',
         ),
       );
-      expect(add.onPressed, isNull);
+      expect(add.onTap, isNull);
       expect(find.textContaining('Disconnected'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
@@ -419,9 +411,7 @@ void main() {
     container.read(_connection.notifier).set(false);
     await tester.pump();
     expect(
-      tester
-          .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Run now'))
-          .onPressed,
+      tester.widget<AbButton>(find.widgetWithText(AbButton, 'Run now')).onTap,
       isNull,
     );
     expect(
@@ -442,9 +432,7 @@ void main() {
       expect(find.text('Workspace ownership cleanup pending'), findsOneWidget);
       expect(find.text('Daily review'), findsOneWidget);
       expect(
-        tester
-            .widget<CarbonButton>(find.widgetWithText(CarbonButton, 'Run now'))
-            .onPressed,
+        tester.widget<AbButton>(find.widgetWithText(AbButton, 'Run now')).onTap,
         isNotNull,
       );
     },
@@ -503,9 +491,9 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Workspace settings locked'), findsOneWidget);
-      expect(find.byWidgetPredicate((w) => w is CarbonTextInput && w.variant == CarbonTextInputVariant.multiline), findsOneWidget);
+      expect(find.byType(AbPromptField), findsOneWidget);
       expect(find.text('main'), findsOneWidget);
-      await tester.tap(find.text('Weekday'));
+      await tester.tap(find.text('WEEKDAY'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pumpAndSettle();
       expect(host.calls.last.params['cron'], schedulerPresets['Weekdays']);

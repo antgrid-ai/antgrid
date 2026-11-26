@@ -1,73 +1,13 @@
 import 'dart:async';
 
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/providers/app_version.dart';
 import 'package:antgrid/widgets/help_menu.dart';
 import 'package:antgrid/widgets/settings/legal_notices_sheet.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-/// Opens a [CarbonMenu] holding only the Help submenu, the way the account
-/// footer does.
-class _HelpHost extends ConsumerStatefulWidget {
-  const _HelpHost({this.opened, this.shared});
-
-  final void Function(String)? opened;
-  final void Function(Rect?)? shared;
-
-  @override
-  ConsumerState<_HelpHost> createState() => _HelpHostState();
-}
-
-class _HelpHostState extends ConsumerState<_HelpHost> {
-  final _controller = CarbonPopupController();
-  Rect? _origin;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return CarbonMenu(
-      controller: _controller,
-      entries: [
-        helpMenu(
-          context: context,
-          ref: ref,
-          shareOrigin: _origin,
-          openUrl: (ctx, url) async {
-            expect(Navigator.of(ctx).canPop(), isFalse);
-            widget.opened?.call(url);
-          },
-          openChat: (ctx, _) async {
-            expect(Navigator.of(ctx).canPop(), isFalse);
-            widget.opened?.call('chat');
-          },
-          openLogs: (ctx, origin) async {
-            expect(Navigator.of(ctx).canPop(), isFalse);
-            widget.shared?.call(origin);
-          },
-        ),
-      ],
-      child: Builder(
-        builder: (anchor) => GestureDetector(
-          onTap: () {
-            final box = anchor.findRenderObject()! as RenderBox;
-            setState(() => _origin = box.localToGlobal(Offset.zero) & box.size);
-            _controller.open();
-          },
-          child: const Text('Open'),
-        ),
-      ),
-    );
-  }
-}
 
 Future<void> _pumpHelp(
   WidgetTester tester, {
@@ -85,10 +25,41 @@ Future<void> _pumpHelp(
       child: MaterialApp(
         theme: buildAbTheme(),
         home: Scaffold(
-          body: AbCarbonScope(
-            child: Align(
+          body: Consumer(
+            builder: (context, ref, _) => Align(
               alignment: Alignment.centerLeft,
-              child: _HelpHost(opened: opened, shared: shared),
+              child: Builder(
+                builder: (anchor) => GestureDetector(
+                  onTap: () {
+                    final box = anchor.findRenderObject()! as RenderBox;
+                    final rect = box.localToGlobal(Offset.zero) & box.size;
+                    showAbMenu<void>(
+                      context: context,
+                      anchorRect: rect,
+                      entries: [
+                        helpMenu(
+                          context: context,
+                          ref: ref,
+                          shareOrigin: rect,
+                          openUrl: (ctx, url) async {
+                            expect(Navigator.of(ctx).canPop(), isFalse);
+                            opened?.call(url);
+                          },
+                          openChat: (ctx, _) async {
+                            expect(Navigator.of(ctx).canPop(), isFalse);
+                            opened?.call('chat');
+                          },
+                          openLogs: (ctx, origin) async {
+                            expect(Navigator.of(ctx).canPop(), isFalse);
+                            shared?.call(origin);
+                          },
+                        ),
+                      ],
+                    );
+                  },
+                  child: const Text('Open'),
+                ),
+              ),
             ),
           ),
         ),
@@ -121,8 +92,7 @@ void main() {
         await tester.tap(find.text(entry.key));
         await tester.pumpAndSettle();
         expect(opened.last, entry.value);
-        // The anchor stays mounted, so a closed menu is read off its items.
-        expect(find.text('Help'), findsNothing);
+        expect(find.byType(AbMenu), findsNothing);
         await _openHelp(tester);
       }
     },
@@ -132,10 +102,10 @@ void main() {
     final version = Completer<String>();
     await _pumpHelp(tester, version: () => version.future);
     expect(find.text('Version'), findsOneWidget);
-    expect(find.text('Version 1.2.3 (456)'), findsNothing);
+    expect(find.text('1.2.3 (456)'), findsNothing);
     version.complete('1.2.3 (456)');
     await tester.pumpAndSettle();
-    expect(find.text('Version 1.2.3 (456)'), findsOneWidget);
+    expect(find.text('1.2.3 (456)'), findsOneWidget);
   });
 
   testWidgets('bundled legal notices open after dismissing Help', (
@@ -144,7 +114,7 @@ void main() {
     await _pumpHelp(tester);
     await tester.tap(find.text('Licences & notices'));
     await tester.pumpAndSettle();
-    expect(find.text('Help'), findsNothing);
+    expect(find.byType(AbMenu), findsNothing);
     expect(find.byType(LegalNoticesSheet), findsOneWidget);
     expect(
       find.textContaining('Mozilla Public License Version 2.0'),
@@ -164,7 +134,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(origin, isNotNull);
       expect(origin!.width, greaterThan(0));
-      expect(find.text('Help'), findsNothing);
+      expect(find.byType(AbMenu), findsNothing);
     }, variant: TargetPlatformVariant.only(platform));
   }
 

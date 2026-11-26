@@ -88,6 +88,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
         return {
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],
@@ -199,6 +200,7 @@ async function startAfterDesktopLeft() {
         return {
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],
@@ -273,6 +275,7 @@ async function startAfterPhoneLeft() {
         return {
           detach: () => {},
           sendTo: async () => "sent" as const,
+          deliverableTo: () => true,
         };
       },
       establishedPeers: () => [],

@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/widgets/handler/handler_ask_sheet.dart';
 import 'package:flutter/foundation.dart';
@@ -32,7 +31,6 @@ Future<List<HandlerAskSheetResult?>> _openBoxed(
   final box = <HandlerAskSheetResult?>[];
   await tester.pumpWidget(
     MaterialApp(
-      builder: (context, child) => AbCarbonScope(child: child!),
       home: Scaffold(
         body: Builder(
           builder: (context) => Center(
@@ -58,7 +56,6 @@ Future<HandlerAskSheetResult?> _open(
   HandlerAskSheetResult? result;
   await tester.pumpWidget(
     MaterialApp(
-      builder: (context, child) => AbCarbonScope(child: child!),
       home: Scaffold(
         body: Builder(
           builder: (context) => Center(
@@ -105,7 +102,6 @@ void main() {
     Object? captured = 'sentinel';
     await tester.pumpWidget(
       MaterialApp(
-        builder: (context, child) => AbCarbonScope(child: child!),
         home: Scaffold(
           body: Builder(
             builder: (context) => Center(

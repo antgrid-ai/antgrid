@@ -1,17 +1,28 @@
-import 'dart:math' as math;
-
-import 'package:carbon_flutter/carbon_flutter.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LengthLimitingTextInputFormatter;
-import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_disclosure_chevron.dart';
+import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_list_row.dart';
+import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_progress_rule.dart';
+import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_tap_target.dart';
+import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
 import '../../util/detached.dart';
-import '../carbon_empty_state.dart';
 import 'handler_instruction_composer.dart';
 import 'handler_item_status.dart';
 import 'handler_session_settings.dart';
@@ -31,17 +42,13 @@ const handlerDisclaimerText =
     "Handler acts on your behalf while you're away and can make mistakes. "
     'Flagged actions are listed in the activity log and can be undone.';
 
-
-/// Opens the backlog editor for [terminalId] as an adaptive Carbon modal: a
-/// centred dialog on a desktop, the whole screen on a phone.
-///
-/// [context] must sit under a Carbon scope, which the modal follows.
+/// Opens the backlog editor for [terminalId] as the shared adaptive sheet.
 Future<void> showHandlerBacklogDrawer(
   BuildContext context,
   String terminalId,
-) => showCarbonModal<void>(
+) => showAbAdaptiveSheet<void>(
   context,
-  builder: (_) => HandlerBacklogDrawer(terminalId: terminalId),
+  child: HandlerBacklogDrawer(terminalId: terminalId),
 );
 
 /// The live instruction stack for one armed session, with the four edits the
@@ -58,6 +65,7 @@ class HandlerBacklogDrawer extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.antgrid;
     final state = ref.watch(handlerStateProvider).value;
     final session = state?.sessions[terminalId];
     final backlog = session?.backlog ?? const <HandlerInstructionItem>[];
@@ -76,226 +84,107 @@ class HandlerBacklogDrawer extends ConsumerWidget {
     final pending =
         state?.pendingInstructionsFor(terminalId) ?? const <String>[];
     final editLock = handlerEditLockReason(pending);
-    return _BacklogFrame(
-      title: _backlogTitle(_sessionName(ref, terminalId)),
-      // Everything above the composer scrolls together. The composer is the
-      // one thing pinned, so a long list and a keyboard-up phone cost the list
-      // its room and never the box the user is typing into.
-      body: SingleChildScrollView(
-        padding: const EdgeInsetsDirectional.fromSTEB(
-          CarbonSpacing.spacing05,
-          CarbonSpacing.spacing03,
-          CarbonSpacing.spacing05,
-          CarbonSpacing.spacing05,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (session != null && session.askedFor.isNotEmpty)
-              _AskedForHeader(
-                askedFor: session.askedFor,
-                askedForTotal: session.askedForTotal,
-                pending: pending,
-                // Open only where the words are the whole content. With a list
-                // under them they are the context for it, and seven lines of
-                // context is seven lines the list does not get.
-                initiallyExpanded: backlog.isEmpty,
-              ),
-            // The meter is the list's own header. It divides the user's words
-            // from the work they became AND says how much of that work is
-            // left: a hairline would have said only the first, a sentence only
-            // the second.
-            if (session != null && backlog.isNotEmpty) ...[
-              const SizedBox(height: CarbonSpacing.spacing05),
-              CarbonProgressBar(
-                size: CarbonProgressBarSize.small,
-                value: session.backlogTotal == 0
-                    ? 0
-                    : session.backlogDone / session.backlogTotal,
-                label: handlerProgressLabel(session),
-              ),
-            ],
-            if (editLock != null) _EditLockNotice(reason: editLock),
-            const SizedBox(height: CarbonSpacing.spacing03),
-            // An outstanding instruction keeps the list on screen on its own:
-            // an invitation to add something is exactly the wrong thing to
-            // print over a sentence the user has just added.
-            if (backlog.isEmpty && pending.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: CarbonSpacing.spacing06,
-                ),
-                child: _NothingQueued(
-                  armed: session != null,
-                  hasInstructions: session?.askedFor.isNotEmpty ?? false,
-                ),
-              )
-            else
-              // Built up front rather than lazily: a lazy list fills the
-              // dialog however short it is, and a backlog is capped well below
-              // the size where that matters.
-              CarbonContainedList(
-                label: null,
-                variant: CarbonContainedListVariant.disclosed,
-                children: [
-                  for (var index = 0; index < backlog.length; index++)
-                    _BacklogRow(
-                      terminalId: terminalId,
-                      item: backlog[index],
-                      number: index + 1,
-                      canMoveUp: index > 0,
-                      canMoveDown: index < backlog.length - 1,
-                      labelFor: (id) => _dependencyLabel(numbers, byId, id),
-                      lockReason: editLock,
-                      // Anchored to this widget rather than to the row: the
-                      // menu closes before it calls back, and by then a status
-                      // frame may have taken the row out of the tree. This
-                      // context lives as long as the drawer does.
-                      onEdit: (item) => _openEditor(context, item),
-                    ),
-                  for (final text in pending) _PendingInstructionRow(text: text),
-                ],
-              ),
-          ],
-        ),
-      ),
-      // Only for a session that can receive one: an unarmed terminal has no
-      // backlog to add to, and offering the field anyway would send into a
-      // supervisor that is not running.
-      footer: session == null
-          ? null
-          : Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _InstructionComposer(terminalId: terminalId),
-                const _Disclaimer(),
-              ],
-            ),
-    );
-  }
-
-  /// The editor is a route of its own rather than a field opened inside the
-  /// row. A row that grew into a form would push every item below it down the
-  /// moment the menu closed, and on a phone the keyboard would then cover the
-  /// list it was reordering.
-  void _openEditor(BuildContext context, HandlerInstructionItem item) {
-    if (!context.mounted) return;
-    detached('HandlerBacklogDrawer', 'open item editor', () async {
-      await showCarbonModal<void>(
-        context,
-        builder: (_) => _ItemEditor(terminalId: terminalId, item: item),
-      );
-    });
-  }
-}
-
-/// The drawer's dialog, with the composer pinned under a scrolling body.
-///
-/// Not a `CarbonModal`: its body scrolls as one piece with nothing fixed below
-/// it, and the instruction box has to stay put while the list moves. The header
-/// and the surface follow the modal's, so the two read as one family.
-class _BacklogFrame extends StatelessWidget {
-  const _BacklogFrame({required this.title, required this.body, this.footer});
-
-  final String title;
-  final Widget body;
-  final Widget? footer;
-
-  /// A `CarbonModalSize.sm` dialog's width.
-  static const double _width = 560;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    final loc = CarbonLocalizations.of(context);
-    final fullScreen = CarbonModalFrame.fullScreenOf(context);
-    final level = CarbonLayer.of(context);
-
-    final header = Row(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsetsDirectional.fromSTEB(
-              CarbonSpacing.spacing05,
-              CarbonSpacing.spacing05,
-              CarbonSpacing.spacing03,
-              CarbonSpacing.spacing03,
-            ),
-            // Two lines at most: a generated session name runs to 60
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            _backlogTitle(_sessionName(ref, terminalId)),
+            onClose: () => Navigator.of(context).maybePop(),
+            // Budgeted for two lines: a generated session name runs to 60
             // characters and a renamed one to whatever the user typed, so
-            // "Backlog · <name>" wraps on a phone as the ordinary case.
-            child: Semantics(
-              header: true,
-              child: Text(
-                title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: (t.isTouch ? t.typography.headingLarge : t.typography.title)
-                    .copyWith(color: c.textPrimary),
+            // "Backlog · <name>" wraps on a phone as the ordinary case rather
+            // than the edge. Every other caller of this helper passes a
+            // constant that never reaches a second line.
+            wraps: true,
+          ),
+        ),
+        if (session != null && session.askedFor.isNotEmpty)
+          _AskedForHeader(
+            askedFor: session.askedFor,
+            askedForTotal: session.askedForTotal,
+            pending: pending,
+            // Open only where the words are the whole content. With a list
+            // under them they are the context for it, and seven lines of
+            // context is seven lines the list does not get — nothing above its
+            // `Flexible` scrolls, so on a phone with the keyboard up they come
+            // straight out of the work.
+            initiallyExpanded: backlog.isEmpty,
+          ),
+        // The meter is the list's own header. It divides the user's words from
+        // the work they became AND says how much of that work is left: a
+        // hairline would have said only the first, a sentence only the second,
+        // and the sentence on its own used to float between the two blocks
+        // reading as a fact about the one above it.
+        if (session != null && backlog.isNotEmpty) ...[
+          const SizedBox(height: AbTokens.space10),
+          AbProgressRule(
+            fraction: session.backlogTotal == 0
+                ? 0
+                : session.backlogDone / session.backlogTotal,
+          ),
+          const SizedBox(height: AbTokens.space6),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space16),
+            child: Text(
+              handlerProgressLabel(session),
+              // The tier the Handler card gives this same sentence. It reports
+              // the whole list; the muted tier filed the only summary on the
+              // sheet under chrome.
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
               ),
             ),
           ),
-        ),
-        CarbonButton.iconOnly(
-          icon: const CarbonIcon(CarbonIcons.close),
-          semanticLabel: loc.close,
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
-      ],
-    );
-
-    return Semantics(
-      scopesRoute: true,
-      namesRoute: true,
-      explicitChildNodes: true,
-      label: title,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final bounded = constraints.hasBoundedHeight;
-          final fill = fullScreen && bounded;
-          return SizedBox(
-            width: fullScreen
-                ? constraints.maxWidth
-                : math.min(_width, constraints.maxWidth),
-            height: fill ? constraints.maxHeight : null,
-            child: CarbonLayerSurface(
-              border: true,
-              padding: const EdgeInsets.all(CarbonBorders.hairline),
-              child: Column(
-                mainAxisSize: fill ? MainAxisSize.max : MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  header,
-                  // Tight on a phone so the composer sits at the bottom edge
-                  // however short the list is.
-                  Flexible(
-                    fit: fill ? FlexFit.tight : FlexFit.loose,
-                    child: ScrollConfiguration(
-                      behavior: ScrollConfiguration.of(
-                        context,
-                      ).copyWith(scrollbars: false),
-                      child: body,
-                    ),
+        ],
+        if (editLock != null) _EditLockNotice(reason: editLock),
+        const SizedBox(height: AbTokens.space8),
+        Flexible(
+          // An outstanding instruction keeps the list on screen on its own: an
+          // invitation to add something is exactly the wrong thing to print
+          // over a sentence the user has just added.
+          child: backlog.isEmpty && pending.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AbTokens.space16,
+                    vertical: AbTokens.space24,
                   ),
-                  if (footer case final footer?)
-                    DecoratedBox(
-                      decoration: BoxDecoration(
-                        border: Border(
-                          top: BorderSide(color: t.borderSubtle(level)),
+                  child: _NothingQueued(
+                    armed: session != null,
+                    hasInstructions: session?.askedFor.isNotEmpty ?? false,
+                  ),
+                )
+              : ListView.builder(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  itemCount: backlog.length + pending.length,
+                  itemBuilder: (_, index) => index >= backlog.length
+                      ? _PendingInstructionRow(
+                          text: pending[index - backlog.length],
+                        )
+                      : _BacklogRow(
+                          terminalId: terminalId,
+                          item: backlog[index],
+                          number: index + 1,
+                          canMoveUp: index > 0,
+                          canMoveDown: index < backlog.length - 1,
+                          labelFor: (id) => _dependencyLabel(numbers, byId, id),
+                          lockReason: editLock,
                         ),
-                      ),
-                      child: footer,
-                    ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
+                ),
+        ),
+        // Only for a session that can receive one: an unarmed terminal has no
+        // backlog to add to, and offering the field anyway would send into a
+        // supervisor that is not running.
+        if (session != null) ...[
+          _InstructionComposer(terminalId: terminalId),
+          const _Disclaimer(),
+        ] else
+          const SizedBox(height: AbTokens.space8),
+      ],
     );
   }
 }
@@ -336,7 +225,10 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 /// running appends it a second time. Naming what stands above instead invites
 /// what is genuinely missing.
 class _NothingQueued extends StatelessWidget {
-  const _NothingQueued({required this.armed, required this.hasInstructions});
+  const _NothingQueued({
+    required this.armed,
+    required this.hasInstructions,
+  });
 
   /// False for a terminal Handler was never armed on — a state with no
   /// invitation to make, since nothing here would receive it.
@@ -347,19 +239,19 @@ class _NothingQueued extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => armed
-      ? CarbonEmptyState(
-          heading: hasInstructions
+      ? AbEmptyState(
+          title: hasInstructions
               ? 'Nothing queued beyond what you asked for above.'
               : "Add what you want done while you're away.",
-          body:
+          subtitle:
               'Handler already answers what the agent pauses on. A backlog '
               'is the work it takes on by itself.',
         )
       // The Handler tab's own direction, verbatim: one instruction worded one
       // way wherever the user meets it.
-      : const CarbonEmptyState(
-          heading: 'Handler is not armed on this session.',
-          body: 'Arm it with the shield at the end of the top bar.',
+      : const AbEmptyState(
+          title: 'Handler is not armed on this session.',
+          subtitle: 'Arm it with the shield at the end of the top bar.',
         );
 }
 
@@ -393,9 +285,8 @@ class _NothingQueued extends StatelessWidget {
 /// heading, entry #1 over two lines, an elision line and the newest four at one
 /// line each — seven lines of `fontXs`, and nothing above the backlog's own
 /// `Flexible` scrolls, so on a keyboard-up phone those lines come out of the
-/// list. Closed, entry #1 stays on screen and the disclosure counts the rest and
-/// opens on one tap; it is never closed when there is nothing under it to read
-/// instead.
+/// list. Closed, it still says how many sentences it holds and opens on one
+/// tap; it is never closed when there is nothing under it to read instead.
 class _AskedForHeader extends StatefulWidget {
   const _AskedForHeader({
     required this.askedFor,
@@ -438,8 +329,7 @@ class _AskedForHeaderState extends State<_AskedForHeader> {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
+    final p = context.antgrid;
     // engine.instruct pushes the raw sentence into the instruction list
     // before extraction is even queued, so a routine status frame can carry
     // it here while _PendingInstructionRow is still drawing the same
@@ -486,90 +376,99 @@ class _AskedForHeaderState extends State<_AskedForHeader> {
         (1 + newest.length) -
         (widget.askedFor.length - visible.length);
 
-    // A disclosure over a block with nothing behind it is chrome that does
+    // A chevron over a block with nothing behind it is chrome that does
     // nothing, and entry #1 alone is the ordinary case.
     final collapsible = newest.isNotEmpty || elided > 0;
     final open = _expanded || !collapsible;
 
-    final rowStyle = t.typography.helper.copyWith(color: c.textSecondary);
-    final moreStyle = t.typography.helper.copyWith(color: c.textHelper);
-    Widget railed(List<Widget> children) => Container(
-      decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(
-            color: t.borderStrong(CarbonLayer.of(context)),
-            width: CarbonSpacing.spacing01,
-          ),
-        ),
+    final rowStyle = AbTokens.sansStyle(
+      fontSize: AbTokens.fontXs,
+      color: p.textSecondary,
+    );
+    final Widget header = Padding(
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space4),
+      child: AbSectionHeader(
+        label: 'What you asked for',
+        count: widget.askedForTotal,
+        padding: EdgeInsets.zero,
+        trailing: collapsible ? AbDisclosureChevron(expanded: open) : null,
       ),
-      padding: const EdgeInsetsDirectional.only(start: CarbonSpacing.spacing03),
+    );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        0,
+        AbTokens.space16,
+        0,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: children,
-      ),
-    );
-    Widget line(String text, {TextStyle? style}) => Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing01),
-      child: Text(
-        text,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: style ?? rowStyle,
-      ),
-    );
-    final heading = Padding(
-      padding: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing03),
-      child: Text(
-        'What you asked for',
-        style: t.typography.label.copyWith(color: c.textSecondary),
-      ),
-    );
-    // Entry #1 stays outside the disclosure: it is what the session was opened
-    // to do, and closed it still has to say so.
-    final quote = railed([
-      Text(
-        first,
-        // Two lines for entry #1 once the block is open: a sentence typed
-        // on the New Session canvas runs to whatever length suited the
-        // user, and one line clips most of a pasted one.
-        maxLines: open ? 2 : 1,
-        overflow: TextOverflow.ellipsis,
-        style: rowStyle,
-      ),
-    ]);
-    if (!collapsible) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [heading, quote],
-      );
-    }
-    final more = newest.length + elided;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        heading,
-        quote,
-        CarbonAccordion(
-          flush: true,
-          children: [
-            CarbonAccordionItem(
-              title: Text('$more more'),
-              open: _expanded,
-              onOpenChanged: (v) => setState(() => _expanded = v),
-              child: railed([
-                if (elided > 0)
-                  line(
-                    elided == 1
-                        ? '1 more in between'
-                        : '$elided more in between',
-                    style: moreStyle,
-                  ),
-                for (final item in newest) line(item),
-              ]),
+        children: [
+          if (collapsible)
+            AbTapTarget(
+              // Shorter than the 44dp default. The target is the full width of
+              // the sheet rather than a square, and the height that floor adds
+              // on a phone comes out of the list this block exists to give room
+              // back to.
+              minSize: AbTokens.rowHeightSm,
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: header,
+            )
+          else
+            header,
+          Container(
+            decoration: BoxDecoration(
+              border: Border(
+                left: BorderSide(
+                  color: p.borderStrong,
+                  width: AbTokens.space2,
+                ),
+              ),
             ),
-          ],
-        ),
-      ],
+            padding: const EdgeInsets.only(left: AbTokens.space8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  first,
+                  // Two lines for entry #1 once the block is open: a sentence
+                  // typed on the New Session canvas runs to whatever length
+                  // suited the user, and one line clips most of a pasted one.
+                  // Closed, it is the preview of a block that opens on a tap.
+                  maxLines: open ? 2 : 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: rowStyle,
+                ),
+                if (open) ...[
+                  if (elided > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AbTokens.space2),
+                      child: Text(
+                        elided == 1
+                            ? '1 more in between'
+                            : '$elided more in between',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                    ),
+                  for (final item in newest)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AbTokens.space2),
+                      child: Text(
+                        item,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: rowStyle,
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -761,8 +660,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   @override
   Widget build(BuildContext context) {
     ref.listen(handlerStateProvider, (_, next) => _adoptGrant(next.value));
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
+    final p = context.antgrid;
     final held = _held;
     final outstanding =
         ref
@@ -773,30 +671,42 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
     final stillHeld = held != null && outstanding.contains(held) ? held : null;
     final echoed = _echoed;
     final granted = echoed == null ? null : _grantLiterals(echoed);
-    return Padding(
-      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: p.borderSubtle)),
+      ),
+      padding: const EdgeInsets.only(top: AbTokens.space8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          HandlerInstructionComposer(
-            terminalId: widget.terminalId,
-            controller: _input,
-            // "Send", not "Add": a sentence here can take a line off this
-            // list or reword one as readily as it can add one, and a control
-            // promising to add is at its most wrong exactly when the user is
-            // cancelling something.
-            hintText: 'Send an instruction…',
-            judge: (
-              judgeTool: _judgeValue.judgeTool,
-              judgeModel: _judgeValue.judgeModel,
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              AbTokens.space16,
+              AbTokens.space8,
+              AbTokens.space16,
+              stillHeld == null && granted == null
+                  ? AbTokens.space8
+                  : AbTokens.space4,
             ),
-            onJudgeChanged: _commitJudge,
-            judgeScopeNote: handlerJudgeScopeNextPass,
-            send: HandlerComposerSend(
-              tooltip: 'Send to Handler',
-              semanticLabel: 'Send to Handler',
-              onSend: _submitTyped,
+            child: HandlerInstructionComposer(
+              terminalId: widget.terminalId,
+              controller: _input,
+              // "Send", not "Add": a sentence here can take a line off this
+              // list or reword one as readily as it can add one, and a control
+              // promising to add is at its most wrong exactly when the user is
+              // cancelling something.
+              hintText: 'Send an instruction…',
+              judge: (
+                judgeTool: _judgeValue.judgeTool,
+                judgeModel: _judgeValue.judgeModel,
+              ),
+              onJudgeChanged: _commitJudge,
+              judgeScopeNote: handlerJudgeScopeNextPass,
+              send: HandlerComposerSend(
+                tooltip: 'Send to Handler',
+                semanticLabel: 'Send to Handler',
+                onSend: _submitTyped,
+              ),
             ),
           ),
           // Answered where the send was made, and in the same verb the field,
@@ -805,11 +715,24 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
           // is unchanged, and the tail row saying so may be scrolled away —
           // which is a broken button, not a debounce.
           if (stillHeld != null)
-            Padding(
-              padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-              child: Text(
-                'Already sending "${_quoted(stillHeld)}".',
-                style: t.typography.helper.copyWith(color: c.textSecondary),
+            // Full width so the line starts on the composer's own left edge;
+            // the column around it centres anything that sizes to its child.
+            SizedBox(
+              width: double.infinity,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AbTokens.space16,
+                  0,
+                  AbTokens.space16,
+                  AbTokens.space8,
+                ),
+                child: Text(
+                  'Already sending "${_quoted(stillHeld)}".',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textSecondary,
+                  ),
+                ),
               ),
             ),
           if (granted != null && granted.isNotEmpty)
@@ -840,28 +763,43 @@ class _GrantEcho extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Also allowed for the rest of this session:',
-            style: t.typography.helper.copyWith(color: c.textSecondary),
-          ),
-          Text(
-            granted,
-            // Clipped rather than wrapped away: a wide instruction can name more
-            // than fits, and the bridge appends its own "+N more" so the sample
-            // says how much it left out wherever it is read.
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: t.typography.code.copyWith(color: c.textSecondary),
-          ),
-        ],
+    final p = context.antgrid;
+    // Full width so the lines start on the composer's own left edge; the
+    // column around it centres anything that sizes to its child.
+    return SizedBox(
+      width: double.infinity,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AbTokens.space16,
+          0,
+          AbTokens.space16,
+          AbTokens.space8,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Also allowed for the rest of this session:',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
+              ),
+            ),
+            Text(
+              granted,
+              // Clipped rather than wrapped away: a wide instruction can name more
+              // than fits, and the bridge appends its own "+N more" so the sample
+              // says how much it left out wherever it is read.
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -891,25 +829,43 @@ class _Disclaimer extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.antgrid;
     final dismissed = ref.watch(
       firstRunProvider.select((s) => s.handlerDisclaimerDismissed),
     );
     if (dismissed) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsetsDirectional.fromSTEB(
-        CarbonSpacing.spacing05,
-        0,
-        CarbonSpacing.spacing05,
-        CarbonSpacing.spacing05,
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: p.borderSubtle)),
       ),
-      child: CarbonNotification(
-        kind: CarbonNotificationKind.info,
-        subtitle: handlerDisclaimerText,
-        // The away hint's own wording for the same gesture: one permanent
-        // dismissal, named the same way wherever the user meets it.
-        closeLabel: "Dismiss — won't show again",
-        onClose: () =>
-            ref.read(firstRunProvider.notifier).dismissHandlerDisclaimer(),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space16,
+        vertical: AbTokens.space8,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              handlerDisclaimerText,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: p.textMuted,
+              ),
+            ),
+          ),
+          const SizedBox(width: AbTokens.space6),
+          // The away hint's own wording for the same gesture: one permanent
+          // dismissal, named the same way wherever the user meets it.
+          AbIconButton(
+            icon: AbIcons.close,
+            tooltip: "Dismiss — won't show again",
+            tone: AbIconButtonTone.muted,
+            onTap: () =>
+                ref.read(firstRunProvider.notifier).dismissHandlerDisclaimer(),
+          ),
+        ],
       ),
     );
   }
@@ -942,13 +898,12 @@ class _Disclaimer extends ConsumerWidget {
 /// quote backing the outcome, and this list is scanned for what happened rather
 /// than for what was said — putting the proof beside the claim would cost the
 /// claim the line it earned.
-Text? _itemMeta(
+Widget? _itemMeta(
   BuildContext context,
   HandlerInstructionItem item,
   List<({int? number, String? status})> deps,
 ) {
-  final t = CarbonTheme.of(context);
-  final c = t.colors;
+  final p = context.antgrid;
   final outcome = _trimmedOrNull(item.outcome);
   final condition = _trimmedOrNull(item.condition);
   final parts = <List<InlineSpan>>[
@@ -956,8 +911,9 @@ Text? _itemMeta(
       [
         TextSpan(
           text: item.status,
-          style: t.typography.code.copyWith(
-            color: handlerToneColor(c, handlerItemTone(item.status)),
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXxs,
+            color: handlerItemStatusColor(p, item.status),
           ),
         ),
       ],
@@ -965,7 +921,7 @@ Text? _itemMeta(
       [TextSpan(text: outcome)]
     else if (condition != null)
       [TextSpan(text: 'only if $condition')],
-    if (deps.isNotEmpty) _waitsOnSpans(t, deps),
+    if (deps.isNotEmpty) _waitsOnSpans(p, deps),
   ];
   if (parts.isEmpty) return null;
   return Text.rich(
@@ -977,7 +933,7 @@ Text? _itemMeta(
         ],
       ],
     ),
-    style: t.typography.helper.copyWith(color: c.textHelper),
+    style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
   );
 }
 
@@ -996,10 +952,9 @@ Text? _itemMeta(
 /// nothing a user can act on, and the menu entry that drops it names it the same
 /// way this line does.
 List<InlineSpan> _waitsOnSpans(
-  CarbonThemeData t,
+  AbColors p,
   List<({int? number, String? status})> deps,
 ) {
-  final c = t.colors;
   final numbered = [
     for (final d in deps)
       if (d.number != null) d,
@@ -1011,13 +966,16 @@ List<InlineSpan> _waitsOnSpans(
       if (i > 0) const TextSpan(text: ', '),
       TextSpan(
         text: '${numbered[i].number}',
-        style: t.typography.code.copyWith(color: c.textSecondary),
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXxs,
+          color: p.textSecondary,
+        ),
       ),
       if (_stallingStatuses.contains(numbered[i].status))
         TextSpan(
           text: ' (${numbered[i].status})',
           style: TextStyle(
-            color: handlerToneColor(c, handlerItemTone(numbered[i].status!)),
+            color: handlerItemStatusColor(p, numbered[i].status!),
           ),
         ),
     ],
@@ -1107,16 +1065,24 @@ class _EditLockNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final p = context.antgrid;
     return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space4,
+        AbTokens.space16,
+        0,
+      ),
       child: Text(
         reason,
         // A step brighter than the progress line above it, and no louder. The
         // usual reason is a hold the user caused by asking for something; the
         // rest sit under a Save already greyed out, which says "not now" loudly
         // enough on its own.
-        style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: p.textSecondary,
+        ),
       ),
     );
   }
@@ -1379,33 +1345,27 @@ class _PendingInstructionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    return CarbonContainedListRow(
-      title: '$text. $handlerPendingInstructionLabel',
+    final p = context.antgrid;
+    return AbListRow(
+      horizontalPadding: AbTokens.space16,
       // No number: the sentence holds no place in the order until the extractor
       // has decided how many items it is. The column is held open anyway, so
       // the sentence starts on the same edge as the rows it becomes.
       leading: const HandlerRunNumberGap(),
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // The user's own sentence, at whatever length they typed it.
-          Text(
-            text,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: t.typography.body.copyWith(color: c.textSecondary),
-          ),
-          // Where every other row's status word stands, in the same face: this
-          // row is reporting the one thing that is happening to it.
-          Text(
-            handlerPendingInstructionLabel,
-            style: t.typography.code.copyWith(color: c.textHelper),
-          ),
-        ],
+      title: Text(text, style: AbTokens.sansStyle(color: p.textSecondary)),
+      // The user's own sentence, at whatever length they typed it.
+      titleMaxLines: 2,
+      // Where every other row's status word stands, in the same face: this row
+      // is reporting the one thing that is happening to it.
+      subtitle: Text(
+        handlerPendingInstructionLabel,
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXxs,
+          color: p.textMuted,
+        ),
       ),
+      // Always two lines, so always the start-aligned case above.
+      crossAxisAlignment: CrossAxisAlignment.start,
     );
   }
 }
@@ -1419,7 +1379,6 @@ class _BacklogRow extends ConsumerWidget {
     required this.canMoveDown,
     required this.labelFor,
     required this.lockReason,
-    required this.onEdit,
   });
 
   final String terminalId;
@@ -1437,9 +1396,6 @@ class _BacklogRow extends ConsumerWidget {
   /// this row is held.
   final String? lockReason;
 
-  /// Opens the editor from a context that outlives this row.
-  final void Function(HandlerInstructionItem item) onEdit;
-
   /// Whether something this item waits on is itself stalled, which is what
   /// decides between the two ways out of `blocked`.
   bool get _waitsOnStalledWork => (item.dependsOn ?? const <String>[]).any(
@@ -1448,161 +1404,203 @@ class _BacklogRow extends ConsumerWidget {
 
   /// One menu entry, carrying the lock. Built through here rather than at each
   /// site so an entry added later cannot be the one that still ships a stale
-  /// list. The reason a held entry is greyed is the notice above the list.
-  CarbonMenuItem _entry({
+  /// list.
+  AbMenuItem _entry({
     required String label,
-    required CarbonIcons icon,
+    required String icon,
     required VoidCallback onTap,
     bool danger = false,
-  }) => CarbonMenuItem(
+  }) => AbMenuItem(
     label: label,
-    icon: CarbonIcon(icon),
-    kind: danger ? CarbonMenuItemKind.danger : CarbonMenuItemKind.standard,
-    onPressed: lockReason == null ? onTap : null,
+    icon: icon,
+    danger: danger,
+    onTap: onTap,
+    enabled: lockReason == null,
+    disabledReason: lockReason,
   );
+
+  /// The editor is a route of its own rather than a field opened inside the
+  /// row. A row that grew into a form would push every item below it down the
+  /// moment the menu closed, and on a phone the keyboard would then cover the
+  /// list it was reordering — [showAbAdaptiveSheet] pads for that inset itself,
+  /// and leaves the backlog where the user left it.
+  Future<void> _openEditor(BuildContext context) => showAbAdaptiveSheet<void>(
+    context,
+    child: _ItemEditor(terminalId: terminalId, item: item),
+  );
+
+  Future<void> _openMenu(
+    BuildContext context,
+    ProviderContainer container,
+  ) async {
+    final anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    // The navigator, not this row: [showAbMenu] pops before it calls an entry,
+    // and by then a status frame may have shortened the list out from under the
+    // row that was tapped. A navigator outlives every route it hosts, so the
+    // editor opens over the drawer either way.
+    final navigator = Navigator.of(context);
+    await showAbMenu<void>(
+      context: context,
+      anchorRect: anchor,
+      preferred: AbMenuPlacement.above,
+      width: 200,
+      entries: [
+        // First, and on every row whatever its status. The text an item is
+        // judged against was written by the extraction pass, which splits one
+        // sentence into several, rewords them and cuts them at
+        // [handlerMaxItemChars] — so a wrong item is far more often mis-worded
+        // than misplaced, and Delete-and-retype costs another extraction.
+        _entry(
+          label: 'Edit',
+          icon: AbIcons.edit,
+          onTap: () => detached(
+            'HandlerBacklogDrawer',
+            'open item editor',
+            () => _openEditor(navigator.context),
+          ),
+        ),
+        // Inapplicable actions are omitted, never shown disabled: an edge item
+        // has nowhere to move, a finished one has nothing to requeue, and an
+        // item behind stalled work would be re-blocked before the user looked
+        // away. An edit held by [lockReason] is the other case and stays on the
+        // menu greyed: the action applies, it is the moment that doesn't, and
+        // dropping it would answer "why can't I move this" with a shorter menu.
+        if (canMoveUp) ...[
+          // Offered without its mirror. The queue runs from the top, so lifting
+          // an item ahead is a change that holds, while sending one to the
+          // bottom is undone by the next instruction — extraction appends.
+          _entry(
+            label: 'Move to top',
+            icon: AbIcons.moveToTop,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withItemAtTop(b, item.id),
+            ),
+          ),
+          _entry(
+            label: 'Move up',
+            icon: AbIcons.arrowUp,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withItemMoved(b, item.id, -1),
+            ),
+          ),
+        ],
+        if (canMoveDown)
+          _entry(
+            label: 'Move down',
+            icon: AbIcons.arrowDown,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withItemMoved(b, item.id, 1),
+            ),
+          ),
+        if (_requeueableStatuses.contains(item.status) && !_waitsOnStalledWork)
+          _entry(
+            label: 'Requeue',
+            icon: AbIcons.refresh,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withItemRequeued(b, item.id),
+            ),
+          ),
+        // Dropping a gate is an edit, so it sits where the other edits do. It
+        // used to be an ✕ on a dependency's own row — one mis-tap from a
+        // scroll, ungating work the user asked to be gated, on the one sheet
+        // that refuses to let a gate be written back. It names the dependency
+        // the way the row above it does, by number.
+        for (final id in item.dependsOn ?? const <String>[])
+          _entry(
+            label: switch (labelFor(id).number) {
+              final n? => 'Stop waiting on $n',
+              _ => 'Stop waiting on a missing item',
+            },
+            icon: AbIcons.link,
+            onTap: () => _sendEdit(
+              container,
+              terminalId,
+              (b) => _withoutDependency(b, item.id, id),
+            ),
+          ),
+        const AbMenuDivider(),
+        _entry(
+          label: 'Delete',
+          icon: AbIcons.trash,
+          danger: true,
+          onTap: () =>
+              _sendEdit(container, terminalId, (b) => _withoutItem(b, item.id)),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
+    final p = context.antgrid;
     final container = ref.container;
     final deps = [
       for (final id in item.dependsOn ?? const <String>[]) labelFor(id),
     ];
     final meta = _itemMeta(context, item, deps);
-    final metaText = meta?.textSpan?.toPlainText();
-    return CarbonContainedListRow(
-      title: metaText == null ? item.text : '${item.text}. $metaText',
+    return AbListRow(
+      horizontalPadding: AbTokens.space16,
       leading: HandlerRunNumber(number: number, status: item.status),
-      content: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // An item's text is bounded at MAX_ITEM_CHARS (400) and reaches it
-          // whenever extraction falls back to the raw sentence — a failed judge
-          // CLI, a rate-limited account, an agent that cannot judge headless.
-          // Nothing else on this row carries the text, so a single clipped line
-          // leaves the user reordering and deleting items they cannot read.
-          Text(
-            item.text,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            // Work that is over and settled recedes: this list is scanned for
-            // what is still moving. `failed` deliberately does NOT recede with
-            // it — it is over and unresolved, which is the one state here that
-            // wants the user's eye.
-            style: t.typography.body.copyWith(
-              color: _settledStatuses.contains(item.status)
-                  ? c.textSecondary
-                  : c.textPrimary,
-            ),
-          ),
-          if (meta != null)
-            Padding(
-              padding: const EdgeInsets.only(top: CarbonSpacing.spacing01),
-              child: meta,
-            ),
-        ],
+      title: Text(
+        item.text,
+        // Work that is over and settled recedes: this list is scanned for what
+        // is still moving. `failed` deliberately does NOT recede with it — it
+        // is over and unresolved, which is the one state here that wants the
+        // user's eye.
+        style: AbTokens.sansStyle(
+          color: _settledStatuses.contains(item.status)
+              ? p.textSecondary
+              : null,
+        ),
       ),
+      // An item's text is bounded at MAX_ITEM_CHARS (400) and reaches it
+      // whenever extraction falls back to the raw sentence — a failed judge
+      // CLI, a rate-limited account, an agent that cannot judge headless.
+      // Nothing else on this row carries the text, so a single clipped line
+      // leaves the user reordering and deleting items they cannot read.
+      titleMaxLines: 2,
+      subtitle: meta,
+      // The outcome is a sentence the bridge wrote to a length nothing caps,
+      // and its verdict is as often at the end as the start ("committed the
+      // migration but the push was rejected") — one line clips exactly the half
+      // worth reading.
+      subtitleMaxLines: 2,
+      // Which line the number and the menu stand on, and it turns on whether
+      // this row has a second line at all.
+      //
+      // With one, the text block is taller than the menu button and start is
+      // what keeps both beside the line they qualify rather than adrift in the
+      // gap under it.
+      //
+      // With none, start is what the user sees as broken: the button is then
+      // the tallest thing in the row (24, and 44 once AbTapTarget applies its
+      // mobile floor), so the text hangs off the top of a box the button sized
+      // — eight pixels of air above a one-line item and fifteen below. Nothing
+      // in Flutter can give a widget a hit area taller than its layout box, so
+      // banding the button to the title's line would buy that balance with a
+      // tap target no thumb can find. Centring buys it for nothing, because on
+      // a row of one line the first line IS the centre.
+      crossAxisAlignment: meta == null
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
       // Every edit sits behind this menu rather than on the row: a delete one
       // mis-tap away from a scroll would drop work the user asked for.
-      actions: [
-        CarbonOverflowMenu(
-          preferAbove: true,
-          semanticLabel: 'Item actions',
-          entries: [
-            // First, and on every row whatever its status. The text an item is
-            // judged against was written by the extraction pass, which splits
-            // one sentence into several, rewords them and cuts them at
-            // [handlerMaxItemChars] — so a wrong item is far more often
-            // mis-worded than misplaced, and Delete-and-retype costs another
-            // extraction.
-            _entry(
-              label: 'Edit',
-              icon: CarbonIcons.edit,
-              onTap: () => onEdit(item),
-            ),
-            // Inapplicable actions are omitted, never shown disabled: an edge
-            // item has nowhere to move, a finished one has nothing to requeue,
-            // and an item behind stalled work would be re-blocked before the
-            // user looked away. An edit held by [lockReason] is the other case
-            // and stays on the menu greyed: the action applies, it is the
-            // moment that doesn't, and dropping it would answer "why can't I
-            // move this" with a shorter menu.
-            if (canMoveUp) ...[
-              // Offered without its mirror. The queue runs from the top, so
-              // lifting an item ahead is a change that holds, while sending one
-              // to the bottom is undone by the next instruction — extraction
-              // appends.
-              _entry(
-                label: 'Move to top',
-                icon: CarbonIcons.upToTop,
-                onTap: () => _sendEdit(
-                  container,
-                  terminalId,
-                  (b) => _withItemAtTop(b, item.id),
-                ),
-              ),
-              _entry(
-                label: 'Move up',
-                icon: CarbonIcons.arrowUp,
-                onTap: () => _sendEdit(
-                  container,
-                  terminalId,
-                  (b) => _withItemMoved(b, item.id, -1),
-                ),
-              ),
-            ],
-            if (canMoveDown)
-              _entry(
-                label: 'Move down',
-                icon: CarbonIcons.arrowDown,
-                onTap: () => _sendEdit(
-                  container,
-                  terminalId,
-                  (b) => _withItemMoved(b, item.id, 1),
-                ),
-              ),
-            if (_requeueableStatuses.contains(item.status) &&
-                !_waitsOnStalledWork)
-              _entry(
-                label: 'Requeue',
-                icon: CarbonIcons.renew,
-                onTap: () => _sendEdit(
-                  container,
-                  terminalId,
-                  (b) => _withItemRequeued(b, item.id),
-                ),
-              ),
-            // Dropping a gate is an edit, so it sits where the other edits do.
-            // It names the dependency the way the row above it does, by number.
-            for (final id in item.dependsOn ?? const <String>[])
-              _entry(
-                label: switch (labelFor(id).number) {
-                  final n? => 'Stop waiting on $n',
-                  _ => 'Stop waiting on a missing item',
-                },
-                icon: CarbonIcons.link,
-                onTap: () => _sendEdit(
-                  container,
-                  terminalId,
-                  (b) => _withoutDependency(b, item.id, id),
-                ),
-              ),
-            const CarbonMenuDivider(),
-            _entry(
-              label: 'Delete',
-              icon: CarbonIcons.trashCan,
-              danger: true,
-              onTap: () => _sendEdit(
-                container,
-                terminalId,
-                (b) => _withoutItem(b, item.id),
-              ),
-            ),
-          ],
+      trailing: Builder(
+        builder: (buttonContext) => AbIconButton(
+          icon: AbIcons.more,
+          tooltip: 'Item actions',
+          onTap: () => _openMenu(buttonContext, container),
         ),
-      ],
+      ),
     );
   }
 }
@@ -1775,7 +1773,7 @@ class _ItemEditorState extends ConsumerState<_ItemEditor> {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final p = context.antgrid;
     final state = ref.watch(handlerStateProvider).value;
     final pending =
         state?.pendingInstructionsFor(widget.terminalId) ?? const <String>[];
@@ -1784,82 +1782,134 @@ class _ItemEditorState extends ConsumerState<_ItemEditor> {
       state?.sessions[widget.terminalId],
     );
     final condition = _condition;
-    return CarbonModal(
-      title: 'Edit item',
-      size: CarbonModalSize.sm,
-      body: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _CappedField(
-            controller: _text,
-            // Opens at the two lines the row itself renders, so an item is the
-            // same shape here as where it was tapped, and grows to six before
-            // scrolling inside itself — a fallback item runs to
-            // [handlerMaxItemChars], and a field that grew that far would leave
-            // the sheet nothing but field.
-            minLines: 2,
-            maxLines: 6,
-            autofocus: true,
-            semanticLabel: 'Item text',
-            onChanged: (_) => _onEdited(),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            'Edit item',
+            onClose: () => Navigator.of(context).maybePop(),
           ),
-          if (condition != null) ...[
-            Padding(
-              padding: const EdgeInsets.only(
-                top: CarbonSpacing.spacing05,
-                bottom: CarbonSpacing.spacing02,
-              ),
-              // The row's own words for this clause, so the gate is named the
-              // same thing where it is read and where it is changed.
-              child: Text(
-                'Runs only if',
-                style: t.typography.label.copyWith(
-                  color: t.colors.textSecondary,
-                ),
-              ),
-            ),
-            _CappedField(
-              controller: condition,
-              minLines: 1,
-              maxLines: 3,
-              semanticLabel: 'Runs only if',
-              onChanged: (_) => _onEdited(),
-            ),
-            // Emptying the field is the un-gating act, and the one edit on this
-            // sheet whose effect is invisible in what it leaves behind. So it
-            // is answered at the moment it happens, and never before.
-            if (_editedCondition == null)
-              Padding(
-                padding: const EdgeInsets.only(top: CarbonSpacing.spacing02),
-                child: Text(
-                  'No condition — the item runs whenever its turn comes.',
-                  style: t.typography.helper.copyWith(
-                    color: t.colors.textHelper,
+        ),
+        // The fields are the only part that gives. On a phone the sheet gets
+        // the screen minus the keyboard, and a fallback item at six lines plus
+        // a condition asks for more than that leaves — so what a user is in the
+        // middle of scrolls, and the title saying where they are and the row
+        // saying how to leave both stay put.
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AbTokens.space16,
+                    AbTokens.space8,
+                    AbTokens.space16,
+                    0,
+                  ),
+                  child: _CappedField(
+                    controller: _text,
+                    // Opens at the two lines the row itself renders, so an item
+                    // is the same shape here as where it was tapped, and grows
+                    // to six before scrolling inside itself — a fallback item
+                    // runs to [handlerMaxItemChars], and a field that grew that
+                    // far would leave the sheet nothing but field.
+                    minLines: 2,
+                    maxLines: 6,
+                    autofocus: true,
+                    onChanged: (_) => _onEdited(),
                   ),
                 ),
-              ),
-          ],
-          // Beside the buttons it explains rather than above the fields: a
-          // reason the user has to go looking for is a reason they meet after
-          // the second tap.
-          if (blocked != null) _EditLockNotice(reason: blocked),
-        ],
-      ),
-      actions: [
-        CarbonModalAction(
-          label: 'Cancel',
-          kind: CarbonButtonKind.secondary,
-          onPressed: () => Navigator.of(context).maybePop(),
+                if (condition != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AbTokens.space16,
+                      AbTokens.space10,
+                      AbTokens.space16,
+                      AbTokens.space4,
+                    ),
+                    // The row's own words for this clause, so the gate is named
+                    // the same thing where it is read and where it is changed.
+                    child: Text(
+                      'Runs only if',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textMuted,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AbTokens.space16,
+                    ),
+                    child: _CappedField(
+                      controller: condition,
+                      minLines: 1,
+                      maxLines: 3,
+                      onChanged: (_) => _onEdited(),
+                    ),
+                  ),
+                  // Emptying the field is the un-gating act, and the one edit on
+                  // this sheet whose effect is invisible in what it leaves
+                  // behind. So it is answered at the moment it happens, and
+                  // never before.
+                  if (_editedCondition == null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        AbTokens.space16,
+                        AbTokens.space4,
+                        AbTokens.space16,
+                        0,
+                      ),
+                      child: Text(
+                        'No condition — the item runs whenever its turn comes.',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
         ),
-        // Off while anything blocks the save, and off until there is something
-        // to save. Only the second half goes unsaid: a Save that would save
-        // nothing is read as done rather than as broken, and a wholesale
-        // replace that changes nothing costs a round trip to leave the list
-        // exactly where it stands.
-        CarbonModalAction(
-          label: 'Save item',
-          onPressed: blocked == null && _changed ? _save : null,
+        // Beside the button it explains rather than above the fields, and never
+        // inside the part that scrolls: a reason the user has to go looking for
+        // is a reason they meet after the second tap.
+        if (blocked != null) _EditLockNotice(reason: blocked),
+        const SizedBox(height: AbTokens.space16),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            0,
+            AbTokens.space16,
+            AbTokens.space16,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              AbButton(
+                label: 'Cancel',
+                onTap: () => Navigator.of(context).maybePop(),
+              ),
+              const SizedBox(width: AbTokens.space8),
+              // Off while anything blocks the save, and off until there is
+              // something to save. Only the second half goes unsaid: a Save
+              // that would save nothing is read as done rather than as broken,
+              // and a wholesale replace that changes nothing costs a round trip
+              // to leave the list exactly where it stands.
+              AbButton(
+                label: 'Save item',
+                variant: AbButtonVariant.primary,
+                onTap: blocked == null && _changed ? _save : null,
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1886,7 +1936,6 @@ class _CappedField extends StatelessWidget {
     required this.onChanged,
     required this.minLines,
     required this.maxLines,
-    required this.semanticLabel,
     this.autofocus = false,
   });
 
@@ -1894,7 +1943,6 @@ class _CappedField extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final int minLines;
   final int maxLines;
-  final String semanticLabel;
   final bool autofocus;
 
   /// Roughly a short clause — far enough out that the warning arrives while
@@ -1907,18 +1955,32 @@ class _CappedField extends StatelessWidget {
     // clusters: a field that stopped at 400 while a counter still promised room
     // would be the broken-field report this line exists to prevent.
     final left = handlerMaxItemChars - controller.text.characters.length;
-    return CarbonTextInput(
-      controller: controller,
-      variant: CarbonTextInputVariant.multiline,
-      autofocus: autofocus,
-      minLines: minLines,
-      maxLines: maxLines,
-      semanticLabel: semanticLabel,
-      inputFormatters: [LengthLimitingTextInputFormatter(handlerMaxItemChars)],
-      helperText: left <= _warnWithin
-          ? (left == 1 ? '1 character left' : '$left characters left')
-          : null,
-      onChanged: onChanged,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbTextField(
+          controller: controller,
+          autofocus: autofocus,
+          minLines: minLines,
+          maxLines: maxLines,
+          inputFormatters: [
+            LengthLimitingTextInputFormatter(handlerMaxItemChars),
+          ],
+          onChanged: onChanged,
+        ),
+        if (left <= _warnWithin)
+          Padding(
+            padding: const EdgeInsets.only(top: AbTokens.space4),
+            child: Text(
+              left == 1 ? '1 character left' : '$left characters left',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: context.antgrid.textMuted,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

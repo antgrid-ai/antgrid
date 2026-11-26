@@ -44,7 +44,7 @@ function makeAuthenticatingRelayFactory() {
       close: () => {},
       attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
         streamOpts.onAdmitted?.();
-        return { detach: () => {}, sendTo: async () => "sent" as const };
+        return { detach: () => {}, sendTo: async () => "sent" as const, deliverableTo: () => true };
       },
       sendPushDeliver: () => {},
       accountDisowns: () => false,

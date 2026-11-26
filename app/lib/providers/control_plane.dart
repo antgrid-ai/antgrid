@@ -8,13 +8,14 @@ import '../launcher/local_agent_launcher.dart';
 import '../launcher/project_resolve.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../session_bus/directory_warm_targets.dart';
+import '../session_bus/session_bus_links.dart';
 import '../util/device_id.dart';
 import '../util/netwatch.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'eager_control_planes.dart';
 import 'mobile_connection.dart';
-import 'memory_surface.dart' show memoryTargetProvider;
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -103,20 +104,9 @@ final controlPlaneStateProvider = StreamProvider.family<ControlPlaneState, Strin
   ref,
   bareDeviceUuid,
 ) async* {
-  // A rebuild cancels this generator, but cannot cancel an `await` it is parked
-  // on. The eager kick, refresh and Retry all invalidate this provider mid-dial,
-  // so the superseded build's await later rejects (up to awaitSession's 90s
-  // TimeoutException) with no subscriber left; rethrown from here it lands in
-  // the zone as an uncaught fatal. Only a live build may surface the error.
-  final ControlPlaneClient? client;
-  try {
-    client = await ref.watch(
-      controlPlaneClientForProvider(bareDeviceUuid).future,
-    );
-  } catch (_) {
-    if (!ref.mounted) return;
-    rethrow;
-  }
+  final client = await ref.watch(
+    controlPlaneClientForProvider(bareDeviceUuid).future,
+  );
   if (client == null) {
     yield const ControlPlaneState();
     return;
@@ -241,27 +231,6 @@ void invalidateControlPlaneProviders(RefreshRef ref, String uuid) {
 /// the refreshed set).
 const _kRefreshDialWait = Duration(seconds: 8);
 
-/// An offline machine otherwise parks a request on the dial's 90 s worst case.
-/// 20 s covers one handshake attempt; the supervisor keeps dialling, and the
-/// surfaces retry once the machine connects.
-const kMachineRequestDialWait = Duration(seconds: 20);
-
-/// Null when the machine is not connected within [kMachineRequestDialWait],
-/// whatever the dial's failure.
-Future<ControlPlaneClient?> connectedControlPlaneClient(
-  ProviderContainer container,
-  String uuid,
-) async {
-  try {
-    final client = await container
-        .read(controlPlaneClientForProvider(uuid).future)
-        .timeout(kMachineRequestDialWait);
-    return client != null && client.transport.isEstablished ? client : null;
-  } catch (_) {
-    return null;
-  }
-}
-
 /// Refresh machine inventory, then force a fresh control-plane attempt for the
 /// requested machines. This is the manual "device may have come online" path:
 /// an earlier offline attempt can leave the transport/client providers in an
@@ -280,43 +249,40 @@ Future<void> refreshMachineInventoryAndControlPlanes(
   if (!ref.mounted) return;
 
   final targets = uuids.whereType<String>().toSet();
-  await Future.wait(targets.map((uuid) => retryMachineControlPlane(ref, uuid)));
-}
-
-/// One machine's share of a manual refresh: probe a live client, otherwise
-/// force a fresh dial. Also the retry path for a screen that holds a settled
-/// dial failure, which re-reading the cached provider would only replay.
-Future<void> retryMachineControlPlane(RefreshRef ref, String uuid) async {
   final relayManager = ref.read(relayConnectionManagerProvider);
-  try {
-    // A mid-climb machine leaves this read pending until its dial settles;
-    // the timeout throws into the catch below, forcing the fresh attempt.
-    final client = await ref
-        .read(controlPlaneClientForProvider(uuid).future)
-        .timeout(_kRefreshDialWait);
-    if (client != null) {
-      await _probeAndReconcile(client);
-      return;
-    }
-  } catch (_) {
-    // Fall through to a fresh connection attempt below.
-  }
-  if (!ref.mounted) return;
+  await Future.wait(
+    targets.map((uuid) async {
+      try {
+        // A mid-climb machine leaves this read pending until its dial settles;
+        // the timeout throws into the catch below, forcing the fresh attempt.
+        final client = await ref
+            .read(controlPlaneClientForProvider(uuid).future)
+            .timeout(_kRefreshDialWait);
+        if (client != null) {
+          await _probeAndReconcile(client);
+          return;
+        }
+      } catch (_) {
+        // Fall through to a fresh connection attempt below.
+      }
+      if (!ref.mounted) return;
 
-  // A machine can sit Connected UNDER a stale cached rejection (a failed
-  // eager launch dial that later self-recovered via peer presence).
-  // Restarting it would kill the live peer session and every project stream
-  // riding the socket — and the invalidate + re-read below succeeds on the
-  // live connection anyway, so only a not-connected machine is torn down
-  // for its fresh attempt. Restarted, never released: the machine is still
-  // wanted, and a release would strand every open project bound to it.
-  if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
-    await relayManager.restart(uuid);
-  }
-  invalidateControlPlaneProviders(ref, uuid);
-  await refreshControlPlanes(ref, [
-    uuid,
-  ]).timeout(_kRefreshDialWait, onTimeout: () {});
+      // A machine can sit Connected UNDER a stale cached rejection (a failed
+      // eager launch dial that later self-recovered via peer presence).
+      // Restarting it would kill the live peer session and every project stream
+      // riding the socket — and the invalidate + re-read below succeeds on the
+      // live connection anyway, so only a not-connected machine is torn down
+      // for its fresh attempt. Restarted, never released: the machine is still
+      // wanted, and a release would strand every open project bound to it.
+      if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
+        await relayManager.restart(uuid);
+      }
+      invalidateControlPlaneProviders(ref, uuid);
+      await refreshControlPlanes(ref, [
+        uuid,
+      ]).timeout(_kRefreshDialWait, onTimeout: () {});
+    }),
+  );
 }
 
 /// Dial every eager target (see [eagerControlPlaneTargetsProvider]) so opening
@@ -374,11 +340,10 @@ Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
 
 /// Bare deviceUuids whose control-plane socket should stay open right now: the
 /// picker's viewed machine (if any), the focused remote target, every machine
-/// backing >=1 open project, the Scheduler's or Memory's machine, and the eager
-/// and in-scope dial targets. The reaper releases any open control-plane socket
-/// NOT in this set. Computed centrally (not per-tab/per-row) so de-selecting a
-/// machine is observed even though its picker tab / sessions subtree is no
-/// longer rendered.
+/// backing >=1 open project, and the eager and in-scope dial targets. The
+/// reaper releases any open control-plane socket NOT in this set. Computed
+/// centrally (not per-tab/per-row) so de-selecting a machine is observed even
+/// though its picker tab / sessions subtree is no longer rendered.
 final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   ref.watch(projectSessionRegistryProvider); // rebuild on open-set changes
   final alive = ref
@@ -390,32 +355,26 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // promotion/data-plane setup can settle. This also keeps a focused remote's
   // control plane available for retry and status operations after an open error.
   final focusedTarget = ref.watch(selectedTargetProvider);
-  final surface = ref.watch(workbenchSurfaceProvider);
-  // A machine-wide surface reads its machine over the control plane, which
-  // nothing else pins once that machine's drawer row is collapsed.
-  final surfaceMachine = switch (surface) {
-    WorkbenchSurface.scheduler => ref.watch(schedulerTargetProvider),
-    WorkbenchSurface.memory => ref.watch(
-      memoryTargetProvider.select((t) => t?.machineId),
-    ),
-    _ => null,
-  };
-  if (surfaceMachine != null) alive.add(surfaceMachine);
+  if (ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.scheduler) {
+    final machine = ref.watch(schedulerTargetProvider);
+    if (machine != null) alive.add(machine);
+  }
   if (focusedTarget != null && !focusedTarget.isLocal) {
     alive.add(baseDeviceUuid(focusedTarget.registrationId));
   }
-  // The New Session picker also views a machine's control plane directly
-  // (it's shown when no project is selected or the surface is
+  // The New Session picker is the only surface that views a machine's control
+  // plane directly (it's shown when no project is selected or the surface is
   // explicitly New Session — mirrors app_shell's route switch). Pin the viewed
   // machine ONLY while that surface is live: off-screen, the picker's fallback
   // source would otherwise hold a socket open forever. That fallback bites on
   // mobile especially, where there is no Local tab, so the default 'local'
   // selection resolves `visiblePickerSource` to the first MACHINE.
+  final surface = ref.watch(workbenchSurfaceProvider);
   // Not on a phone that holds one chosen machine: pinning every open socket
   // here would keep the machine it just switched away from connected.
   final pickerVisible =
       !ref.watch(mobileConnectEnabledProvider) &&
-      !surface.machineWide &&
+      surface != WorkbenchSurface.scheduler &&
       (ref.watch(selectedRegistrationIdProvider) == null ||
           surface == WorkbenchSurface.newSession);
   if (pickerVisible) {
@@ -462,5 +421,19 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // Desktop's counterpart: the in-scope machines the sidebar's Needs you and
   // live counts read adverts from (capped — see [kScopeControlPlaneCap]).
   alive.addAll(ref.watch(scopeControlPlaneTargetsProvider));
+  // Every machine on the far side of a leg this app carries. The session bus
+  // routes through this app, so its socket is not a nicety: closing it strands
+  // an agent mid-exchange with no way to say so. Derived purely from the links,
+  // so nothing has to remember to unpin — a leg going idle drops its machine
+  // out of this set on the next pass. The link set only changes when a peer is
+  // actually addressed or expires (`SessionBusLinkDemand` suppresses an
+  // unchanged emission), which is what keeps this fan-in — whose rebuilds have
+  // crashed the frame before — off the path of ordinary bus traffic.
+  alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
+  // Machines a directory read MISSED, warm until their own deadline. The
+  // link set above covers a peer this app is already carrying an exchange for;
+  // this covers the peer nobody has reached yet, which is the case the
+  // peek-only directory otherwise answers "none asked" forever.
+  alive.addAll(ref.watch(directoryWarmTargetsProvider));
   return alive;
 });

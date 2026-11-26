@@ -1,25 +1,27 @@
 // app/lib/widgets/projects_drawer.dart
 import 'dart:async';
 
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
-import 'docked_column.dart';
-import 'drawer/drawer_metrics.dart';
-import '../screens/memory_screen.dart' show openMemoryScreen;
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
+import '../design/widgets/ab_docked_column.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/account_agents.dart';
-import '../providers/account_machines.dart'
-    show kLocalMachineKey, machinePickProvider;
 import '../providers/control_plane.dart';
 import '../providers/demo_mode.dart';
-import '../providers/memory.dart';
-import '../providers/mobile_connection.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
+import '../providers/mobile_connection.dart';
 import '../providers/project_index.dart';
 import '../providers/providers.dart';
 import '../util/ab_log.dart';
@@ -81,70 +83,67 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
 
   @override
   Widget build(BuildContext context) {
-    final demo = ref.watch(demoModeProvider);
-    final oneMachine = ref.watch(mobileConnectEnabledProvider);
-    return AbCarbonScope(
-      child: Builder(
-        builder: (context) {
-          final t = CarbonTheme.of(context);
-          return ClipRect(
-            // Clipped because [DockedColumn] never squeezes its header: on a
-            // window too short for even that, a truncated sidebar beats chrome
-            // bleeding over the workspace beside it.
-            child: CarbonSideNav(
-              width: kDrawerPanelWidth,
-              endBorder: true,
-              // Every row's trailing cell centres on the rail this inset
-              // defines, so the refresh, status marks and row actions share
-              // one vertical line.
-              endInset: kDrawerRailInset,
-              // Not a Column: on a first run the chrome below the list is
-              // ~300px of fixed height, which a short window cannot pay for —
-              // and a Flex answers that by asserting, because its non-flex
-              // children are laid out unbounded. Here the list yields first and
-              // the setup section scrolls inside its own slot, so no height can
-              // overflow.
-              child: DockedColumn(
-                // Keeps a strip of the list on screen however short the window
-                // gets; otherwise a tall checklist leaves the sidebar showing
-                // no projects at all. A full target is the smallest slice that
-                // still holds a whole row on either density, and Carbon rows
-                // do not grow with the text scale, so it needs no scaling.
-                minBodyExtent: t.minTarget,
-                header: const _TopChrome(),
-                body: _Body(
-                  refreshKey: _refreshKey,
-                  onRefresh: _refreshBusy ? null : _refreshFromButton,
-                ),
-                // Docked here, not on the New Session canvas: the drawer is the
-                // only desktop surface mounted on both routes, and the last
-                // setup steps are performed from inside a session.
-                dock: const _SetupDock(),
-                // Permanent affordances, so none may be scrolled out of reach —
-                // the update row in particular stays pending until the app
-                // restarts (see update_row.dart). The account footer is
-                // declared last so it is the last BUDGETED slot to give up a
-                // pixel; only the unbudgeted header outranks it. Neither of
-                // those belongs to a machine-less demo: the footer's account
-                // row fetches the user, the subscription and the pricing
-                // catalogue, and the update row's only action leaves for the
-                // store. The desktop's machine scope is pinned here rather than
-                // at the top: it is set once and rarely touched, so it yields
-                // the top to the list it filters.
-                pinned: [
-                  if (!oneMachine) const MachineScopeButton(),
-                  if (!demo) ...const [UpdateRow(), AccountFooter()],
-                ],
-              ),
-            ),
-          );
-        },
+    return MenuBoundsScope(
+      child: Container(
+        width: 288,
+        // Clipped because [AbDockedColumn] never squeezes its header: on a
+        // window too short for even that, a truncated sidebar beats chrome
+        // bleeding over the workspace beside it.
+        clipBehavior: Clip.hardEdge,
+        decoration: BoxDecoration(
+          color: context.antgrid.bgDeep,
+          border: Border(
+            right: BorderSide(color: context.antgrid.borderDefault),
+          ),
+        ),
+        // Not a Column: on a first run the chrome below the list is ~300px of
+        // fixed height, which a short window cannot pay for — and a Flex
+        // answers that by asserting, because its non-flex children are laid out
+        // unbounded. Here the list yields first and the setup section scrolls
+        // inside its own slot, so no height can overflow.
+        child: AbDockedColumn(
+          // Keeps a strip of the list on screen however short the window gets;
+          // otherwise a tall checklist leaves the sidebar showing no projects at
+          // all. Borrowed from the token scale as a floor rather than measured
+          // off a row — it answers how much list is worth keeping, not how tall
+          // any one row is.
+          //
+          // Scaled all the same, because the rows it holds room for are: a band
+          // floors on [AbIconButton.boxExtent], so above UI Size ~1.15 a fixed
+          // 44 falls short of the FIRST row and the strip stops containing a
+          // whole one. The dock pays for it, and the dock scrolls.
+          minBodyExtent: MediaQuery.textScalerOf(
+            context,
+          ).scale(AbTokens.rowHeightLg),
+          header: const _TopChrome(),
+          body: _Body(
+            refreshKey: _refreshKey,
+            onRefresh: _refreshBusy ? null : _refreshFromButton,
+          ),
+          // Docked here, not on the New Session canvas: the drawer is the only
+          // desktop surface mounted on both routes, and the last setup steps
+          // are performed from inside a session.
+          dock: const _SetupDock(),
+          // Both are permanent affordances, so neither may be scrolled out of
+          // reach — the update row in particular stays pending until the app
+          // restarts (see update_row.dart). The account footer is declared last
+          // so it is the last BUDGETED slot to give up a pixel; only the
+          // unbudgeted header outranks it.
+          // Neither belongs to a machine-less demo: the footer's account row
+          // fetches the user, the subscription and the pricing catalogue, and
+          // the update row's only action leaves for the store.
+          pinned: [
+            if (!ref.watch(mobileConnectEnabledProvider))
+              const MachineScopeButton(),
+            if (!ref.watch(demoModeProvider)) ...const [UpdateRow(), _Footer()],
+          ],
+        ),
       ),
     );
   }
 }
 
-/// Fixed chrome above the project list. One slot because [DockedColumn]
+/// Fixed chrome above the project list. One slot because [AbDockedColumn]
 /// budgets per slot and neither of these may be compressed — the New Session
 /// button is the drawer's primary action.
 ///
@@ -157,24 +156,22 @@ class _TopChrome extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scope = CarbonSideNavScope.of(context);
+    // A phone holds one machine, and the choice of it leads the drawer. The
+    // desktop's machine scope is pinned at the bottom instead: it is set once
+    // and rarely touched, so it yields the top to the list it filters.
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _NavActions(),
-        // A phone holds one machine, and the choice of it leads the drawer.
         if (ref.watch(mobileConnectEnabledProvider))
-          Padding(
-            padding: EdgeInsetsDirectional.fromSTEB(
-              scope.inset,
-              CarbonSpacing.spacing02,
-              scope.endInset,
-              CarbonSpacing.spacing02,
+          const Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: AbTokens.drawerGutter,
+              vertical: AbTokens.space4,
             ),
-            child: const ConnectedMachineButton(),
+            child: ConnectedMachineButton(),
           ),
-        const CarbonSideNavDivider(),
       ],
     );
   }
@@ -183,7 +180,7 @@ class _TopChrome extends ConsumerWidget {
 /// The setup checklist in its docked slot, between the project list and the
 /// pinned rows below it.
 ///
-/// Scrollable because this is the slot [DockedColumn] compresses once the
+/// Scrollable because this is the slot [AbDockedColumn] compresses once the
 /// list is at its floor — a bare section here would only move the overflow one
 /// level down. It scrolls only when it must: given room the viewport takes the
 /// content's own height, so the docked layout is unchanged at every size that
@@ -236,71 +233,87 @@ class _NavActions extends ConsumerWidget {
       closeDrawerIfOverlay(context);
     }
 
-    void openMemory() {
-      openMemoryScreen(context, null);
-      closeDrawerIfOverlay(context);
+    Widget navigationRow({
+      required String label,
+      required String icon,
+      required bool selected,
+      required VoidCallback onTap,
+      bool enabled = true,
+    }) {
+      Widget row = AbListRow(
+        title: Text(label, style: AbTokens.sansStyle()),
+        leading: AbIcon(
+          icon,
+          size: AbTokens.iconButtonGlyph,
+          color: context.antgrid.textSecondary,
+        ),
+        density: AbRowDensity.sm,
+        horizontalPadding: AbTokens.space8,
+        selected: selected,
+        selectionStyle: AbRowSelection.surface,
+        hoverable: true,
+        enabled: enabled,
+        onTap: enabled ? onTap : null,
+      );
+      if (isMobilePlatform) {
+        row = ConstrainedBox(
+          constraints: const BoxConstraints(
+            minHeight: AbTokens.touchControlMin,
+          ),
+          child: row,
+        );
+      }
+      return Semantics(selected: selected, enabled: enabled, child: row);
     }
 
-    final pick = ref.watch(machinePickProvider);
-    // The count is the local host's and the drawer never dials, so it is
-    // shown only while the selected machine is local, never over the sample's
-    // canned memories, and never builds the machine inventory.
-    final showsCount =
-        !ref.watch(demoModeProvider) &&
-        !isMobilePlatform &&
-        (pick == null || pick == kLocalMachineKey);
-    final memoryCount = showsCount
-        ? ref.watch(
-            memoryDrawerSummaryProvider.select((s) => s.value?.memories),
-          )
-        : null;
-
     return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          CarbonSideNavLink(
-            label: 'New session',
-            icon: CarbonIcons.add,
-            current: surface == WorkbenchSurface.newSession,
-            onPressed: () => enterNewSession(ref.container),
-          ),
-          CarbonSideNavLink(
-            label: 'Scheduler',
-            icon: CarbonIcons.calendar,
-            current: surface == WorkbenchSurface.scheduler,
-            onPressed: openScheduler,
-          ),
-          CarbonSideNavLink(
-            label: 'Memory',
-            icon: CarbonIcons.idea,
-            current: surface == WorkbenchSurface.memory,
-            onPressed: openMemory,
-            trailing: [
-              if (memoryCount != null && memoryCount > 0)
-                CarbonTag(
-                  label: '$memoryCount',
-                  size: CarbonTagSize.small,
-                ),
-            ],
-          ),
-        ],
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.drawerGutter,
+        AbTokens.drawerGutter,
+        AbTokens.drawerGutter,
+        AbTokens.space4,
+      ),
+      child: SizedBox(
+        width: double.infinity,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            navigationRow(
+              label: 'New Session',
+              icon: AbIcons.add,
+              selected: surface == WorkbenchSurface.newSession,
+              onTap: () => enterNewSession(ref.container),
+            ),
+            const SizedBox(height: AbTokens.space4),
+            navigationRow(
+              label: 'Scheduler',
+              icon: AbIcons.calendar,
+              selected: surface == WorkbenchSurface.scheduler,
+              onTap: openScheduler,
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// The project list's title, with the refresh button.
+/// The panel title, above every machine band.
 ///
-/// Carries no count: the panel is scanned for the one row that needs the user,
-/// which is what the attention dots and the Needs you section are for.
-class _ProjectsHeader extends ConsumerWidget {
-  const _ProjectsHeader({required this.onRefresh});
+/// Carries no count. The number it used to show was the length of the top-level
+/// entry list, which counts each remote MACHINE as one — while the projects it
+/// actually holds are unknown until the row is expanded, and asking would open
+/// a control-plane socket per machine at drawer build. Nothing in the drawer
+/// counts its own contents any more: the panel is scanned for the one row that
+/// needs the user, which is what the attention dots are for.
+class _GroupLabel extends ConsumerWidget {
+  const _GroupLabel({required this.label, required this.onRefresh});
 
   /// Raises the list's [RefreshIndicator] — see
   /// [_ProjectsDrawerState._refreshFromButton]. Null while one is still up.
   final Future<void> Function()? onRefresh;
+
+  final String label;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -315,36 +328,49 @@ class _ProjectsHeader extends ConsumerWidget {
     final refreshing = demo
         ? false
         : ref.watch(accountAgentsProvider).isLoading;
-    return SidebarSectionHeader(
-      label: 'Projects',
-      trailing: demo
-          ? null
-          : CarbonButton.iconOnly(
-              icon: const CarbonIcon(CarbonIcons.renew),
-              semanticLabel: 'Refresh',
-              size: CarbonButtonSize.extraSmall,
-              // Goes through the indicator rather than calling
-              // [refreshDrawer] directly: it runs the SAME handler the pull
-              // gesture does and animates the same spinner, so a tap and a
-              // pull are one interaction with one piece of feedback.
-              //
-              // Disabled on either in-flight signal: an inventory fetch (so a
-              // double-tap can't stack redundant /account/agents requests) or
-              // an indicator the button itself raised.
-              onPressed: refreshing || onRefresh == null
-                  ? null
-                  : () => detached(
-                      'ProjectsDrawer',
-                      'drawer refresh failed',
-                      onRefresh!,
-                    ),
-            ),
+    // A section header's height is its type + padding; the refresh button is
+    // inline chrome inside it, not a standalone touch affordance.
+    return AbCompactTapTargets(
+      child: SidebarSectionLabel(
+        label: label,
+        trailing: demo
+            ? null
+            : AbIconButton(
+                icon: AbIcons.refresh,
+                tone: AbIconButtonTone.muted,
+                tooltip: 'Refresh',
+                // Goes through the indicator rather than calling
+                // [refreshDrawer] directly: it runs the SAME handler the pull
+                // gesture does and animates the same spinner, so a tap and a
+                // pull are one interaction with one piece of feedback.
+                //
+                // Disabled on either in-flight signal: an inventory fetch (so
+                // a double-tap can't stack redundant /account/agents requests)
+                // or an indicator the button itself raised.
+                onTap: refreshing || onRefresh == null
+                    ? null
+                    : () => detached(
+                        'ProjectsDrawer',
+                        'drawer refresh failed',
+                        onRefresh!,
+                      ),
+              ),
+      ),
     );
   }
 }
 
+class _Footer extends ConsumerWidget {
+  const _Footer();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return const AccountFooter();
+  }
+}
+
 class _Body extends ConsumerWidget {
-  /// Owned by [_ProjectsDrawerState] so the header's refresh button can show
+  /// Owned by [_ProjectsDrawerState] so the PROJECTS refresh button can show
   /// this indicator too.
   final GlobalKey<RefreshIndicatorState> refreshKey;
 
@@ -378,10 +404,8 @@ class _Body extends ConsumerWidget {
           );
         }
       },
-      // Material's indicator has no Carbon counterpart, so it only borrows
-      // Carbon's colours.
-      color: CarbonTheme.of(context).colors.interactive,
-      backgroundColor: CarbonTheme.of(context).layer(1),
+      color: context.antgrid.accent,
+      backgroundColor: context.antgrid.bgElevated,
       child: _list(context, ref),
     );
   }
@@ -394,46 +418,29 @@ class _Body extends ConsumerWidget {
     if (views.isEmpty) {
       // A scrollable (not a bare Center) so the pull-to-refresh gesture works
       // with zero rows — overscroll needs something scrollable to grab.
-      final t = CarbonTheme.of(context);
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
           // Kept with nothing under it: its refresh is how a machine whose
           // projects have not loaded yet gets asked again.
-          _ProjectsHeader(onRefresh: onRefresh),
+          _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: CarbonSpacing.spacing05,
-              vertical: CarbonSpacing.spacing06,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'No projects yet',
-                  style: t.typography.heading.copyWith(
-                    color: t.colors.textPrimary,
+            padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
+            child:
+                // Mobile has no local folders — this drawer fills from machines
+                // on the account, so point there.
+                isMobilePlatform
+                ? const AbEmptyState(
+                    title: 'No projects yet',
+                    subtitle: 'Connect a machine to see its projects here.',
+                  )
+                // Desktop's real entry point is a local folder; offer it in
+                // place instead of describing where else to find it.
+                : const AbEmptyState(
+                    title: 'No projects yet',
+                    subtitle: 'Open a folder to get started.',
+                    action: OpenFolderButton(),
                   ),
-                ),
-                const SizedBox(height: CarbonSpacing.spacing03),
-                Text(
-                  // Mobile has no local folders — this drawer fills from
-                  // machines on the account, so point there. Desktop's real
-                  // entry point is a local folder; offer it in place instead
-                  // of describing where else to find it.
-                  isMobilePlatform
-                      ? 'Connect a machine to see its projects here.'
-                      : 'Open a folder to get started.',
-                  style: t.typography.body.copyWith(
-                    color: t.colors.textSecondary,
-                  ),
-                ),
-                if (!isMobilePlatform) ...[
-                  const SizedBox(height: CarbonSpacing.spacing05),
-                  const OpenFolderButton(),
-                ],
-              ],
-            ),
           ),
         ],
       );
@@ -441,10 +448,10 @@ class _Body extends ConsumerWidget {
     final inScope = ref.watch(inScopeProjectViewsProvider);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing02),
+      padding: const EdgeInsets.only(bottom: AbTokens.space4),
       children: [
         const NeedsYouSection(),
-        _ProjectsHeader(onRefresh: onRefresh),
+        _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
         if (inScope.isEmpty)
           const ScopeHidesEverything()
         else

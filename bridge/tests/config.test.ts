@@ -72,14 +72,4 @@ ports:
     const cfg = loadConfig(path);
     expect(cfg.ports?.[0].onDetect).toBe("notify");
   });
-
-  it("defaults worktree.setup startAgent to immediate", () => {
-    const path = writeTemp("worktree:\n  setup:\n    steps:\n      - name: Install\n        run: bun install\n");
-    expect(loadConfig(path).worktree?.setup?.startAgent).toBe("immediate");
-  });
-
-  it("keeps an explicit startAgent: afterSetup", () => {
-    const path = writeTemp("worktree:\n  setup:\n    startAgent: afterSetup\n    steps:\n      - name: Install\n        run: bun install\n");
-    expect(loadConfig(path).worktree?.setup?.startAgent).toBe("afterSetup");
-  });
 });

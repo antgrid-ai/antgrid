@@ -1,14 +1,16 @@
 import 'dart:async';
 
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
-import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_icon.dart';
 import '../models/session_entry.dart';
 import '../providers/session_setup.dart';
 import 'transcript/format.dart';
 
-/// How much of the viewport the ledger may take before it scrolls.
+/// How much of the provisioning pane the ledger may take before it scrolls.
 /// A `worktree.setup` block is a list a human wrote, so it is short in
 /// practice — but nothing bounds it, and the transcript underneath is the
 /// thing the user is actually watching.
@@ -23,12 +25,11 @@ const double _kLedgerMaxViewportFraction = 0.35;
 /// ours. A reading that comes out negative is the one shape of skew we can
 /// actually detect, and it is answered by saying nothing — an elapsed time is
 /// orientation, and a wrong one is worse than none.
-///
-/// Reads the Carbon theme, so it must sit under an `AbCarbonScope`.
 class SetupElapsed extends StatefulWidget {
-  const SetupElapsed({super.key, required this.startedAt});
+  const SetupElapsed({super.key, required this.startedAt, required this.color});
 
   final int startedAt;
+  final Color color;
 
   @override
   State<SetupElapsed> createState() => _SetupElapsedState();
@@ -57,13 +58,15 @@ class _SetupElapsedState extends State<SetupElapsed> {
     if (startedAt <= 0) return const SizedBox.shrink();
     final elapsed = DateTime.now().millisecondsSinceEpoch - startedAt;
     if (elapsed < 0) return const SizedBox.shrink();
-    final t = CarbonTheme.of(context);
     return Text(
       // The app's one elapsed format, shared with the agent transcript's own
       // "Working for 2m 35s" directly below this strip — two live readouts of
       // the same seconds must not disagree about how to spell them.
       formatDuration(Duration(milliseconds: elapsed)),
-      style: t.typography.code.copyWith(color: t.colors.textHelper),
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXxs,
+        color: widget.color,
+      ),
     );
   }
 }
@@ -78,9 +81,6 @@ class _SetupElapsedState extends State<SetupElapsed> {
 /// steps ran but not what they were called, and so does a bridge that predates
 /// the field. A ledger of blanks answers less than the progress rule already
 /// above it.
-///
-/// Carries its own Carbon scope so it can be mounted anywhere, including beside
-/// a live terminal, which stays outside Carbon.
 class SetupStepLedger extends StatelessWidget {
   const SetupStepLedger({super.key, required this.setup});
 
@@ -90,48 +90,36 @@ class SetupStepLedger extends StatelessWidget {
   Widget build(BuildContext context) {
     final names = setup.stepNames;
     if (names.isEmpty) return const SizedBox.shrink();
+    final colors = context.antgrid;
     final phase = sessionSetupPhase(setup);
     final current = setup.stepIndex;
-    final maxHeight =
-        MediaQuery.sizeOf(context).height * _kLedgerMaxViewportFraction;
-    return AbCarbonScope(
-      child: Builder(
-        builder: (context) {
-          final t = CarbonTheme.of(context);
-          return DecoratedBox(
-            decoration: BoxDecoration(
-              color: t.colors.layer01,
-              border: Border(
-                bottom: BorderSide(
-                  color: t.borderSubtle(CarbonLayer.of(context)),
-                ),
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.bgElevated,
+        border: Border(bottom: BorderSide(color: colors.borderSubtle)),
+      ),
+      constraints: BoxConstraints(
+        maxHeight:
+            MediaQuery.sizeOf(context).height * _kLedgerMaxViewportFraction,
+      ),
+      width: double.infinity,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space12,
+          vertical: AbTokens.space8,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < names.length; i++)
+              _StepRow(
+                name: names[i],
+                state: _stateOf(i, current, phase),
+                colors: colors,
               ),
-            ),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: maxHeight),
-              child: SizedBox(
-                width: double.infinity,
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: CarbonSpacing.spacing04,
-                    vertical: CarbonSpacing.spacing03,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      for (var i = 0; i < names.length; i++)
-                        _StepRow(
-                          name: names[i],
-                          state: _stateOf(i, current, phase),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
@@ -154,51 +142,47 @@ class SetupStepLedger extends StatelessWidget {
 enum _StepState { done, current, pending, failed }
 
 class _StepRow extends StatelessWidget {
-  const _StepRow({required this.name, required this.state});
+  const _StepRow({
+    required this.name,
+    required this.state,
+    required this.colors,
+  });
 
   final String name;
   final _StepState state;
+  final AbColors colors;
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final glyph = switch (state) {
-      _StepState.done => CarbonStatusIcon(
-        CarbonStatusKind.success,
-        size: t.iconSize,
+    final (icon, iconColor, textColor) = switch (state) {
+      _StepState.done => (AbIcons.check, colors.success, colors.textMuted),
+      _StepState.current => (
+        AbIcons.chevronRight,
+        colors.accent,
+        colors.textPrimary,
       ),
-      _StepState.current => CarbonIcon(
-        CarbonIcons.inProgress,
-        size: t.iconSize,
-        color: t.colors.interactive,
+      _StepState.failed => (AbIcons.error, colors.error, colors.textPrimary),
+      _StepState.pending => (
+        AbIcons.circle,
+        colors.textDisabled,
+        colors.textDisabled,
       ),
-      _StepState.failed => CarbonStatusIcon(
-        CarbonStatusKind.error,
-        size: t.iconSize,
-      ),
-      _StepState.pending => CarbonIcon(
-        CarbonIcons.circleDash,
-        size: t.iconSize,
-        color: t.colors.iconDisabled,
-      ),
-    };
-    final textColor = switch (state) {
-      _StepState.done => t.colors.textSecondary,
-      _StepState.current || _StepState.failed => t.colors.textPrimary,
-      _StepState.pending => t.colors.textDisabled,
     };
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: CarbonSpacing.spacing02),
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space2),
       child: Row(
         children: [
-          glyph,
-          const SizedBox(width: CarbonSpacing.spacing03),
+          AbIcon(icon, size: AbTokens.fontSm, color: iconColor),
+          const SizedBox(width: AbTokens.space8),
           Expanded(
             child: Text(
               name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: t.typography.label.copyWith(color: textColor),
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: textColor,
+              ),
             ),
           ),
         ],

@@ -1,4 +1,3 @@
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -8,35 +7,22 @@ import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../helpers/carbon_guard.dart';
 import '../helpers/prefs_test_mock.dart';
 
-// Carbon icon-only buttons carry their label as semantics, not a Tooltip.
-final _dismiss = find.byWidgetPredicate(
-  (w) => w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
-);
-
-Widget _wrap(
-  Widget child, {
-  required List<Override> overrides,
-  bool carbon = true,
-}) {
+Widget _wrap(Widget child, {required List<Override> overrides}) {
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
-      home: Scaffold(
-        body: carbon ? AbCarbonScope(child: child) : child,
-      ),
+      home: Scaffold(body: child),
     ),
   );
 }
@@ -86,17 +72,9 @@ void main() {
     );
     await tester.pump(); // latch microtask
 
-    expect(find.text('Setup · 1/5'), findsOneWidget);
-    expect(
-      tester.widgetList<CarbonIconIndicator>(find.byType(CarbonIconIndicator)).map((i) => i.kind),
-      [
-        CarbonIconIndicatorKind.succeeded,
-        CarbonIconIndicatorKind.inProgress,
-        CarbonIconIndicatorKind.notStarted,
-        CarbonIconIndicatorKind.notStarted,
-        CarbonIconIndicatorKind.notStarted,
-      ],
-    );
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
+    expect(find.text('[x]'), findsOneWidget);
+    expect(find.text('[ ]'), findsNWidgets(4));
     // First unchecked step's contextual hint.
     expect(
       find.text('Open a folder to add your first project.'),
@@ -127,11 +105,11 @@ void main() {
       _wrap(const FirstRunSetupSection(), overrides: overrides),
     );
     await tester.pump();
-    expect(find.text('Setup · 0/5'), findsOneWidget);
+    expect(find.text('SETUP · 0/5'), findsOneWidget);
 
-    await tester.tap(_dismiss);
+    await tester.tap(find.byTooltip("Dismiss — won't show again"));
     await tester.pump();
-    expect(find.text('Setup · 0/5'), findsNothing);
+    expect(find.text('SETUP · 0/5'), findsNothing);
     expect(store.read().checklistDismissed, isTrue);
 
     // Fresh scope over the same prefs — an app restart — stays hidden.
@@ -145,7 +123,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('Setup · 0/5'), findsNothing);
+    expect(find.text('SETUP · 0/5'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -174,7 +152,7 @@ void main() {
     // First frame renders; the microtask then writes checklistCompleted and
     // the card unmounts on the next pump.
     await tester.pump();
-    expect(find.text('Setup · 5/5'), findsNothing);
+    expect(find.text('SETUP · 5/5'), findsNothing);
     expect(store.read().checklistCompleted, isTrue);
 
     // Restart with every live signal regressed (steps unchecked): completion
@@ -189,7 +167,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.textContaining('Setup'), findsNothing);
+    expect(find.textContaining('SETUP'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -216,7 +194,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Setup · 4/5'), findsOneWidget);
+    expect(find.text('SETUP · 4/5'), findsOneWidget);
     expect(
       find.text(
         'Click the shield in a session title bar — Handler replies while you '
@@ -247,9 +225,9 @@ void main() {
     expect(find.text('Sign in'), findsOneWidget);
 
     // The header row itself is the toggle — tapping its label collapses.
-    await tester.tap(find.text('Setup · 1/5'));
+    await tester.tap(find.text('SETUP · 1/5'));
     await tester.pump();
-    expect(find.text('Setup · 1/5'), findsOneWidget);
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
     expect(find.text('Open a folder to add your first project.'), findsNothing);
     expect(store.read().checklistCollapsed, isTrue);
@@ -269,13 +247,13 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('Setup · 1/5'), findsOneWidget);
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
 
     // Fold back open: collapse is a toggle, not a one-way retirement. Asserted
     // on the UI only — this scope holds a second FirstRunStore, and the first
     // one's WithCache cache never sees a write made through the second.
-    await tester.tap(find.text('Setup · 1/5'));
+    await tester.tap(find.text('SETUP · 1/5'));
     await tester.pump();
     expect(find.text('Sign in'), findsOneWidget);
     expect(
@@ -304,7 +282,7 @@ void main() {
 
     // The ✕ is nested inside the collapse-toggling header row; the inner
     // recognizer must win the arena or a dismiss silently collapses too.
-    await tester.tap(_dismiss);
+    await tester.tap(find.byTooltip("Dismiss — won't show again"));
     await tester.pump();
     expect(store.read().checklistDismissed, isTrue);
     expect(store.read().checklistCollapsed, isFalse);
@@ -322,7 +300,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.textContaining('Setup'), findsNothing);
+    expect(find.textContaining('SETUP'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -334,7 +312,6 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         const RecentSessionsTab(),
-        carbon: true,
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
           recentSessionsProvider.overrideWith((_) => const []),
@@ -354,17 +331,7 @@ void main() {
       find.text("Turn on Remote in that computer's title bar"),
       findsOneWidget,
     );
-    // The first unchecked step reads as in progress, the rest as not started.
-    final kinds = tester
-        .widgetList<CarbonIconIndicator>(find.byType(CarbonIconIndicator))
-        .map((i) => i.kind)
-        .toList();
-    expect(kinds, [
-      CarbonIconIndicatorKind.inProgress,
-      CarbonIconIndicatorKind.notStarted,
-      CarbonIconIndicatorKind.notStarted,
-    ]);
-    expect(abWidgetsInScope(tester), isEmpty);
+    expect(find.text('[ ]'), findsNWidgets(3));
     expect(
       find.text("Pull down to refresh once you've done a step."),
       findsOneWidget,
@@ -372,12 +339,7 @@ void main() {
     expect(find.textContaining('No recent sessions'), findsNothing);
 
     // Dismissing swaps to the plain empty state and persists.
-    await tester.tap(
-      find.byWidgetPredicate(
-        (w) =>
-            w is CarbonButton && w.semanticLabel == "Dismiss — won't show again",
-      ),
-    );
+    await tester.tap(find.byTooltip("Dismiss — won't show again"));
     await tester.pump();
     expect(find.text('Connect a machine'), findsNothing);
     expect(find.textContaining('No recent sessions'), findsOneWidget);

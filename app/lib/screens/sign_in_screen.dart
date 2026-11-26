@@ -1,20 +1,27 @@
 import 'dart:async';
-import 'dart:math' as math;
-
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:clock/clock.dart';
+
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart' show Scaffold;
-import 'package:flutter/services.dart' show TextInput, TextInputAction;
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart'
     show AppleLogoPainter;
-import '../analytics/events.dart';
 import '../demo/demo_identity.dart';
-import '../design/ab_carbon.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../util/detached.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_brand_mark.dart';
+import '../design/widgets/ab_focus_ring.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_password_field.dart';
+import '../design/widgets/ab_text_field.dart';
+import '../design/widgets/ab_touch_sizing.dart';
 import '../project/limits.dart';
+import '../analytics/events.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
 import '../providers/demo_mode.dart';
@@ -22,8 +29,6 @@ import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
 import '../storage/last_auth_method_store.dart';
-import '../util/detached.dart';
-import '../utils/platform_utils.dart';
 
 /// Declared here rather than under `providers/` so `storage/` stays free of
 /// Riverpod: this screen is the only consumer, and tests override it to
@@ -408,7 +413,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _continue() async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = 'Enter a valid email');
       return;
     }
     final store = ref.read(lastAuthMethodStoreProvider);
@@ -462,7 +467,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _sendLink() async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = 'Enter a valid email');
       return;
     }
     setState(() {
@@ -627,7 +632,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   /// is a dead end.
   void _useMyPassword() {
     if (!_looksLikeEmail(_emailController.text)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = 'Enter a valid email');
       return;
     }
     _goToStep(_Step.password);
@@ -648,7 +653,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   Future<void> _submitPassword(Future<void> Function(String email) body) async {
     final email = _emailController.text.trim();
     if (!_looksLikeEmail(email)) {
-      setState(() => _error = _invalidEmailMessage);
+      setState(() => _error = 'Enter a valid email');
       return;
     }
     setState(() {
@@ -884,6 +889,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
 
   @override
   Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
     final canPop = Navigator.of(context).canPop();
 
     ref.listen<AsyncValue<CurrentUser?>>(currentUserProvider, (prev, next) {
@@ -895,90 +901,58 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
       if (Navigator.of(context).canPop()) Navigator.of(context).pop();
     });
 
-    return AbCarbonScope(
-      child: Builder(
-        builder: (scoped) {
-          final t = CarbonTheme.of(scoped);
-          // Chosen from density, not window width: a phone column is the
-          // screen width less its gutters, and the three method buttons only
-          // fit one row at that width. A wide tablet is touch too and gets the
-          // same column, which is what a phone-shaped form should be.
-          final columnWidth = t.isTouch
-              ? _touchColumnWidth
-              : _compactColumnWidth;
-          final lightBrand = t.brightness == Brightness.light;
-          // The Scaffold keeps the keyboard inset handling.
-          return Scaffold(
-            backgroundColor: t.colors.background,
-            body: SafeArea(
-              child: Stack(
-                children: [
-                  if (canPop && !isMobilePlatform)
-                    Positioned(
-                      top: CarbonSpacing.spacing03,
-                      right: CarbonSpacing.spacing03,
-                      child: CarbonButton.iconOnly(
-                        icon: const CarbonIcon(CarbonIcons.close),
-                        semanticLabel: 'Close',
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                    ),
-                  // One group spanning BOTH steps, which is what makes the
-                  // address and the password a single credential to the
-                  // platform password manager: the two fields never coexist on
-                  // screen, and a group per step would commit the address on
-                  // its own and offer to save a password with no username
-                  // attached.
-                  Center(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(CarbonSpacing.spacing05),
-                      child: AutofillGroup(
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(maxWidth: columnWidth),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              // Two-tone artwork, so a light ground gets its
-                              // own file rather than a tint.
-                              SvgPicture.asset(
-                                lightBrand
-                                    ? 'assets/logo/antgrid-lockup-light.svg'
-                                    : 'assets/logo/antgrid-lockup.svg',
-                                height: _lockupHeight,
-                                semanticsLabel: 'Antgrid',
-                              ),
-                              const SizedBox(height: CarbonSpacing.spacing04),
-                              switch (_phase) {
-                                _Phase.pending => _pendingBody(scoped),
-                                _Phase.bounced => _bouncedBody(scoped),
-                                _Phase.expired => _expiredBody(scoped),
-                                _Phase.verifyEmail => _verifyEmailBody(scoped),
-                                _Phase.resetSent => _resetSentBody(scoped),
-                                _Phase.form ||
-                                _Phase.submitting => _formBody(scoped, canPop),
-                              },
-                            ],
-                          ),
-                        ),
-                      ),
+    return Scaffold(
+      backgroundColor: antgrid.bgDeepest,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            if (canPop && !isMobilePlatform)
+              Positioned(
+                top: AbTokens.space8,
+                right: AbTokens.space8,
+                child: AbIconButton(
+                  icon: AbIcons.close,
+                  tooltip: 'Close',
+                  onTap: () => Navigator.of(context).maybePop(),
+                ),
+              ),
+            // One group spanning BOTH steps, which is what makes the address
+            // and the password a single credential to the platform password
+            // manager: the two fields never coexist on screen, and a group per
+            // step would commit the address on its own and offer to save a
+            // password with no username attached.
+            Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(AbTokens.space16),
+                child: AutofillGroup(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const AbBrandMark.lockup(height: AbTokens.space16 * 5),
+                        const SizedBox(height: AbTokens.space12),
+                        switch (_phase) {
+                          _Phase.pending => _pendingBody(context),
+                          _Phase.bounced => _bouncedBody(context),
+                          _Phase.expired => _expiredBody(context),
+                          _Phase.verifyEmail => _verifyEmailBody(context),
+                          _Phase.resetSent => _resetSentBody(context),
+                          _Phase.form ||
+                          _Phase.submitting => _formBody(context, canPop),
+                        },
+                      ],
                     ),
                   ),
-                ],
+                ),
               ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
-
-  static const double _compactColumnWidth = 320;
-
-  /// A 390pt phone less its 16pt gutters.
-  static const double _touchColumnWidth = 358;
-
-  static const double _lockupHeight = 80;
 
   Widget _formBody(BuildContext context, bool canPop) => switch (_step) {
     _Step.email => _emailStepBody(context, canPop),
@@ -986,67 +960,36 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     _Step.signup => _signupBody(context),
   };
 
-  Widget _gap([double height = CarbonSpacing.spacing03]) =>
-      SizedBox(height: height);
-
-  Widget _heading(CarbonThemeData t, String text) => Text(
-    text,
-    textAlign: TextAlign.center,
-    style: t.typography.heading.copyWith(color: t.colors.textPrimary),
-  );
-
-  Widget _detail(CarbonThemeData t, String text) => Text(
-    text,
-    textAlign: TextAlign.center,
-    style: t.typography.helper.copyWith(color: t.colors.textSecondary),
-  );
-
-  /// A primary action: the one filled button of its phase. [arrow] marks the
-  /// step that moves the form forward.
-  Widget _primary(String label, VoidCallback? onPressed, {bool arrow = false}) =>
-      CarbonButton(
-        label: label,
-        onPressed: onPressed,
-        expand: true,
-        icon: arrow ? const CarbonIcon(CarbonIcons.arrowRight) : null,
-      );
-
-  Widget _link(String label, VoidCallback? onTap) =>
-      Center(child: CarbonLink(label: label, onPressed: onTap));
-
   /// Step 1: an address and nothing else. No sign-in/sign-up fork, and no
   /// password field — that fork would make the user answer a question about
   /// their own account that only this device's memory can answer for them.
   ///
   /// Two tiers, and the split is what the hint is allowed to decide. Continue
-  /// is the fast path and the only thing that reads the hint; every method
-  /// below the divider names its own method and ignores it, so a hint that is
+  /// is the fast path and the only thing that reads the hint; every cell below
+  /// the divider names its own method and ignores it, so a hint that is
   /// missing or wrong costs a tap rather than the account. None of them asks
   /// the server anything.
   ///
   /// Three visual classes, one per tier, so the tiers are told apart before
-  /// they are read: the filled Continue, the outlined method buttons, and the
-  /// demo tile. Every one of these was a full-width button of the same weight
-  /// once, and five of them stacked read as a wall rather than a hierarchy.
+  /// they are read: the accent-filled Continue, the bordered method group, and
+  /// the outlined demo card. Every one of these was a full-width button of the
+  /// same weight once, and five of them stacked read as a wall rather than a
+  /// hierarchy.
   Widget _emailStepBody(BuildContext context, bool canPop) {
-    final t = CarbonTheme.of(context);
     final busy = _phase == _Phase.submitting;
-    // The one error that belongs to the field; the rest (a browser that would
-    // not open, a provider that bounced) are about the screen, not the address.
-    final fieldError = _error == _invalidEmailMessage ? _error : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
           'Sign in or create an account',
           textAlign: TextAlign.center,
-          style: t.typography.body.copyWith(color: t.colors.textSecondary),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
-        _gap(CarbonSpacing.spacing05),
-        CarbonTextInput(
+        const SizedBox(height: AbTokens.space16),
+        AbTextField(
           controller: _emailController,
-          label: 'Email',
-          placeholder: 'you@example.com',
+          hintText: 'you@example.com',
+          height: AbTokens.rowHeightLg,
           enabled: !busy,
           keyboardType: TextInputType.emailAddress,
           textInputAction: TextInputAction.go,
@@ -1055,22 +998,23 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
           // of that pair it looks for — a field tagged as a bare email address
           // is offered contact suggestions instead and saves nothing.
           autofillHints: const [AutofillHints.username],
-          errorText: fieldError,
-          announceError: true,
           onSubmitted: (_) => busy ? null : _continue(),
         ),
-        ?_message(t, errorInField: fieldError != null),
-        _gap(CarbonSpacing.spacing03),
-        _primary(
-          busy ? 'Continuing…' : 'Continue',
-          busy ? null : _continue,
-          arrow: true,
+        ?_message(context),
+        const SizedBox(height: AbTokens.space8),
+        _SignInButton(
+          label: busy ? 'Continuing…' : 'Continue',
+          onPressed: busy ? null : _continue,
+          variant: _SignInButtonVariant.primary,
         ),
-        _gap(CarbonSpacing.spacing04),
+        const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
-        _gap(CarbonSpacing.spacing04),
+        const SizedBox(height: AbTokens.space12),
         if (_offersAppleSignIn) ...[
-          _AppleButton(
+          _SignInButton(
+            label: 'Continue with Apple',
+            leading: (color) => _AppleMark(color: color),
+            appleInk: true,
             onPressed: busy
                 ? null
                 : () => detached(
@@ -1079,78 +1023,59 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
                     _startApple,
                   ),
           ),
-          _gap(),
+          const SizedBox(height: AbTokens.space8),
         ],
-        // These are all answers to a single question — how to prove the
-        // address is yours — so they sit together as one row.
+        // One bordered group rather than stacked buttons: these are all
+        // answers to a single question — how to prove the address is yours —
+        // and [AbSegmented]'s construction is how this app already asks a small
+        // closed set where the alternatives must stay visible. Not AbSegmented
+        // itself: a cell here fires an action, and a selected state would
+        // promise a choice that persists.
         //
-        // The password button is a peer, not a footnote. `_startOAuth` records
+        // The password cell is a peer, not a footnote. `_startOAuth` records
         // the TYPED address rather than the one the user authenticates as, so
-        // the hint can land wrong, and this button is the only thing that
-        // reaches step 2 — and the link it carries — whatever the hint says.
-        _MethodRow(
+        // the hint can land wrong, and this cell is the only thing that reaches
+        // step 2 — and the link it carries — whatever the hint says.
+        _AuthMethodRow(
           methods: [
-            _Method(
+            _AuthMethodSpec(
+              icon: AbIcons.github,
               label: 'GitHub',
-              icon: const _BrandGlyph(_githubMark),
-              onPressed: busy ? null : () => _startOAuth(AuthMethod.github),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.github),
             ),
-            _Method(
+            _AuthMethodSpec(
+              icon: _googleMark,
               label: 'Google',
-              icon: const _BrandGlyph(_googleMark),
-              onPressed: busy ? null : () => _startOAuth(AuthMethod.google),
+              onTap: busy ? null : () => _startOAuth(AuthMethod.google),
             ),
             // Unconditional, never keyed on what the store recalls: visibility
             // that tracked the hint would flicker as the address is typed and
-            // would tell anyone watching the screen which addresses this
-            // device remembers.
-            _Method(
+            // would tell anyone watching the screen which addresses this device
+            // remembers.
+            _AuthMethodSpec(
+              icon: AbIcons.password,
               label: 'Password',
-              icon: const CarbonIcon(CarbonIcons.password),
-              onPressed: busy ? null : _useMyPassword,
+              onTap: busy ? null : _useMyPassword,
             ),
           ],
         ),
-        _gap(CarbonSpacing.spacing06),
-        // A tile, not a fifth button, because it is not a way through this
+        const SizedBox(height: AbTokens.space24),
+        // A card, not a fifth button, because it is not a way through this
         // screen — it leaves the account behind entirely, and the two lines it
-        // needs never fitted on a button label anyway.
+        // needs never fitted on a centred button label anyway.
         //
         // Unguarded unlike the link below it: on mobile this screen is the
         // whole app until an account exists, so for an App Store reviewer — or
         // a tester whose desktop is somewhere else — it is the only affordance
         // here that leads anywhere at all.
-        CarbonClickableTile(
-          onPressed: busy ? null : _enterDemo,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                kDemoEntryLabel,
-                // Carbon styles are non-inheriting, so the tile's text colour
-                // never reaches this line unless it is set here.
-                style: t.typography.heading.copyWith(
-                  color: busy ? t.colors.textDisabled : t.colors.textPrimary,
-                ),
-              ),
-              const SizedBox(height: CarbonSpacing.spacing01),
-              Text(
-                'No account needed. Explore the app on a built-in project.',
-                style: t.typography.helper.copyWith(
-                  color: busy ? t.colors.textDisabled : t.colors.textSecondary,
-                ),
-              ),
-            ],
-          ),
-        ),
-        // The only text link on the screen, and the only one that leaves the
+        _DemoCard(onTap: busy ? null : _enterDemo),
+        // The only muted thing on the screen, and the only one that leaves the
         // flow rather than choosing a way through it.
         if (canPop && !isMobilePlatform) ...[
-          _gap(CarbonSpacing.spacing04),
-          _link(
-            'Continue without signing in',
-            () => Navigator.of(context).maybePop(),
+          const SizedBox(height: AbTokens.space12),
+          _MutedLink(
+            label: 'Continue without signing in',
+            onTap: () => Navigator.of(context).maybePop(),
           ),
         ],
       ],
@@ -1179,48 +1104,53 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
   });
 
   Widget _signupBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
     final busy = _phase == _Phase.submitting;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Create an account with a password'),
-        _gap(),
+        Text(
+          'Create an account with a password',
+          style: AbTokens.sansStyle(color: context.antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
         Text(
           _emailController.text.trim(),
-          textAlign: TextAlign.center,
-          style: t.typography.body.copyWith(color: t.colors.textSecondary),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
-        _gap(),
-        CarbonTextInput(
+        const SizedBox(height: AbTokens.space8),
+        AbPasswordField(
           controller: _passwordController,
-          variant: CarbonTextInputVariant.password,
-          label: 'Password',
-          helperText: '$kMinPasswordLength–$kMaxPasswordLength characters',
+          hintText:
+              'Password ($kMinPasswordLength?$kMaxPasswordLength characters)',
           enabled: !busy,
           autofillHints: const [AutofillHints.newPassword],
           textInputAction: TextInputAction.done,
-          errorText: _error,
-          announceError: true,
           onSubmitted: (_) =>
               detached('SignInScreen', 'Create account', _signUp),
         ),
-        ?_message(t, errorInField: true),
-        _gap(),
-        _primary(
-          busy ? 'Creating account...' : 'Create account',
-          busy
+        ?_message(context),
+        const SizedBox(height: AbTokens.space8),
+        _SignInButton(
+          label: busy ? 'Creating account...' : 'Create account',
+          onPressed: busy
               ? null
               : () => detached('SignInScreen', 'Create account', _signUp),
+          variant: _SignInButtonVariant.primary,
         ),
-        _link('Sign in instead', busy ? null : () => _goToStep(_Step.password)),
-        _link('Use a different email', busy ? null : _changeEmail),
+        _MutedLink(
+          label: 'Sign in instead',
+          onTap: busy ? null : () => _goToStep(_Step.password),
+        ),
+        _MutedLink(
+          label: 'Use a different email',
+          onTap: busy ? null : _changeEmail,
+        ),
       ],
     );
   }
 
   Widget _passwordStepBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     final busy = _phase == _Phase.submitting;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1228,9 +1158,9 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
         Text(
           'Enter your password',
           textAlign: TextAlign.center,
-          style: t.typography.body.copyWith(color: t.colors.textSecondary),
+          style: AbTokens.sansStyle(color: antgrid.textMuted),
         ),
-        _gap(),
+        const SizedBox(height: AbTokens.space8),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -1238,77 +1168,75 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
               child: Text(
                 _emailController.text.trim(),
                 overflow: TextOverflow.ellipsis,
-                style: t.typography.helper.copyWith(
-                  color: t.colors.textPrimary,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: antgrid.textPrimary,
                 ),
               ),
             ),
-            const SizedBox(width: CarbonSpacing.spacing03),
-            CarbonLink(
-              label: 'change',
-              onPressed: busy ? null : _changeEmail,
-              size: CarbonLinkSize.small,
-            ),
+            const SizedBox(width: AbTokens.space8),
+            _MutedLink(label: 'change', onTap: busy ? null : _changeEmail),
           ],
         ),
-        _gap(),
-        CarbonTextInput(
+        const SizedBox(height: AbTokens.space8),
+        AbPasswordField(
           controller: _passwordController,
-          variant: CarbonTextInputVariant.password,
-          label: 'Password',
+          hintText: 'Password',
           enabled: !busy,
           textInputAction: TextInputAction.go,
           autofillHints: const [AutofillHints.password],
-          errorText: _error,
-          announceError: true,
           onSubmitted: (_) => busy ? null : _signInWithPassword(),
         ),
-        ?_message(t, errorInField: true),
-        _gap(),
-        _primary(
-          busy ? 'Signing in…' : 'Sign in',
-          busy ? null : _signInWithPassword,
-          arrow: true,
+        ?_message(context),
+        const SizedBox(height: AbTokens.space8),
+        _SignInButton(
+          label: busy ? 'Signing in…' : 'Sign in',
+          onPressed: busy ? null : _signInWithPassword,
+          variant: _SignInButtonVariant.primary,
         ),
-        _gap(),
-        _link(
-          'Create an account with a password',
-          busy ? null : () => _goToStep(_Step.signup),
+        const SizedBox(height: AbTokens.space8),
+        _MutedLink(
+          label: 'Create an account with a password',
+          onTap: busy ? null : () => _goToStep(_Step.signup),
         ),
-        _link('Forgot your password?', busy ? null : _forgotPassword),
-        _link('Email me a link instead', busy ? null : _sendLink),
+        _MutedLink(
+          label: 'Forgot your password?',
+          onTap: busy ? null : _forgotPassword,
+        ),
+        _MutedLink(
+          label: 'Email me a link instead',
+          onTap: busy ? null : _sendLink,
+        ),
       ],
     );
   }
 
-  /// The server-message line, or null when there is nothing to say. An error
-  /// wins: the two are set as a pair (one always cleared with the other), so
-  /// this only orders them when a later failure lands on an earlier success.
-  ///
-  /// Carbon files form-level server messages as inline notifications — an error
-  /// for a failure, info for a confirmation — while a message about one field
-  /// belongs on that field. [errorInField] says the error is already drawn
-  /// there, leaving only a notice for this line.
-  Widget? _message(CarbonThemeData t, {bool errorInField = false}) {
-    final error = errorInField ? null : _error;
-    final text = error ?? _notice;
+  /// The error or notice line, or null when there is neither. An error wins:
+  /// the two are set as a pair (one always cleared with the other), so this
+  /// only orders them when a later failure lands on an earlier success.
+  Widget? _message(BuildContext context) {
+    final text = _error ?? _notice;
     if (text == null) return null;
     return Semantics(
       liveRegion: true,
       child: Padding(
-        padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-        child: CarbonNotification(
-          kind: error != null
-              ? CarbonNotificationKind.error
-              : CarbonNotificationKind.info,
-          subtitle: text,
+        padding: const EdgeInsets.only(top: AbTokens.space8),
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: _error != null
+                ? context.antgrid.error
+                : context.antgrid.textMuted,
+          ),
         ),
       ),
     );
   }
 
   Widget _verifyEmailBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     final email = _emailController.text.trim();
     // Only a failed send sets `_error` on this screen, and every send clears it
     // first — so this reads as "the last send failed", which is what keeps the
@@ -1317,58 +1245,82 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Check your email'),
-        _gap(),
-        _detail(
-          t,
+        Text(
+          'Check your email',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
           'Check the inbox for $email. If this address is eligible, a link will arrive. It expires in one hour. Check your spam folder. '
           '${sent ? ' Verification was requested.' : ''}',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
         ),
-        ?_message(t),
-        _gap(CarbonSpacing.spacing05),
+        ?_message(context),
+        const SizedBox(height: AbTokens.space16),
         // The password is still in the field behind this screen, so verifying
         // and coming back costs one tap. If the OS killed the app during the
         // detour it is simply gone, and the user signs in normally — it is
         // never persisted anywhere.
         if (_passwordController.text.isNotEmpty)
-          _primary("I've verified — sign in", () {
-            _goToStep(_Step.password);
-            unawaited(_signInWithPassword());
-          }),
-        _gap(),
-        _link(
-          _resendSecondsLeft > 0
+          _SignInButton(
+            label: "I've verified — sign in",
+            onPressed: () {
+              _goToStep(_Step.password);
+              unawaited(_signInWithPassword());
+            },
+            variant: _SignInButtonVariant.primary,
+          ),
+        const SizedBox(height: AbTokens.space8),
+        _MutedLink(
+          label: _resendSecondsLeft > 0
               ? 'Resend the link (${_resendSecondsLeft}s)'
               : 'Resend the link',
-          _resendSecondsLeft > 0 ? null : _resendVerification,
+          onTap: _resendSecondsLeft > 0 ? null : _resendVerification,
         ),
-        _link('Use a different email', _backToForm),
+        _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
     );
   }
 
   Widget _resetSentBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Check your email'),
-        _gap(),
-        _detail(
-          t,
+        Text(
+          'Check your email',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
           // Enumeration-safe on the server, so the copy has to be too: it
           // answers a known and an unknown address identically.
           'If that address has an Antgrid account, a reset link is on its way. '
           'The link expires in one hour and opens in your browser.',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
         ),
-        _gap(CarbonSpacing.spacing05),
-        _primary('Back to sign in', () => _goToStep(_Step.password)),
+        const SizedBox(height: AbTokens.space16),
+        _SignInButton(
+          label: 'Back to sign in',
+          onPressed: () => _goToStep(_Step.password),
+          variant: _SignInButtonVariant.primary,
+        ),
       ],
     );
   }
 
   Widget _pendingBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     final email = _emailController.text.trim();
     // A restored ticket can arrive without its address (older schema), and
     // there is nothing to re-send to then.
@@ -1376,90 +1328,119 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Check your email'),
-        _gap(),
-        _detail(
-          t,
+        Text(
+          'Check your email',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
           'Approve the sign-in link sent to\n$email\n'
           // Straight from the window the server actually enforces, so the two
           // can never disagree about how long the user has.
           'The link expires in ${kMagicLinkWindow.inMinutes} minutes.',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
         ),
-        _gap(CarbonSpacing.spacing05),
-        const Center(child: CarbonSpinner(size: 24, semanticLabel: 'Waiting')),
-        ?_message(t),
-        _gap(CarbonSpacing.spacing05),
-        _link(
-          _resendSecondsLeft > 0
+        const SizedBox(height: AbTokens.space16),
+        const AbLoading(),
+        ?_message(context),
+        const SizedBox(height: AbTokens.space16),
+        _MutedLink(
+          label: _resendSecondsLeft > 0
               ? 'Resend the link (${_resendSecondsLeft}s)'
               : 'Resend the link',
-          canResend ? _resendLink : null,
+          onTap: canResend ? _resendLink : null,
         ),
-        _link('Use a different email', _backToForm),
+        _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
     );
   }
 
   Widget _expiredBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Link expired'),
-        _gap(),
-        _detail(t, 'That sign-in link is no longer valid.'),
-        _gap(CarbonSpacing.spacing05),
-        _primary('Send a new link', _sendLink),
-        _gap(),
-        _link('Use a different email', _backToForm),
+        Text(
+          'Link expired',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
+          'That sign-in link is no longer valid.',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
+        ),
+        const SizedBox(height: AbTokens.space16),
+        _SignInButton(
+          label: 'Send a new link',
+          onPressed: _sendLink,
+          variant: _SignInButtonVariant.primary,
+        ),
+        const SizedBox(height: AbTokens.space8),
+        _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
     );
   }
 
   Widget _bouncedBody(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _heading(t, 'Email bounced'),
-        _gap(),
-        _detail(
-          t,
-          "We couldn't deliver the link to\n${_emailController.text.trim()}.\nCheck the address and try again.",
+        Text(
+          'Email bounced',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
         ),
-        _gap(CarbonSpacing.spacing05),
-        _primary('Use a different email', _backToForm),
+        const SizedBox(height: AbTokens.space8),
+        Text(
+          "We couldn't deliver the link to\n${_emailController.text.trim()}.\nCheck the address and try again.",
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
+        ),
+        const SizedBox(height: AbTokens.space16),
+        _SignInButton(
+          label: 'Use a different email',
+          onPressed: _backToForm,
+          variant: _SignInButtonVariant.primary,
+        ),
       ],
     );
   }
 }
-
-/// The message [_SignInScreenState._continue] and its siblings raise for an
-/// address step 2 could not show; named so the field can claim it as its own.
-const _invalidEmailMessage = 'Enter a valid email';
 
 class _OrDivider extends StatelessWidget {
   const _OrDivider();
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final antgrid = context.antgrid;
     final line = Expanded(
-      child: ColoredBox(
-        color: t.borderSubtle(CarbonLayer.of(context)),
-        child: const SizedBox(height: 1),
-      ),
+      child: Container(height: 1, color: antgrid.borderSubtle),
     );
     return Row(
       children: [
         line,
         Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: CarbonSpacing.spacing03,
-          ),
+          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
           child: Text(
             'or',
-            style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: antgrid.textMuted,
+            ),
           ),
         ),
         line,
@@ -1468,44 +1449,214 @@ class _OrDivider extends StatelessWidget {
   }
 }
 
-/// Codicon `github`, inlined as a `currentColor` SVG string. Carbon's icon set
-/// has no brand logos, and this is the same artwork the rest of the app shows
-/// for GitHub, so the sign-in button does not look like a different service.
-const String _githubMark =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
-    'viewBox="0 0 24 24"><path fill="currentColor" d="'
-    'M12 0a12 12 0 100 24 12 12 0 000-24zm3.163 21.783h-.093a.513'
-    '.513 0 01-.382-.14.513.513 0 01-.14-.372v-1.406c.006-.467.01'
-    '-.94.01-1.416a3.693 3.693 0 00-.151-1.028 1.832 1.832 0 00-.'
-    '542-.875 8.014 8.014 0 002.038-.471 4.051 4.051 0 001.466-.9'
-    '64c.407-.427.71-.943.885-1.506a6.77 6.77 0 00.3-2.13 4.138 4'
-    '.138 0 00-.26-1.476 3.892 3.892 0 00-.795-1.284 2.81 2.81 0 '
-    '00.162-.582c.033-.2.05-.402.05-.604 0-.26-.03-.52-.09-.773a5'
-    '.309 5.309 0 00-.221-.763.293.293 0 00-.111-.02h-.11c-.23.00'
-    '2-.456.04-.674.111a5.34 5.34 0 00-.703.26 6.503 6.503 0 00-.'
-    '661.343c-.215.127-.405.249-.573.362a9.578 9.578 0 00-5.143 0'
-    ' 13.507 13.507 0 00-.572-.362 6.022 6.022 0 00-.672-.342 4.5'
-    '16 4.516 0 00-.705-.261 2.203 2.203 0 00-.662-.111h-.11a.29.'
-    '29 0 00-.11.02 5.844 5.844 0 00-.23.763c-.054.254-.08.513-.0'
-    '81.773 0 .202.017.404.051.604.033.199.086.394.16.582A3.888 3'
-    '.888 0 005.702 10a4.142 4.142 0 00-.263 1.476 6.871 6.871 0 '
-    '00.292 2.12c.181.563.483 1.08.884 1.516.415.422.915.75 1.466'
-    '.964.653.25 1.337.41 2.033.476a1.828 1.828 0 00-.452.633 2.9'
-    '9 2.99 0 00-.2.744 2.754 2.754 0 01-1.175.27 1.788 1.788 0 0'
-    '1-1.065-.3 2.904 2.904 0 01-.752-.824 3.1 3.1 0 00-.292-.382'
-    ' 2.693 2.693 0 00-.372-.343 1.841 1.841 0 00-.432-.24 1.2 1.'
-    '2 0 00-.481-.101c-.04.001-.08.005-.12.01a.649.649 0 00-.162.'
-    '02.408.408 0 00-.13.06.116.116 0 00-.06.1.33.33 0 00.14.242c'
-    '.093.074.17.131.232.171l.03.021c.133.103.261.214.382.333.112'
-    '.098.213.209.3.33.09.119.168.246.231.381.073.134.15.288.231.'
-    '463.188.474.522.875.954 1.145.453.243.961.364 1.476.351.174 '
-    '0 .349-.01.522-.03.172-.028.343-.057.515-.091v1.743a.5.5 0 0'
-    '1-.533.521h-.062a10.286 10.286 0 116.324 0v.005z'
-    '"/></svg>';
+class _MutedLink extends StatefulWidget {
+  const _MutedLink({required this.label, required this.onTap});
+  final String label;
 
-/// Simple Icons `google` (CC0), inlined as a `currentColor` SVG string:
-/// Carbon's icon set has no brand logos, and this is a third-party mark rather
-/// than a UI affordance.
+  /// Null renders the disabled state (opacity 0.4, no interaction), per the
+  /// design system's disabled contract.
+  final VoidCallback? onTap;
+
+  @override
+  State<_MutedLink> createState() => _MutedLinkState();
+}
+
+class _MutedLinkState extends State<_MutedLink> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final onTap = widget.onTap;
+    if (onTap == null) {
+      return Opacity(
+        opacity: 0.4,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+          child: Text(
+            widget.label,
+            textAlign: TextAlign.center,
+            style: AbTokens.sansStyle(
+              color: antgrid.textMuted,
+              fontSize: AbTokens.fontXs,
+            ),
+          ),
+        ),
+      );
+    }
+    return MergeSemantics(
+      child: Semantics(
+        link: true,
+        enabled: true,
+        child: FocusableActionDetector(
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: (v) {
+            if (_focused != v) setState(() => _focused = v);
+          },
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                onTap();
+                return null;
+              },
+            ),
+          },
+          child: GestureDetector(
+            onTap: onTap,
+            child: AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+                child: Text(
+                  widget.label,
+                  textAlign: TextAlign.center,
+                  style: AbTokens.sansStyle(
+                    color: antgrid.textMuted,
+                    fontSize: AbTokens.fontXs,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Emphasis for [_SignInButton], mirroring [AbButtonVariant] so there is one
+/// mental model for "this is the way through" across the app.
+enum _SignInButtonVariant {
+  /// Surface fill, 1px border. Every secondary action on the screen.
+  normal,
+
+  /// Accent fill. At most ONE per phase — the accent is what tells the primary
+  /// action apart from its neighbours, and a second one spends that for
+  /// nothing.
+  primary,
+}
+
+class _SignInButton extends StatefulWidget {
+  const _SignInButton({
+    required this.label,
+    required this.onPressed,
+    this.variant = _SignInButtonVariant.normal,
+    this.leading,
+    this.appleInk = false,
+  });
+  final String label;
+  final VoidCallback? onPressed;
+  final _SignInButtonVariant variant;
+
+  /// A mark before the label, drawn in the label's colour.
+  final Widget Function(Color color)? leading;
+
+  /// Draws the label and mark in pure black or white, whichever contrasts
+  /// with the fill behind them, as Apple requires of a Sign in with Apple
+  /// button. Decided from the fill rather than a light/dark flag because
+  /// custom themes can put any colour there.
+  final bool appleInk;
+
+  @override
+  State<_SignInButton> createState() => _SignInButtonState();
+}
+
+class _SignInButtonState extends State<_SignInButton> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final enabled = widget.onPressed != null;
+    final isPrimary = widget.variant == _SignInButtonVariant.primary;
+    final fill = isPrimary
+        ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
+        : (_hovered ? antgrid.bgElevated : antgrid.bgSurface);
+    final foreground = widget.appleInk
+        ? (fill.computeLuminance() > 0.5
+              ? AbTokens.appleSignInInkOnLight
+              : AbTokens.appleSignInInkOnDark)
+        : isPrimary
+        ? antgrid.accentForeground
+        : antgrid.textPrimary;
+    final visual = Container(
+      constraints: BoxConstraints(minHeight: AbTouchSizing.extentOf(context)),
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
+      decoration: BoxDecoration(
+        color: fill,
+        border: Border.all(
+          color: isPrimary ? antgrid.accent : antgrid.borderDefault,
+        ),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (widget.leading case final leading?) ...[
+            leading(foreground),
+            const SizedBox(width: AbTokens.space6),
+          ],
+          Flexible(
+            child: Text(
+              widget.label,
+              textAlign: TextAlign.center,
+              style: AbTokens.sansStyle(color: foreground),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!enabled) {
+      return Semantics(
+        button: true,
+        enabled: false,
+        child: Opacity(opacity: 0.4, child: visual),
+      );
+    }
+    return MergeSemantics(
+      child: Semantics(
+        button: true,
+        enabled: true,
+        onTap: widget.onPressed,
+        child: FocusableActionDetector(
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: (v) {
+            if (_focused != v) setState(() => _focused = v);
+          },
+          onShowHoverHighlight: (v) {
+            if (_hovered != v) setState(() => _hovered = v);
+          },
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                widget.onPressed?.call();
+                return null;
+              },
+            ),
+          },
+          child: GestureDetector(
+            onTap: widget.onPressed,
+            child: AbFocusRing(
+              focused: _focused,
+              borderRadius: AbTokens.borderRadius5,
+              child: visual,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Simple Icons `google` (CC0), inlined as a `currentColor` SVG string for the
+/// same reason [AbAgentMarks] inlines its marks: it renders through [AbIcon] on
+/// the same path as every other glyph, with one tinting rule and no asset
+/// manifest to keep in sync. It lives here rather than in [AbIcons] because
+/// that file is the choke point for UI *affordance* icons and this is a
+/// third-party brand mark — the same line [AbAgentMarks] draws. GitHub needs no
+/// equivalent; Codicons ship one.
 const String _googleMark =
     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
     'viewBox="0 0 24 24"><path fill="currentColor" d="M12.48 10.92v3.28h7.84'
@@ -1515,271 +1666,252 @@ const String _googleMark =
     's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
     '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
 
-/// A brand mark tinted by the surrounding [IconTheme], which is how a
-/// [CarbonButton] hands its `icon` the right colour at rest, hover, press and
-/// disabled — so these glyphs follow the button exactly as a Carbon icon does.
-class _BrandGlyph extends StatelessWidget {
-  const _BrandGlyph(this.svg);
+/// Apple's logo artwork, sized to sit beside a [_SignInButton] title.
+///
+/// Sign in with Apple is a full-width outlined [_SignInButton] rather than a
+/// cell in [_AuthMethodRow]: Apple's guidelines want its title spelled out,
+/// and it may be no less prominent than the other providers. It is not the
+/// plugin's `SignInWithAppleButton`, whose solid black or white fill competed
+/// with the primary Continue button.
+class _AppleMark extends StatelessWidget {
+  const _AppleMark({required this.color});
 
-  final String svg;
+  final Color color;
 
   @override
-  Widget build(BuildContext context) {
-    final icon = IconTheme.of(context);
-    final color = icon.color ?? CarbonTheme.of(context).colors.iconPrimary;
-    return SvgPicture.string(
-      svg,
-      width: icon.size,
-      height: icon.size,
-      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
-    );
-  }
+  Widget build(BuildContext context) => SizedBox(
+    width: AbTokens.fontBody * 25 / 31,
+    height: AbTokens.fontBody,
+    child: CustomPaint(painter: AppleLogoPainter(color: color)),
+  );
 }
 
-class _Method {
-  const _Method({
-    required this.label,
+/// One way to prove the address is yours, as rendered by [_AuthMethodRow].
+class _AuthMethodSpec {
+  const _AuthMethodSpec({
     required this.icon,
-    required this.onPressed,
+    required this.label,
+    required this.onTap,
   });
 
+  /// Iconify SVG: an [AbIcons] constant, or an inlined brand mark.
+  final String icon;
   final String label;
-  final Widget icon;
 
-  /// Null disables the button. Every method disables together — only
-  /// [_Phase.submitting] ever does it.
-  final VoidCallback? onPressed;
+  /// Null disables the cell. The whole row disables together — only
+  /// [_Phase.submitting] ever does it — so the group dims as one object.
+  final VoidCallback? onTap;
 }
 
-/// The step-1 method buttons: equal tertiary buttons that share one rule and
-/// stay on one row for as long as their labels fit, and never clip them when
-/// they do not.
+/// The step-1 method group: one bordered box, one cell per method.
 ///
-/// Not a [CarbonButtonSet]: that stacks with the LAST child on top, so a set
-/// listing GitHub, Google, Password in row order would read Password, Google,
-/// GitHub down a phone — and either order chosen for the stack reverses the
-/// row. Measuring the labels here lets both layouts read in the same order.
-///
-/// Three fits, tried in order: centred icon and label on one row; centred
-/// labels alone on one row (the icon is the first thing to give, since the label
-/// already names the method); then stacked full width with Carbon's own layout
-/// and icons, which is what enlarged text lands on.
-class _MethodRow extends StatefulWidget {
-  const _MethodRow({required this.methods});
+/// Built like [AbSegmented] — outer border, [ClipRRect], 1px dividers stretched
+/// by [IntrinsicHeight], inset focus rings — because it has to read as a single
+/// control answering a single question. Deliberately NOT an [AbSegmented]: a
+/// cell here fires an action, and a selected state would promise a choice that
+/// persists.
+class _AuthMethodRow extends StatelessWidget {
+  const _AuthMethodRow({required this.methods});
 
-  final List<_Method> methods;
-
-  @override
-  State<_MethodRow> createState() => _MethodRowState();
-}
-
-class _MethodRowState extends State<_MethodRow> {
-  // Adjacent outlines overlap by their own width so two borders draw as one
-  // rule instead of a doubled 2px line.
-  static const double _overlap = CarbonBorders.hairline;
-
-  // Whichever overlapping neighbour paints last owns the shared rule, so the
-  // button being pressed, focused or hovered is painted last; otherwise its
-  // neighbour's resting edge would cut through its pressed border or focus
-  // ring on one side.
-  int? _pressed;
-  int? _focused;
-  int? _hovered;
-
-  int? get _active => _pressed ?? _focused ?? _hovered;
-
-  void _set(void Function() change) {
-    if (mounted) setState(change);
-  }
+  final List<_AuthMethodSpec> methods;
 
   @override
   Widget build(BuildContext context) {
-    final methods = widget.methods;
-    final t = CarbonTheme.of(context);
-    final scaler = MediaQuery.textScalerOf(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        var widest = 0.0;
-        for (final m in methods) {
-          final painter = TextPainter(
-            text: TextSpan(text: m.label, style: t.typography.control),
-            textDirection: TextDirection.ltr,
-            textScaler: scaler,
-            maxLines: 1,
-          )..layout();
-          widest = math.max(widest, painter.width);
-          painter.dispose();
-        }
-        // CarbonButtonContent.centered: 8 padding each side and 8 between icon
-        // and label. The 1 is slack for sub-pixel rounding, since a wrong guess
-        // clips.
-        const padding = 2 * CarbonSpacing.spacing03;
-        final withIcon =
-            padding + t.iconSize + CarbonSpacing.spacing03 + widest + 1;
-        final labelOnly = padding + widest + 1;
-        final n = methods.length;
-        // Every button is one share wide and each overlaps the last by the
-        // hairline, so the shares add up to the width plus the overlaps.
-        final share = (constraints.maxWidth + _overlap * (n - 1)) / n;
-
-        Widget button(_Method m, {required bool icon, required bool centered}) =>
-            CarbonButton(
-              label: m.label,
-              kind: CarbonButtonKind.tertiary,
-              expand: true,
-              content: centered
-                  ? CarbonButtonContent.centered
-                  : CarbonButtonContent.standard,
-              onPressed: m.onPressed,
-              icon: icon ? m.icon : null,
-            );
-
-        if (share >= labelOnly) {
-          final icons = share >= withIcon;
-          Widget cell(int i) => KeyedSubtree(
-            key: ValueKey(i),
-            child: Padding(
-              // Directional, so the row reads from the start edge in RTL too.
-              padding: EdgeInsetsDirectional.only(start: i * (share - _overlap)),
-              child: SizedBox(
-                width: share,
-                child: MouseRegion(
-                  onEnter: (_) => _set(() => _hovered = i),
-                  onExit: (_) => _set(() {
-                    if (_hovered == i) _hovered = null;
-                  }),
-                  child: Listener(
-                    onPointerDown: (_) => _set(() => _pressed = i),
-                    onPointerUp: (_) => _set(() {
-                      if (_pressed == i) _pressed = null;
-                    }),
-                    onPointerCancel: (_) => _set(() {
-                      if (_pressed == i) _pressed = null;
-                    }),
-                    child: Focus(
-                      canRequestFocus: false,
-                      skipTraversal: true,
-                      onFocusChange: (focused) => _set(() {
-                        if (focused) {
-                          _focused = i;
-                        } else if (_focused == i) {
-                          _focused = null;
-                        }
-                      }),
-                      child: button(methods[i], icon: icons, centered: true),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-          final active = _active;
-          // Each cell is inset from the start by the shares before it, so the
-          // last one ends exactly at the row's end edge. Keys keep each
-          // button's state when the paint order changes.
-          return Stack(
-            alignment: AlignmentDirectional.topStart,
+    final antgrid = context.antgrid;
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: antgrid.borderDefault),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: ClipRRect(
+        borderRadius: AbTokens.borderRadius5,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (var i = 0; i < n; i++)
-                if (i != active) cell(i),
-              if (active != null && active < n) cell(active),
+              for (var i = 0; i < methods.length; i++) ...[
+                if (i > 0) Container(width: 1, color: antgrid.borderDefault),
+                Expanded(child: _AuthMethodCell(spec: methods[i])),
+              ],
             ],
-          );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: CarbonSpacing.spacing03,
-          children: [
-            for (final m in methods) button(m, icon: true, centered: false),
-          ],
-        );
-      },
+          ),
+        ),
+      ),
     );
   }
 }
 
-/// Sign in with Apple, built to Apple's button rules rather than Carbon's.
-///
-/// App Review holds this button to Apple's Human Interface Guidelines (App
-/// Store guideline 4.8) and rejected the iOS build once already, so it is
-/// deliberately NOT a [CarbonButton]: Apple's own logo artwork, Apple's black
-/// or white fill with the opposite ink, the title spelled out as "Continue with
-/// Apple", and no less prominent than the other providers — full width and at
-/// least as tall as any of them. Carbon supplies only focus, keyboard
-/// activation and semantics. Square corners are within the guidelines.
-class _AppleButton extends StatelessWidget {
-  const _AppleButton({required this.onPressed});
+class _AuthMethodCell extends StatefulWidget {
+  const _AuthMethodCell({required this.spec});
 
-  final VoidCallback? onPressed;
+  final _AuthMethodSpec spec;
 
-  // Apple-mandated, not theme tokens: they must stay pure black and white
-  // whatever Carbon palette is active.
-  static const _black = Color(0xFF000000);
-  static const _white = Color(0xFFFFFFFF);
+  @override
+  State<_AuthMethodCell> createState() => _AuthMethodCellState();
+}
+
+class _AuthMethodCellState extends State<_AuthMethodCell> {
+  bool _hovered = false;
+  bool _focused = false;
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    // Black on a light ground and white on a dark one, the two fills Apple
-    // allows beside a coloured or neutral page, with the opposite ink.
-    final light = t.brightness == Brightness.light;
-    final fill = light ? _black : _white;
-    final ink = light ? _white : _black;
-    // The same height as Continue above it: never shorter than any other
-    // provider, and no taller, so neither reads as the louder choice.
-    final height = math.max(t.controlHeight, t.minTarget);
-    // Apple fixes the title at about 43% of the button height whatever font is
-    // used, and prefers the system font, so the title is sized from the button
-    // and deliberately takes nothing from Carbon's type scale.
-    final mark = (height * 0.43).roundToDouble();
-    final style = TextStyle(
-      inherit: false,
-      fontSize: mark,
-      fontWeight: FontWeight.w500,
-      color: ink,
+    final antgrid = context.antgrid;
+    final onTap = widget.spec.onTap;
+    final fg = _hovered ? antgrid.textPrimary : antgrid.textSecondary;
+
+    final visual = AnimatedContainer(
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
+      color: _hovered ? antgrid.bgElevated : antgrid.bgSurface,
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbIcon(widget.spec.icon, size: 16, color: fg),
+          const SizedBox(height: AbTokens.space6),
+          Text(
+            widget.spec.label,
+            style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: fg),
+          ),
+        ],
+      ),
     );
-    return CarbonInteraction(
-      onPressed: onPressed,
-      label: 'Continue with Apple',
-      excludeChildSemantics: true,
-      builder: (context, state, _) => Opacity(
-        opacity: state.enabled ? 1 : 0.4,
-        child: CarbonFocusRing(
-          visible: state.focusVisible,
-          onColor: true,
-          child: Container(
-            key: const ValueKey('sign-in-apple'),
-            constraints: BoxConstraints(minHeight: height),
-            padding: const EdgeInsets.symmetric(
-              horizontal: CarbonSpacing.spacing05,
-              vertical: CarbonSpacing.spacing03,
-            ),
-            alignment: Alignment.center,
-            color: fill.withValues(
-              alpha: state.pressed
-                  ? 0.8
-                  : state.hovered
-                  ? 0.9
-                  : 1,
-            ),
-            child: Row(
+
+    if (onTap == null) return Opacity(opacity: 0.4, child: visual);
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              onTap();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AbFocusRing(
+            focused: _focused,
+            // The cell sits under the group's ClipRRect; the default outset
+            // ring would be clipped away entirely.
+            inset: true,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The offline demo, filed as a destination rather than a credential.
+///
+/// Outlined on the page ground instead of filled like the controls above it, so
+/// at rest it is the one element on the screen that does not look like a button
+/// — which is what lets it stay prominent without competing with Continue. It
+/// is also the only left-aligned, two-line thing here, so the caveat travels
+/// with the offer instead of floating under it as an orphan line.
+class _DemoCard extends StatefulWidget {
+  const _DemoCard({required this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  State<_DemoCard> createState() => _DemoCardState();
+}
+
+class _DemoCardState extends State<_DemoCard> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final onTap = widget.onTap;
+
+    final visual = AnimatedContainer(
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space10,
+      ),
+      decoration: BoxDecoration(
+        color: _hovered ? antgrid.bgSurface : antgrid.bgDeep,
+        border: Border.all(color: antgrid.borderDefault),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                SizedBox(
-                  width: mark * 25 / 31,
-                  height: mark,
-                  child: CustomPaint(painter: AppleLogoPainter(color: ink)),
+                Text(
+                  kDemoEntryLabel,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontMd,
+                    color: antgrid.textPrimary,
+                  ),
                 ),
-                const SizedBox(width: CarbonSpacing.spacing03),
-                Flexible(
-                  child: Text(
-                    'Continue with Apple',
-                    textAlign: TextAlign.center,
-                    style: style,
+                const SizedBox(height: AbTokens.space2),
+                Text(
+                  'No account needed. Explore the app on a built-in project.',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: antgrid.textMuted,
                   ),
                 ),
               ],
             ),
+          ),
+          const SizedBox(width: AbTokens.space8),
+          AbIcon(
+            AbIcons.send,
+            size: 14,
+            color: _hovered ? antgrid.textSecondary : antgrid.textMuted,
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null) return Opacity(opacity: 0.4, child: visual);
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              onTap();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AbFocusRing(
+            focused: _focused,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
           ),
         ),
       ),

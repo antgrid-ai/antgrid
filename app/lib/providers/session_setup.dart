@@ -31,16 +31,12 @@ class SessionSetupBannerUiState {
   const SessionSetupBannerUiState({
     this.hiddenRunKeys = const <String>{},
     this.expandedSessionId,
-    this.actingVerbs = const <String, SessionSetupAction>{},
+    this.actingSessionIds = const <String>{},
   });
 
   final Set<String> hiddenRunKeys;
   final String? expandedSessionId;
-
-  /// The verb in flight per session. One slot per session, shared by every
-  /// surface, so the spinner can land on the control that was pressed while
-  /// the other stays inert.
-  final Map<String, SessionSetupAction> actingVerbs;
+  final Set<String> actingSessionIds;
 }
 
 class SessionSetupBannerUiController
@@ -70,7 +66,7 @@ class SessionSetupBannerUiController
     state = SessionSetupBannerUiState(
       hiddenRunKeys: {...state.hiddenRunKeys, runKey},
       expandedSessionId: state.expandedSessionId,
-      actingVerbs: state.actingVerbs,
+      actingSessionIds: state.actingSessionIds,
     );
   }
 
@@ -81,23 +77,44 @@ class SessionSetupBannerUiController
       expandedSessionId: state.expandedSessionId == sessionId
           ? null
           : sessionId,
-      actingVerbs: state.actingVerbs,
+      actingSessionIds: state.actingSessionIds,
     );
   }
 
-  /// Records [verb] as in flight for [sessionId], or clears it when null.
-  void setActing(String sessionId, SessionSetupAction? verb) {
-    final next = {...state.actingVerbs};
-    if (verb != null) {
-      next[sessionId] = verb;
+  void setActing(String sessionId, bool acting) {
+    final next = {...state.actingSessionIds};
+    if (acting) {
+      next.add(sessionId);
     } else {
       next.remove(sessionId);
     }
     state = SessionSetupBannerUiState(
       hiddenRunKeys: state.hiddenRunKeys,
       expandedSessionId: state.expandedSessionId,
-      actingVerbs: next,
+      actingSessionIds: next,
     );
+  }
+
+  /// Drop an expansion the banner has stopped offering a chevron for.
+  ///
+  /// Masking the expansion at the render site is not enough on its own: the
+  /// state is per session and outlives the run that set it, so the moment the
+  /// mask lifts — the gate releases, the agent spawns — a full setup log
+  /// unfolds between the banner and the agent the user was waiting for,
+  /// without them having touched anything.
+  ///
+  /// Deferred, because the only caller is a `build`: a notifier mutated inside
+  /// one is a Riverpod error. Same shape as the success hold below.
+  void collapseIfExpanded(String sessionId) {
+    if (state.expandedSessionId != sessionId) return;
+    Timer(Duration.zero, () {
+      if (state.expandedSessionId != sessionId) return;
+      state = SessionSetupBannerUiState(
+        hiddenRunKeys: state.hiddenRunKeys,
+        expandedSessionId: null,
+        actingSessionIds: state.actingSessionIds,
+      );
+    });
   }
 
   void hideSuccessAfterDelay(String runKey) {

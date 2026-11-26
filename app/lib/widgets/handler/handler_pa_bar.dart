@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_carbon.dart';
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_list_row.dart';
+import '../../design/widgets/ab_state_chip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_mode.dart';
@@ -273,10 +277,6 @@ bool _hasLiveDeadline(HandlerSessionState session, DateTime now) {
 ///
 /// Renders only for an armed session, so an unarmed terminal gives up no
 /// vertical space to it.
-///
-/// Owns its Carbon scope, at a position that never moves: the agent panel
-/// around it stays Antgrid-painted, and the sheets this row opens take their
-/// theme from a context under that scope.
 class HandlerPaBar extends ConsumerStatefulWidget {
   const HandlerPaBar({super.key});
 
@@ -315,29 +315,37 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     final session = terminalId == null ? null : state?.sessions[terminalId];
     if (terminalId == null || session == null) {
       _syncCountdownTicker(false);
-      return const AbCarbonScope(child: SizedBox.shrink());
+      return const SizedBox.shrink();
     }
     final now = DateTime.now();
     _syncCountdownTicker(_hasLiveDeadline(session, now));
 
+    final p = context.antgrid;
     // Word and tone both from the shared vocabulary, including the overrides
     // that outrank `watching`: this bar is the only surface an armed session
     // has for the whole time it is armed, so a session nobody is watching
     // must not read here as one that is.
-    final status = handlerSessionStatusTone(session);
-    final opener = ref.watch(handlerBacklogOpenerProvider);
+    final status = handlerSessionStatusWord(p, session);
+    final openBacklog =
+        ref.watch(handlerBacklogOpenerProvider) ??
+        (id) => unawaited(showHandlerBacklogDrawer(context, id));
     // The in-flight target while a mode flip is pending, else the acked entry
     // value — and null reads as NOT chat, the same way `AgentPanel` reads it
     // when it picks the terminal over the transcript. A prompt named for the
     // wrong surface is the failure this bar exists to avoid, and the two
     // surfaces have to agree about which session they are looking at.
     final isChat = ref.watch(activeSessionModeProvider) == 'chat';
+    final hint = handlerTypingHint(session, isChat: isChat);
     // An em-dash where this machine has never named the lenses it reads: the
     // chip is read as a live fact about the session, and naming a lens on a
     // machine that never advertised any is a claim about a control over
     // nothing (see HandlerState.lenses). An id this build cannot name is shown
     // as itself for the same reason — a newer machine's lens is a real pick,
     // and folding it into the default would report one the user never made.
+    //
+    // Every chip label is ≤16 chars precisely so this row can reuse the same
+    // vocabulary the sheet chips use rather than fork a second short set —
+    // no separate bar-only word for the unnamed default.
     //
     // `Your own` has no [roleId] of its own: a preset always clears the brief
     // to `""` on pick, so a non-null [HandlerSessionState.brief] with no
@@ -356,7 +364,7 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     final inert = session.observability == HandlerObservability.escalateOnly;
     // The chip's own words say what the lens IS; the tooltip carries the one
     // thing a two-word label cannot. Escalate-only borrows the sentence the
-    // Handler tab tooltips its own escalate-only tag with — the two are on
+    // Handler tab tooltips its own ESCALATE ONLY chip with — the two are on
     // screen together on desktop, and one inert judge explained two ways reads
     // as two different problems.
     final lensTooltip = inert
@@ -367,218 +375,118 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         ? 'Your own words are running under this lens'
         : 'What Handler also asks about on this session';
 
-    return AbCarbonScope(
-      child: _PaBarRow(
-        statusLabel: status.label,
-        statusTone: status.tone,
-        detail: handlerPaStatusLabel(session, now: now),
-        hint: handlerTypingHint(session, isChat: isChat),
-        lensLabel: lensLabel,
-        lensTooltip: lensTooltip,
-        lensInert: inert,
-        hasBrief: session.brief != null,
-        onOpenBacklog: (scoped) => opener != null
-            ? opener(terminalId)
-            : unawaited(showHandlerBacklogDrawer(scoped, terminalId)),
-        onOpenSettings: (scoped) => detached(
-          'HandlerPaBar',
-          'open session settings',
-          () => showHandlerSessionSettingsSheet(scoped, terminalId),
-        ),
-      ),
-    );
-  }
-}
-
-/// The bar's picture, split from the state that feeds it so every sheet it
-/// opens is presented from a context that sits under the bar's Carbon scope.
-class _PaBarRow extends StatelessWidget {
-  const _PaBarRow({
-    required this.statusLabel,
-    required this.statusTone,
-    required this.detail,
-    required this.hint,
-    required this.lensLabel,
-    required this.lensTooltip,
-    required this.lensInert,
-    required this.hasBrief,
-    required this.onOpenBacklog,
-    required this.onOpenSettings,
-  });
-
-  final String statusLabel;
-  final HandlerTone statusTone;
-  final String? detail;
-  final String? hint;
-  final String lensLabel;
-  final String lensTooltip;
-  final bool lensInert;
-  final bool hasBrief;
-  final void Function(BuildContext scoped) onOpenBacklog;
-  final void Function(BuildContext scoped) onOpenSettings;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    // The first line's own band: the chip's footprint is the tallest thing on
-    // it, so everything on the line centres in a box of exactly that height
-    // and the hint, when there is one, starts beneath it.
-    final line = t.minTarget;
-    final hint = this.hint;
-    final spoken = [statusLabel, ?detail, ?hint].join('. ');
-
-    final title = Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(
-            text: statusLabel,
-            style: TextStyle(
-              color: handlerToneColor(c, statusTone),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (detail != null) ...[
-            TextSpan(
-              text: ' · ',
-              style: TextStyle(color: c.textHelper),
-            ),
-            TextSpan(text: detail),
-          ],
-        ],
-      ),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      softWrap: false,
-      style: t.typography.body.copyWith(color: c.textPrimary),
+    final detail = handlerPaStatusLabel(session, now: now);
+    // One centre line for the whole row. Start-alignment is what keeps the
+    // glyphs beside the title when the hint wraps under it, but on its own it
+    // hangs a 12px glyph and a 17px line from the TOP of a row the 24px chip
+    // has made taller — three centre lines on one strip, which is what the
+    // leading glyph reads as sitting too high against. The band is the chip's
+    // own box, the tallest thing on the line, floored by the title's line so a
+    // large text scaler grows the band instead of clipping the words.
+    final line = math.max(
+      AbTokens.iconButtonBox,
+      AbListRow.titleLineExtent(context),
     );
 
-    final opener = CarbonInteraction(
-      label: spoken,
-      hint: 'Opens the Handler backlog',
-      excludeChildSemantics: true,
-      onPressed: () => onOpenBacklog(context),
-      builder: (context, state, _) => CarbonFocusRing(
-        visible: state.focusVisible,
-        child: ColoredBox(
-          color: state.hovered ? c.layerHover01 : const Color(0x00000000),
-          child: Padding(
-            padding: const EdgeInsetsDirectional.only(
-              start: CarbonSpacing.spacing05,
-              end: CarbonSpacing.spacing03,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  height: line,
-                  child: Row(
-                    children: [
-                      // Untinted: this glyph names the backlog behind the row,
-                      // and painting it in the run state's colour would leave
-                      // the tone as the only thing saying what the session was
-                      // doing.
-                      CarbonIcon(
-                        CarbonIcons.listBulleted,
-                        size: _glyph,
-                        color: c.iconSecondary,
-                      ),
-                      const SizedBox(width: CarbonSpacing.spacing03),
-                      Expanded(child: title),
-                    ],
-                  ),
-                ),
-                // The hint's actionable half is its tail ("…answer it in the
-                // transcript"), which is exactly what one ellipsized line eats:
-                // the narrowest panel that mounts this bar leaves ~216px for a
-                // string that wants more than 300.
-                if (hint != null)
-                  Padding(
-                    padding: const EdgeInsetsDirectional.only(
-                      start: _glyph + CarbonSpacing.spacing03,
-                      bottom: CarbonSpacing.spacing03,
-                    ),
-                    child: Text(
-                      hint,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.typography.helper.copyWith(
-                        color: c.textSecondary,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-
-    return DecoratedBox(
+    return Container(
       decoration: BoxDecoration(
-        color: c.layer01,
-        border: Border(top: BorderSide(color: c.borderSubtle01)),
+        color: p.bgDeep,
+        border: Border(top: BorderSide(color: p.borderSubtle)),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) => Row(
+      child: AbListRow(
+        density: AbRowDensity.sm,
+        // The hint's actionable half is its tail ("…answer it in the
+        // transcript"), which is exactly what one ellipsized line eats: the
+        // narrowest panel that mounts this bar leaves ~216px for a string that
+        // wants more than 300. Start-aligned so the icons stay beside the title
+        // rather than drifting to the middle of a wrapped block.
+        subtitleMaxLines: 2,
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(child: opener),
-          // The lens, always — including the default. This bar is on screen
-          // for the whole time a session is armed, and it is the only place the
-          // setting is visible at all; showing it only once it has been changed
-          // makes "no chip" a state the user has to know how to read.
-          //
-          // A pressable tag rather than a bare label: it reports a state and
-          // opens the surface that changes it. The brief sits behind the same
-          // door as the lens it qualifies, so it marks that door rather than
-          // standing beside it. Deliberately not the shield, which is
-          // Handler's arm/disarm mark everywhere else it appears — on a
-          // control that opens a settings sheet it would offer the one action
-          // this control does not have.
-          // Capped so a long lens name cannot starve the opener on a narrow
-          // panel; the tag ellipsizes inside the bound.
-          ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.45),
-            child: CarbonTooltip(
-              message: lensTooltip,
-              child: CarbonTag(
-                label: lensLabel,
-                color: lensInert
-                    ? handlerToneTagColor(HandlerTone.warning)
-                    : CarbonTagColor.gray,
-                icon: CarbonIcon(
-                  hasBrief ? CarbonIcons.chat : CarbonIcons.settings,
-                ),
-                onPressed: () => onOpenSettings(context),
-              ),
-            ),
+        // Untinted, unlike the state it used to carry: this glyph names the
+        // backlog behind the row, and painting a door in the run state's
+        // colour left the tone as the only thing saying what the session was
+        // doing — which is how the state went unworded for as long as it did.
+        leading: SizedBox(
+          height: line,
+          child: Center(
+            child: AbIcon(AbIcons.tasklist, size: 12, color: p.textMuted),
           ),
-          // Part of the row's own door rather than a control: the whole bar
-          // opens the backlog, and this glyph says which way it opens.
-          ExcludeSemantics(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => onOpenBacklog(context),
-              child: SizedBox(
-                width: CarbonSpacing.spacing07,
-                height: line,
-                child: Center(
-                  child: CarbonIcon(
-                    CarbonIcons.chevronUp,
-                    size: _glyph,
-                    color: c.iconSecondary,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
         ),
+        // State first, in its own tone, then the detail. An ellipsis eats from
+        // the tail, so the half that survives the narrowest panel is the half
+        // that decides whether the user has to act at all.
+        title: SizedBox(
+          height: line,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: status.label,
+                    style: TextStyle(
+                      color: status.tone,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (detail != null) ...[
+                    TextSpan(text: ' · ', style: TextStyle(color: p.textMuted)),
+                    TextSpan(text: detail),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+        // Unstyled: AbListRow already renders a subtitle as muted chrome, and
+        // restating it here would silently drop the row's line height.
+        subtitle: hint == null ? null : Text(hint),
+        trailing: SizedBox(
+          height: line,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // The lens, always — including the default. This bar is on
+              // screen for the whole time a session is armed, and it is the
+              // only place the setting is visible at all; showing it only once
+              // it has been changed makes "no chip" a state the user has to
+              // know how to read. It costs width the title is already short of
+              // (see the subtitle note above), which is the trade.
+              //
+              // [AbStateChip] rather than a bare [AbChip]: this reports a state
+              // and opens the surface that changes it, which is that widget's
+              // whole contract. The chip it replaces drew the row's one control
+              // as read-only system data — no border, no hover, no focus ring
+              // and a tap target the height of 10px of text — while shouting
+              // the label in caps the sheet behind it does not use.
+              AbStateChip(
+                // The brief sits behind the same door as the lens it
+                // qualifies, so it marks that door rather than standing beside
+                // it: a mark the user cannot follow names something with
+                // nowhere to go and read it. Deliberately not [AbIcons.shield],
+                // which is Handler's arm/disarm mark everywhere else it appears
+                // — on a chip that opens a settings sheet it would offer the
+                // one action this control does not have.
+                icon: session.brief != null
+                    ? AbIcons.comment
+                    : AbIcons.settings,
+                label: lensLabel,
+                tone: inert ? p.warning : null,
+                active: inert,
+                tooltip: lensTooltip,
+                onTap: (chipContext) => detached(
+                  'HandlerPaBar',
+                  'open session settings',
+                  () => showHandlerSessionSettingsSheet(chipContext, terminalId),
+                ),
+              ),
+              const SizedBox(width: AbTokens.space6),
+              AbIcon(AbIcons.chevronUp, size: 12, color: p.textMuted),
+            ],
+          ),
+        ),
+        onTap: () => openBacklog(terminalId),
       ),
     );
   }
 }
-
-const double _glyph = 16;

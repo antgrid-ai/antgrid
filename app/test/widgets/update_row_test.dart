@@ -1,11 +1,9 @@
-import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/widgets/ab_progress_rule.dart';
 import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
 import 'package:antgrid/update/update_check_result.dart';
-import 'package:antgrid/widgets/drawer/drawer_chrome_row.dart';
 import 'package:antgrid/widgets/update_row.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -74,16 +72,7 @@ Future<({ProviderContainer container, _SpyController install})> _pumpRow(
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(
-        home: Scaffold(
-          body: AbCarbonScope(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: UpdateRow(),
-            ),
-          ),
-        ),
-      ),
+      child: const MaterialApp(home: Scaffold(body: UpdateRow())),
     ),
   );
   return (container: container, install: spy);
@@ -94,7 +83,7 @@ void main() {
     final strategy = _FakeStrategy();
     await _pumpRow(tester, strategy, lit: false);
     expect(find.text('Update available'), findsNothing);
-    expect(find.byType(DrawerChromeRow), findsNothing);
+    expect(find.byType(InkWell), findsNothing);
   });
 
   testWidgets('lit row renders the strategy copy and taps into the sequence', (
@@ -106,7 +95,7 @@ void main() {
     expect(find.text('Update available'), findsOneWidget);
     expect(find.text('Update'), findsOneWidget);
 
-    await tester.tap(find.byType(DrawerChromeRow));
+    await tester.tap(find.byType(InkWell));
     await tester.pump();
     // Through the controller, never straight at the strategy: the confirm,
     // the host drain and the debounce all live there.
@@ -128,13 +117,13 @@ void main() {
 
     expect(find.text('Updating... 42%'), findsOneWidget);
     expect(
-      tester.widget<CarbonProgressBar>(find.byType(CarbonProgressBar)).value,
+      tester.widget<AbProgressRule>(find.byType(AbProgressRule)).fraction,
       0.42,
     );
     // An action label on a row that refuses taps reads as a dead button.
     expect(find.text('Update'), findsNothing);
 
-    await tester.tap(find.byType(DrawerChromeRow), warnIfMissed: false);
+    await tester.tap(find.byType(InkWell), warnIfMissed: false);
     await tester.pump();
     expect(h.install.starts, 0);
   });
@@ -153,16 +142,9 @@ void main() {
 
     expect(find.text('Updating...'), findsOneWidget);
     expect(
-      tester.widget<CarbonProgressBar>(find.byType(CarbonProgressBar)).value,
+      tester.widget<AbProgressRule>(find.byType(AbProgressRule)).fraction,
       isNull,
       reason: 'indeterminate, not zero',
-    );
-    expect(
-      tester
-          .widget<CarbonProgressBar>(find.byType(CarbonProgressBar))
-          .animateIndeterminate,
-      isFalse,
-      reason: 'a resting band, so the drawer holds no perpetual animation',
     );
   });
 
@@ -180,7 +162,7 @@ void main() {
     expect(find.text('Updating...'), findsOneWidget);
     expect(find.text('Update'), findsNothing);
 
-    await tester.tap(find.byType(DrawerChromeRow), warnIfMissed: false);
+    await tester.tap(find.byType(InkWell), warnIfMissed: false);
     await tester.pump();
     expect(h.install.starts, 0);
   });
@@ -199,7 +181,7 @@ void main() {
     expect(find.text('Update available'), findsOneWidget);
     expect(find.text('Update'), findsOneWidget);
 
-    await tester.tap(find.byType(DrawerChromeRow));
+    await tester.tap(find.byType(InkWell));
     await tester.pump();
     expect(h.install.starts, 1);
   });

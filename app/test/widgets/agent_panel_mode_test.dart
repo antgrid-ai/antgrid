@@ -6,7 +6,6 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -118,7 +117,7 @@ void main() {
       expect(find.byType(AgentBar), findsOneWidget);
       // Never pumpAndSettle: the agent panel keeps a pulsing status
       // animation up for the whole test, so settling never arrives.
-      await tester.tap(find.byType(CarbonOverflowMenu));
+      await tester.tap(find.byTooltip('Session options'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
 

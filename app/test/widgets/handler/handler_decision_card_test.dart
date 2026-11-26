@@ -1,9 +1,8 @@
-import 'package:antgrid/design/ab_carbon.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/widgets/handler/handler_ask_footer.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_why.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,14 +42,10 @@ Future<void> _pumpCard(
 }) => tester.pumpWidget(
   MaterialApp(
     home: Scaffold(
-      body: AbCarbonScope(
-        child: SingleChildScrollView(
-          child: HandlerDecisionCard(
-            escalation: escalation,
-            onChoice: onChoice,
-            onCustomReply: onCustomReply,
-          ),
-        ),
+      body: HandlerDecisionCard(
+        escalation: escalation,
+        onChoice: onChoice,
+        onCustomReply: onCustomReply,
       ),
     ),
   ),
@@ -62,8 +57,8 @@ bool Function(String) _record(List<String> into) => (id) {
   return true;
 };
 
-CarbonButton _button(WidgetTester tester, String label) =>
-    tester.widget<CarbonButton>(find.widgetWithText(CarbonButton, label));
+AbButton _button(WidgetTester tester, String label) =>
+    tester.widget<AbButton>(find.widgetWithText(AbButton, label));
 
 void main() {
   testWidgets('every choice shows the text its tap would send', (tester) async {
@@ -90,7 +85,7 @@ void main() {
     expect(find.text('Approve'), findsNothing);
     // The answer is already on its way — a second one would land at whatever
     // prompt the agent moved on to.
-    expect(_button(tester, 'Reject').onPressed, isNull);
+    expect(_button(tester, 'Reject').onTap, isNull);
   });
 
   testWidgets('a second tap in the same frame answers once', (tester) async {
@@ -124,7 +119,7 @@ void main() {
     tester,
   ) async {
     await _pumpCard(tester, _escalation('e1'), onChoice: null);
-    expect(_button(tester, 'Approve').onPressed, isNull);
+    expect(_button(tester, 'Approve').onTap, isNull);
     await tester.tap(find.text('Approve'));
     await tester.pump();
     // Never a card stuck reporting an answer that was never sent.
@@ -150,7 +145,7 @@ void main() {
     await tester.pump();
 
     expect(find.text(handlerChoiceSendingLabel), findsNothing);
-    expect(_button(tester, 'Reject').onPressed, isNotNull);
+    expect(_button(tester, 'Reject').onTap, isNotNull);
     await tester.tap(find.text('Reject'));
     await tester.pump();
     expect(taps, ['approve', 'reject']);
@@ -273,7 +268,7 @@ void main() {
     expect(find.text('Why'), findsOneWidget);
 
     await tester.tap(find.text('Why'));
-    await tester.pumpAndSettle();
+    await tester.pump();
     expect(find.text(escalation.reasoning), findsOneWidget);
   });
 
@@ -283,7 +278,7 @@ void main() {
     final e1 = _escalation('e1');
     await _pumpCard(tester, e1, onChoice: (_) => true);
     await tester.tap(find.text('Why'));
-    await tester.pumpAndSettle();
+    await tester.pump();
     expect(find.text(e1.reasoning), findsOneWidget);
 
     // Same position, same type, no key: this is the State an answered card

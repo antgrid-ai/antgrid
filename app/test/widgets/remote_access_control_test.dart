@@ -1,12 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/widgets/remote_access_control.dart';
-import 'package:antgrid/widgets/remote_access_panel.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,50 +98,5 @@ void main() {
     await _pump(tester, () async => client);
 
     expect(find.text('Remote on'), findsOneWidget);
-  });
-
-  CarbonTag tag(WidgetTester tester) =>
-      tester.widget<CarbonTag>(find.byKey(const Key('remote-access-chip')));
-
-  testWidgets('the trigger is a pressable Carbon tag, green only when on', (
-    tester,
-  ) async {
-    await _pump(tester, () async => _fakeClient(<String, int>{}));
-
-    expect(find.byType(AbStateChip), findsNothing);
-    expect(tag(tester).label, 'Remote off');
-    expect(tag(tester).color, CarbonTagColor.gray);
-    expect(tag(tester).onPressed, isNotNull);
-    expect(
-      find.byWidgetPredicate(
-        (w) =>
-            w is CarbonTooltip &&
-            w.message == 'This machine is not reachable from your other devices',
-      ),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('an enabled machine reads as a green "Remote on" tag', (
-    tester,
-  ) async {
-    final client = _fakeClient(<String, int>{});
-    await client.remoteAccessSet(true);
-    await _pump(tester, () async => client);
-
-    expect(tag(tester).label, 'Remote on');
-    expect(tag(tester).color, CarbonTagColor.green);
-  });
-
-  testWidgets('an unknown policy is a gray "Remote" tag that still opens the '
-      'panel', (tester) async {
-    final completer = Completer<HostControlClient>();
-    await _pump(tester, () => completer.future);
-
-    expect(tag(tester).label, 'Remote');
-    expect(tag(tester).color, CarbonTagColor.gray);
-    await tester.tap(find.byKey(const Key('remote-access-chip')));
-    await tester.pump();
-    expect(find.byType(RemoteAccessPanel), findsOneWidget);
   });
 }

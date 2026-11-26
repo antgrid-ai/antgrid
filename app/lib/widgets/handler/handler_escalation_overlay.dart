@@ -1,8 +1,12 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_carbon.dart';
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/visible_surface.dart';
@@ -84,6 +88,7 @@ class _HandlerEscalationOverlayState
       _expanded = true;
     }
 
+    final p = context.antgrid;
     // Positioned.fill so the card can be pinned to the bottom of the terminal
     // area, and [Align] — never a fill-sized barrier — so the hit region stays
     // the card. An `Align` render object hit-tests only its child, so a pointer
@@ -109,33 +114,16 @@ class _HandlerEscalationOverlayState
           // and a drag started there selects terminal text under an opaque
           // surface. Children still hit-test first, so the chevron, the chips
           // and the decision buttons are untouched.
-          //
-          // The Carbon scope sits here, at a fixed position under the
-          // Positioned and never around the terminal this floats over: the
-          // terminal is not Carbon, and the scope must not follow the card in
-          // and out of the tree as escalations come and go.
-          child: AbCarbonScope(
-            child: Builder(
-              builder: (context) {
-                final theme = CarbonTheme.of(context);
-                return Listener(
-                  behavior: HitTestBehavior.opaque,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: theme.layer(1),
-                      border: Border(
-                        top: BorderSide(
-                          color: theme.borderSubtle(1),
-                          width: CarbonBorders.hairline,
-                        ),
-                      ),
-                    ),
-                    child: _expanded
-                        ? _card(context, state, e, escalations.length)
-                        : _strip(context, e, escalations.length),
-                  ),
-                );
-              },
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: p.bgSurface,
+                border: Border(top: BorderSide(color: p.borderDefault)),
+              ),
+              child: _expanded
+                  ? _card(context, state, e, escalations.length)
+                  : _strip(context, e, escalations.length),
             ),
           ),
         ),
@@ -160,7 +148,7 @@ class _HandlerEscalationOverlayState
       children: [
         Align(
           alignment: Alignment.centerRight,
-          child: _controls(context, total: total),
+          child: _controls(context, total: total, compact: false),
         ),
         // Flexible inside a bottom-aligned Align is what bounds the card to the
         // terminal's own height: without it a long question grows the card
@@ -183,8 +171,8 @@ class _HandlerEscalationOverlayState
               // on lives in its own prompt, and that prompt is the terminal
               // this card is floating over — so the branch
               // [answerHandlerEscalation] would take is a focus change onto the
-              // session already in focus. `CarbonContainedListRow` renders a null
-              // `onPressed` as an informational row, which is what stops it offering hover and
+              // session already in focus. `AbListRow` renders a null `onTap` as
+              // an informational row, which is what stops it offering hover and
               // press feedback for a tap that can do nothing. The PA bar
               // directly beneath says where the answer goes.
               onReply: service == null || e.kind == 'resolve_in_session'
@@ -229,81 +217,86 @@ class _HandlerEscalationOverlayState
   ///
   /// The whole band expands, not just the chevron in its corner. The strip is
   /// the one state where the question is unreadable and the only route back to
-  /// it is a small glyph in the bottom-right corner of a phone, directly above
+  /// it is a 24px glyph in the bottom-right corner of a phone, directly above
   /// the PA bar's own controls; a thumb that misses it low answers the PA bar
-  /// instead.
-  Widget _strip(BuildContext context, HandlerEscalation e, int total) {
-    final theme = CarbonTheme.of(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _expanded = true),
-      child: ConstrainedBox(
-        // A FLOOR, not a fixed height: a strip that refused to grow with the
-        // user's text size would overflow rather than cover one more terminal
-        // row. The reserve is derived from the same call, so the two scale
-        // together.
-        constraints: BoxConstraints(
-          minHeight: handlerEscalationCollapsedHeight(context),
-        ),
-        child: Row(
-          children: [
-            const SizedBox(width: handlerGutter),
-            Expanded(
-              child: Text(
-                e.question,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.typography.body.copyWith(
-                  color: theme.colors.textPrimary,
-                  fontWeight: FontWeight.w600,
+  /// instead. Giving the band the toggle is also what earns the strip its
+  /// [AbCompactTapTargets] below.
+  Widget _strip(BuildContext context, HandlerEscalation e, int total) =>
+      GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _expanded = true),
+        child: ConstrainedBox(
+          // A FLOOR, not a fixed height: the chevron's box scales with the
+          // user's text size (see AbIconButton), and a strip that refused to
+          // grow with it would overflow rather than cover one more terminal
+          // row. The reserve is derived from the same call, so the two scale
+          // together.
+          constraints: BoxConstraints(
+            minHeight: handlerEscalationCollapsedHeight(context),
+          ),
+          child: Row(
+            children: [
+              const SizedBox(width: handlerGutter),
+              Expanded(
+                child: Text(
+                  e.question,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
                 ),
               ),
-            ),
-            const SizedBox(width: CarbonSpacing.spacing03),
-            // Flexible so the clock yields before the chevron and "+N more"
-            // do: those keep their 44 px targets, the timestamp can ellipsize.
-            Flexible(child: HandlerRowMeta.forEscalation(e, inline: true)),
-            _controls(context, total: total),
-          ],
+              const SizedBox(width: AbTokens.space8),
+              HandlerRowMeta.forEscalation(e),
+              _controls(context, total: total, compact: true),
+            ],
+          ),
         ),
-      ),
-    );
-  }
+      );
 
   /// The trailing cluster, defined once for both states so a collapse cannot
   /// change what is in it or what order it is in.
-  Widget _controls(BuildContext context, {required int total}) {
+  ///
+  /// [compact] suppresses the mobile tap-target inflation and only the strip
+  /// may ask for it, on [AbCompactTapTargets]' own terms: the strip band is a
+  /// tap target across its whole height for the same toggle, so the chevron's
+  /// 44px box would buy nothing and would push the strip past the height the
+  /// terminal gave up for it. The expanded card's header band belongs to
+  /// nothing and answers no tap, so the chevron there has to carry its own.
+  Widget _controls(
+    BuildContext context, {
+    required int total,
+    required bool compact,
+  }) {
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // A route to the rest of the queue and not a count, so it is a button:
-        // a phone has no hover to say that a bare label can be pressed.
-        if (total > 1)
-          CarbonButton(
+        if (total > 1) ...[
+          AbChip.label(
             label: '+${total - 1} more',
-            kind: CarbonButtonKind.ghost,
-            size: CarbonButtonSize.small,
-            onPressed: _openHandler,
+            // Accent because it is a route to the rest of the queue and not a
+            // count: `textMuted` is this codebase's idiom for the labels that
+            // only report, and a phone has no hover to correct the impression.
+            color: context.antgrid.accent,
+            onTap: _openHandler,
           ),
-        // Down means "push it out of the way", up means "bring it back" — the
-        // chevron names the direction the card moves, not the one the reader's
-        // eye travels.
-        CarbonButton.iconOnly(
-          icon: CarbonIcon(
-            _expanded ? CarbonIcons.chevronDown : CarbonIcons.chevronUp,
-          ),
-          semanticLabel: _expanded ? 'Collapse — read the terminal' : 'Expand',
-          size: CarbonButtonSize.small,
-          onPressed: () => setState(() => _expanded = !_expanded),
+          const SizedBox(width: AbTokens.space6),
+        ],
+        AbIconButton(
+          // Down means "push it out of the way", up means "bring it back" —
+          // the chevron names the direction the card moves, not the one the
+          // reader's eye travels.
+          icon: _expanded ? AbIcons.chevronDown : AbIcons.chevronUp,
+          tooltip: _expanded ? 'Collapse — read the terminal' : 'Expand',
+          onTap: () => setState(() => _expanded = !_expanded),
         ),
       ],
     );
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: handlerGutter,
-        vertical: handlerEscalationStripPadding,
+        vertical: AbTokens.space8,
       ),
-      child: row,
+      child: compact ? AbCompactTapTargets(child: row) : row,
     );
   }
 

@@ -1,8 +1,20 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/services.dart' show LengthLimitingTextInputFormatter;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_control_box.dart';
+import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_separator.dart';
+import '../../design/widgets/ab_text_field.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../models/agent_event.dart';
 import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
@@ -10,6 +22,10 @@ import '../../providers/capability_catalog.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
+import '../../util/detached.dart';
+
+/// The sheet's own gutter. Everything on it lines up on this one inset.
+const _gutter = EdgeInsets.symmetric(horizontal: AbTokens.space16);
 
 /// The escalate-only fact on the one surface that can act on it: the judge
 /// picker under this line is the fix, so it names the fix rather than stopping
@@ -182,7 +198,6 @@ class HandlerSessionSettings extends StatelessWidget {
         onChanged: onChanged,
         appliesNextPass: appliesNextPass,
       ),
-      const SizedBox(height: CarbonSpacing.spacing07),
       HandlerJudgeControl(
         terminalId: terminalId,
         value: value,
@@ -197,9 +212,9 @@ class HandlerSessionSettings extends StatelessWidget {
 /// panel, and the parked notice when the judge can't run headless.
 ///
 /// The four presets and the user-authored [handlerLensOwnLabel] are ONE radio
-/// group — tiles behaving identically, never presets plus a disclosure. There
-/// is no tile for adding NOTHING: that is the floor line's own subject and the
-/// state a session starts in, so a tile for it offered the user a choice that
+/// group — chips behaving identically, never presets plus a disclosure. There
+/// is no chip for adding NOTHING: that is the floor line's own subject and the
+/// state a session starts in, so a chip for it offered the user a choice that
 /// was already made. A lens ADDS questions and nothing else — the bridge's
 /// rules own where handling gives way to escalating — so nothing here may
 /// read as a dial over how much the session decides alone.
@@ -234,7 +249,7 @@ class HandlerLensControl extends ConsumerStatefulWidget {
   /// commit there buys a real judge pass per character.
   final bool commitBriefOnEdit;
 
-  /// Fired on every tap of a lens tile, including the one already selected —
+  /// Fired on every tap of a lens chip, including the one already selected —
   /// picking "Your own" counts too, since it is exclusive with the presets
   /// the same way they are exclusive with each other. A host whose seed may
   /// not be what the far end holds needs to know a control was ANSWERED,
@@ -250,7 +265,7 @@ class HandlerLensControl extends ConsumerStatefulWidget {
       _HandlerLensControlState();
 }
 
-/// Local, never-on-wire id for the sixth tile. A user lens has no
+/// Local, never-on-wire id for the sixth chip. A user lens has no
 /// [HandlerLens] value and no wire role id (an id on the wire is what keeps a
 /// PRESET's text bridge-authored) so this control needs a marker of its own
 /// to route a tap; [handlerLensFromWire] must never resolve it to a real
@@ -258,7 +273,7 @@ class HandlerLensControl extends ConsumerStatefulWidget {
 const _ownChipId = '__own__';
 
 class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
-  /// Whether the sixth tile is the one showing, tracked apart from
+  /// Whether the sixth chip is the one showing, tracked apart from
   /// [HandlerSessionSettingsValue.lens] because a freshly-picked "Your own"
   /// with nothing typed yet is, on the wire, indistinguishable from
   /// [handlerLensDefaultLabel] — both are `roleId: null, brief: ""`. Only
@@ -272,9 +287,9 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
   /// joined string instead ([handlerJoinOwnLensLines]).
   late final TextEditingController _ownController;
 
-  /// Bumped on every tap of the sixth tile, which is what moves the cursor into
+  /// Bumped on every tap of the sixth chip, which is what moves the cursor into
   /// the panel's field. A counter rather than an autofocus flag for two
-  /// reasons: the tile stays tappable once selected, and a second tap arrives
+  /// reasons: the chip stays tappable once selected, and a second tap arrives
   /// with the field already mounted, where nothing would fire again; and a
   /// panel mounted by a STORED user lens (`_ownSelected` true from
   /// [initState]) must not steal focus and raise the keyboard on a sheet the
@@ -298,7 +313,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
     final pick = widget.value.lens;
     if (pick == old.value.lens) return;
     if (pick != null && pick.roleId != null) {
-      // A real or unknown role id is unambiguous evidence the sixth tile is
+      // A real or unknown role id is unambiguous evidence the sixth chip is
       // not what is running.
       _ownSelected = false;
     } else if (_picksOwn(pick)) {
@@ -328,7 +343,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
+    final p = context.antgrid;
     final catalog = ref.watch(agentCatalogProvider);
     // The tool that will actually run, which is what every claim below is about.
     final effectiveJudge = handlerEffectiveJudge(
@@ -353,7 +368,7 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
     final unreported = advertised == null;
     final pick = widget.value.lens;
     // A newer machine's lens. It is a real pick and stays in force untouched;
-    // no tile in this row can name it, so none of them may paint as chosen.
+    // no chip in this row can name it, so none of them may paint as chosen.
     final unknownId =
         pick?.roleId != null && handlerLensFromWire(pick!.roleId) == null;
 
@@ -404,30 +419,28 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
       ));
     }
 
-
-    Widget tile(String label, String? id) {
+    Widget chip(String label, String? id) {
       final isOwn = id == _ownChipId;
       final selected =
           !unreported &&
           (isOwn
               ? _ownSelected
               : !_ownSelected && pick != null && pick.roleId == id);
-      return _LensTile(
+      return AbChip.choice(
         label: label,
-        // Every stance says what it asks, on the tile itself: a name like QA
-        // or CRITIC means nothing until the definition is beside it.
-        detail: isOwn ? null : handlerLensBlurb(handlerLensFromWire(id)),
         selected: selected,
-        onPressed: unreported
-            ? null
-            : (isOwn ? selectOwn : () => selectPreset(id)),
+        // The accent marks the one lens actually running. A parked chip keeps
+        // the muted default with its fill: chosen, and not in effect.
+        color: selected && !parked ? p.accent : null,
+        enabled: !unreported,
+        onTap: isOwn ? selectOwn : () => selectPreset(id),
       );
     }
 
     String? caption;
-    // Whether "Takes effect on the next pass." may attach — the special-case
-    // captions below (unreported/parked/unset/unknown) never take it, the
-    // precedence the "outranks" test pins.
+    // Whether "Takes effect on the next pass." may attach to [caption] — the
+    // special-case captions below (unreported/parked/unset/unknown) never take
+    // it, the precedence the "outranks" test pins.
     var nextPassEligible = false;
     if (unreported) {
       caption = handlerLensUnreportedBlurb;
@@ -437,43 +450,49 @@ class _HandlerLensControlState extends ConsumerState<HandlerLensControl> {
       caption = handlerLensUnsetBlurb;
     } else if (_ownSelected) {
       nextPassEligible = true;
+      caption = null; // the panel sits directly below and says it
     } else if (unknownId) {
       caption = handlerLensUnknownBlurb;
     } else {
       nextPassEligible = true;
+      caption = pick.roleId == null
+          // Nothing on top of the floor, which the line above already states —
+          // and with no chip standing for it, no chip paints as chosen either.
+          ? null
+          : handlerLensBlurb(handlerLensFromWire(pick.roleId));
     }
     if (nextPassEligible && widget.appliesNextPass) {
-      caption = 'Takes effect on the next pass.';
+      caption = caption == null
+          ? 'Takes effect on the next pass.'
+          : '$caption Takes effect on the next pass.';
     }
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'What Handler weighs',
-          style: t.typography.label.copyWith(color: t.colors.textSecondary),
+        const _Head(label: 'What Handler weighs'),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            0,
+            AbTokens.space16,
+            AbTokens.space10,
+          ),
+          child: _FloorLine(),
         ),
-        const SizedBox(height: CarbonSpacing.spacing02),
-        const _FloorLine(),
-        const SizedBox(height: CarbonSpacing.spacing04),
-        // Stacked tiles rather than a segmented control: the row is five
-        // stances — the four presets and "Your own" — each with a sentence to
-        // read before deciding, which no control built for two or three short
-        // options can hold.
-        Semantics(
-          container: true,
-          explicitChildNodes: true,
-          label: 'What Handler weighs',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final (i, (label, id)) in offered.indexed) ...[
-                if (i > 0) const SizedBox(height: CarbonSpacing.spacing02),
-                tile(label, id),
-              ],
-            ],
+        Padding(
+          padding: _gutter,
+          // Chips rather than a segmented control: the row is five stances —
+          // the four presets and "Your own" — and none of
+          // them fits a control built for two or three closed options.
+          // [AbChip.choice] rather than [AbChip.toggle]: these labels are
+          // phrases the user reads to decide with, not flag names they already
+          // know, so they keep their casing and a size that can be read.
+          child: Wrap(
+            spacing: AbTokens.space6,
+            runSpacing: AbTapTarget.wrapRunSpacing(context, AbTokens.space6),
+            children: [for (final (label, id) in offered) chip(label, id)],
           ),
         ),
         if (caption != null) _Caption(text: caption),
@@ -510,120 +529,26 @@ String handlerJoinOwnLensLines(String raw) => raw
     .where((line) => line.isNotEmpty)
     .join('; ');
 
-/// One stance as a full-width selectable tile. Not `CarbonChoiceTile`: that one
-/// is a fixed 148 wide with a code-styled detail, and a stance's definition is
-/// a prose sentence that needs the sheet's whole width.
-class _LensTile extends StatelessWidget {
-  const _LensTile({
-    required this.label,
-    required this.selected,
-    required this.onPressed,
-    this.detail,
-  });
-
-  final String label;
-  final String? detail;
-  final bool selected;
-
-  /// Null disables the tile.
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final c = t.colors;
-    final enabled = onPressed != null;
-    return CarbonInteraction(
-      onPressed: onPressed,
-      label: detail == null ? label : '$label. $detail',
-      selected: selected,
-      inMutuallyExclusiveGroup: true,
-      excludeChildSemantics: true,
-      builder: (context, state, _) {
-        // DecoratedBox paints its border over the child rather than insetting
-        // it, so the thicker selected rule needs no padding compensation.
-        return CarbonFocusRing(
-          visible: state.focusVisible,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: state.hovered ? c.layerHover01 : c.layer01,
-              border: Border.all(
-                color: selected ? c.borderInverse : c.borderTile01,
-                width: selected ? 2.0 : 1.0,
-              ),
-            ),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: t.minTarget),
-              child: Padding(
-                padding: const EdgeInsets.all(CarbonSpacing.spacing04),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            label,
-                            style: t.typography.control.copyWith(
-                              color: enabled ? c.textPrimary : c.textDisabled,
-                              fontWeight: selected
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                            ),
-                          ),
-                        ),
-                        // The slot is held when unselected so selecting a tile
-                        // never re-wraps its text or changes its height.
-                        Visibility.maintain(
-                          visible: selected,
-                          child: CarbonIcon(
-                            CarbonIcons.checkmarkFilled,
-                            size: 16,
-                            color: c.iconPrimary,
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (detail != null) ...[
-                      const SizedBox(height: CarbonSpacing.spacing01),
-                      Text(
-                        detail!,
-                        style: t.typography.helper.copyWith(
-                          color: enabled ? c.textSecondary : c.textDisabled,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 /// The permanent line under the section head — every session is judged on
-/// this regardless of pick, so it is prose rather than another label.
+/// this regardless of pick, so it is prose rather than another eyebrow:
+/// a second [AbSectionHeader] here would rank as a sibling section instead of
+/// a continuation of the one above it.
 class _FloorLine extends StatelessWidget {
   const _FloorLine();
 
   @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return Text(
-      "Always: your goal, and whether an item's evidence closes it. "
-      'A lens adds one question:',
-      style: t.typography.helper.copyWith(color: t.colors.textSecondary),
-    );
-  }
+  Widget build(BuildContext context) => Text(
+    "Always: your goal, and whether an item's evidence closes it. "
+    'A lens adds one question:',
+    style: AbTokens.sansStyle(
+      fontSize: AbTokens.fontXs,
+      color: context.antgrid.textSecondary,
+    ),
+  );
 }
 
 /// The user-authored stance: guidance, then the free-text field. Shown only
-/// while "Your own" is the selected tile — every other tile hides this and
+/// while "Your own" is the selected chip — every other chip hides this and
 /// leaves [controller]'s draft untouched.
 class _OwnLensPanel extends StatefulWidget {
   const _OwnLensPanel({
@@ -637,7 +562,7 @@ class _OwnLensPanel extends StatefulWidget {
 
   final TextEditingController controller;
 
-  /// How many times the "Your own" tile has been tapped. Every increase —
+  /// How many times the "Your own" chip has been tapped. Every increase —
   /// including the one that mounted this panel — puts the cursor in the field;
   /// see [_HandlerLensControlState._ownFocusTaps] for why it is a count.
   final int focusTaps;
@@ -675,7 +600,7 @@ class _OwnLensPanelState extends State<_OwnLensPanel> {
   @override
   void didUpdateWidget(_OwnLensPanel old) {
     super.didUpdateWidget(old);
-    // A second tap on the tile already showing: the panel never unmounted, so
+    // A second tap on the chip already showing: the panel never unmounted, so
     // this is the only thing left that can answer it.
     if (widget.focusTaps != old.focusTaps) _focusNode.requestFocus();
   }
@@ -697,65 +622,67 @@ class _OwnLensPanelState extends State<_OwnLensPanel> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing04),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: CarbonSpacing.spacing03),
-            child: Text(
-              // Carries the one-rule-per-line format, which the placeholder
-              // cannot hold: it is gone on the first keystroke, which is the
-              // moment the rule starts to matter.
-              'One rule per line. They can only make Handler stricter, never '
-              'looser.',
-              style: t.typography.helper.copyWith(
-                color: t.colors.textSecondary,
-              ),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      AbTokens.space16,
+      AbTokens.space10,
+      AbTokens.space16,
+      0,
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: AbTokens.space6),
+          child: Text(
+            // Carries the one-rule-per-line format, which the hint used to
+            // teach by being three lines long. A hint cannot hold a format
+            // rule: it is gone on the first keystroke, which is the moment the
+            // rule starts to matter.
+            'One rule per line. They can only make Handler stricter, never '
+            'looser.',
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: context.antgrid.textSecondary,
             ),
           ),
-          CarbonTextInput(
-            key: const ValueKey('handlerOwnLensField'),
-            controller: widget.controller,
-            focusNode: _focusNode,
-            variant: CarbonTextInputVariant.multiline,
-            enabled: widget.enabled,
-            minLines: 3,
-            maxLines: 6,
-            clearable: true,
-            semanticLabel: 'Your own rules',
-            // One line, not three: a placeholder as tall as [minLines] fills
-            // the box, so an empty field reads as one already written in. The
-            // register is what one example still earns its place for — a rule
-            // is a short lowercase condition, not a paragraph.
-            placeholder: 'not done until the tests pass',
-            // The bridge clips a longer brief rather than refusing it, so this
-            // is a courtesy bound and not a gate: it shows the user where the
-            // prompt stops.
-            inputFormatters: [
-              LengthLimitingTextInputFormatter(handlerMaxBriefChars),
-            ],
-            // The clear button reports as an empty edit, so an empty value is
-            // committed at once: it is the only way to tell clearing from
-            // typing, and a repeat of an unchanged brief is deduped by the
-            // host's delta.
-            onChanged: (value) {
-              widget.onEdited?.call();
-              if (widget.commitOnEdit || value.isEmpty) _commit();
-            },
-            onSubmitted: (_) {
-              widget.onEdited?.call();
-              _commit();
-            },
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+        AbTextField(
+          key: const ValueKey('handlerOwnLensField'),
+          controller: widget.controller,
+          focusNode: _focusNode,
+          enabled: widget.enabled,
+          minLines: 3,
+          maxLines: 6,
+          showClearButton: true,
+          // One line, not three: a hint as tall as [minLines] fills the box,
+          // so an empty field reads as one already written in. The register is
+          // what one example still earns its place for — a rule is a short
+          // lowercase condition, not a paragraph.
+          hintText: 'not done until the tests pass',
+          // The bridge clips a longer brief rather than refusing it, so this
+          // is a courtesy bound and not a gate: it shows the user where the
+          // prompt stops.
+          inputFormatters: [
+            LengthLimitingTextInputFormatter(handlerMaxBriefChars),
+          ],
+          onClear: () {
+            widget.onEdited?.call();
+            _commit();
+          },
+          onChanged: (_) {
+            widget.onEdited?.call();
+            if (widget.commitOnEdit) _commit();
+          },
+          onSubmitted: (_) {
+            widget.onEdited?.call();
+            _commit();
+          },
+        ),
+      ],
+    ),
+  );
 }
 
 /// Which CLI judges the session's pauses, and under which model.
@@ -783,37 +710,38 @@ class HandlerJudgeControl extends ConsumerWidget {
     final effectiveJudge = value.judgeTool ?? defaultTool;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // The same height as the model field under it, which swaps between a
-        // select and a text input depending on whether the machine has ever
-        // heard that CLI list its models: both take the density's one default
-        // control height.
-        CarbonSelect<String>(
-          label: 'Judged by',
-          // The catalog's label, never the registry key — the list names every
-          // tool that way, and a field naming the same tool by its raw id
-          // reads as a different one.
-          value: value.judgeTool ?? '',
-          options: [
-            CarbonOption(
-              value: '',
-              label: defaultTool == null
-                  ? 'Default'
-                  : 'Default (${catalog[defaultTool]?.label ?? defaultTool})',
-            ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            AbTokens.space14,
+            AbTokens.space16,
+            AbTokens.space14,
+          ),
+          child: AbSeparator.horizontal(),
+        ),
+        const _Head(label: 'Judged by'),
+        _PickerRow(
+          value: value.judgeTool == null
+              // The catalog's label, never the registry key — the menu below
+              // names every tool that way, and a row naming the same tool by
+              // its raw id reads as a different one.
+              ? (defaultTool == null
+                    ? 'Default'
+                    : 'Default (${catalog[defaultTool]?.label ?? defaultTool})')
+              : (catalog[value.judgeTool]?.label ?? value.judgeTool!),
+          entries: [
+            AbMenuItem(label: 'Default', value: ''),
             for (final tool in judgeTools)
-              CarbonOption(value: tool, label: catalog[tool]?.label ?? tool),
+              AbMenuItem(label: catalog[tool]?.label ?? tool, value: tool),
           ],
-          unavailableLabel: value.judgeTool == null
-              ? null
-              : (catalog[value.judgeTool]?.label ?? value.judgeTool),
-          onChanged: (picked) {
+          onSelected: (picked) {
             final tool = picked.isEmpty ? null : picked;
             // Re-picking the tool already in force is not an edit. Firing
             // anyway would carry the cleared model into the delta and wipe an
-            // override the user only opened the list to read back.
+            // override the user only opened the menu to read back.
             if (tool == value.judgeTool) return;
             onChanged((
               judgeTool: tool,
@@ -825,10 +753,9 @@ class HandlerJudgeControl extends ConsumerWidget {
             ));
           },
         ),
-        // Close under the judge rather than a section of its own: a model
-        // names nothing without the judge above it, so the two are one
-        // decision.
-        const SizedBox(height: CarbonSpacing.spacing05),
+        // A sub-label rather than a peer heading: a model names nothing without
+        // the judge above it, so the two rows are one decision.
+        const _Head(label: 'Model', sub: true),
         _ModelControl(
           judgeTool: effectiveJudge,
           model: value.judgeModel,
@@ -900,57 +827,149 @@ class _ModelControlState extends ConsumerState<_ModelControl> {
         ? const <AgentCapabilityModel>[]
         : cachedModelsFor(ref, tool);
     if (models.isEmpty) {
-      return CarbonTextInput(
-        controller: _controller,
-        label: 'Model',
-        placeholder: 'Default',
-        // Committed on submit, not per keystroke: each change is a configure
-        // frame, and a half-typed model id is one the judge would try to run.
-        onSubmitted: (text) =>
-            widget.onChanged(text.trim().isEmpty ? null : text.trim()),
+      return Padding(
+        padding: _gutter,
+        child: AbTextField(
+          controller: _controller,
+          hintText: 'Default',
+          // Committed on submit, not per keystroke: each change is a configure
+          // frame, and a half-typed model id is one the judge would try to run.
+          onSubmitted: (text) =>
+              widget.onChanged(text.trim().isEmpty ? null : text.trim()),
+        ),
       );
     }
     final matches = models.where((m) => m.id == widget.model);
     final selected = matches.isEmpty ? null : matches.first;
-    return CarbonSelect<String>(
-      label: 'Model',
-      value: widget.model ?? '',
-      options: [
-        const CarbonOption(value: '', label: 'Default'),
-        for (final m in models) CarbonOption(value: m.id, label: m.name),
-      ],
+    return _PickerRow(
       // A model this catalog does not describe still names itself. The list is
       // whatever a CHAT session of that tool happened to report, so an id the
       // user typed on another surface — or one the bridge holds from a build
       // ago — is routinely absent from it, and rendering it as "Default" would
       // report a configured model as unset.
-      unavailableLabel: selected == null ? widget.model : null,
-      onChanged: (picked) => widget.onChanged(picked.isEmpty ? null : picked),
+      value: selected?.name ?? widget.model ?? 'Default',
+      entries: [
+        AbMenuItem(label: 'Default', value: ''),
+        for (final m in models) AbMenuItem(label: m.name, value: m.id),
+      ],
+      onSelected: (picked) => widget.onChanged(picked.isEmpty ? null : picked),
     );
   }
 }
 
+/// A one-line value that opens a menu under itself. Not [AbSegmented]: the judge
+/// list is however many agents the catalog describes, and a segmented control
+/// that grows with the registry stops fitting a phone.
+class _PickerRow extends StatelessWidget {
+  const _PickerRow({
+    required this.value,
+    required this.entries,
+    required this.onSelected,
+  });
+
+  final String value;
+  final List<AbMenuEntry> entries;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Padding(
+      padding: _gutter,
+      child: Builder(
+        builder: (anchorContext) => GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => detached('_PickerRow', 'open settings picker', () async {
+            final anchor = abMenuAnchorRect(anchorContext);
+            if (anchor == null) return;
+            final picked = await showAbMenu<String>(
+              context: anchorContext,
+              anchorRect: anchor,
+              entries: entries,
+            );
+            // The menu outlives this row — a project switch or a host restart
+            // can tear the sheet down while it is up — and `onSelected` runs
+            // `setState` on the sheet's State.
+            if (picked != null && anchorContext.mounted) onSelected(picked);
+          }),
+          // AbControlBox rather than a box of its own: the model row swaps
+          // between this trigger and an AbTextField depending on whether the
+          // machine has ever heard that CLI list its models, and only the
+          // shared recipe keeps the two the same height on every machine.
+          child: AbControlBox(
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: p.textPrimary,
+                    ),
+                  ),
+                ),
+                AbIcon(AbIcons.chevronDown, size: 12, color: p.textMuted),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A block label at the sheet's gutter. [sub] marks a row that belongs to the
+/// block above it rather than opening a new one, and is quieter for it.
+class _Head extends StatelessWidget {
+  const _Head({required this.label, this.sub = false});
+
+  final String label;
+  final bool sub;
+
+  @override
+  Widget build(BuildContext context) => AbSectionHeader(
+    label: label,
+    color: sub ? context.antgrid.textDisabled : null,
+    padding: EdgeInsets.fromLTRB(
+      AbTokens.space16,
+      sub ? AbTokens.space10 : 0,
+      AbTokens.space16,
+      AbTokens.space6,
+    ),
+  );
+}
+
 /// The explanatory line under a control.
 ///
-/// One tint for every state it can carry: a live lens used to be muted on the
-/// reasoning that a working control needs no commentary, but this line is the
-/// only account of why a control is inert, or when a change lands.
+/// One tint for every state it can carry. A live lens used to be muted, on the
+/// reasoning that a working control needs no commentary — but this line is not
+/// commentary: five chips reading PM, QA, CRITIC and the rest name roles and
+/// nothing else, so what each one asks the agent exists ONLY here. Setting the
+/// definition of the chosen option at the contrast floor is what made the row
+/// undecidable without leaving the sheet.
 class _Caption extends StatelessWidget {
   const _Caption({required this.text});
 
   final String text;
 
   @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-      child: Text(
-        text,
-        style: t.typography.helper.copyWith(color: t.colors.textSecondary),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      AbTokens.space16,
+      AbTokens.space6,
+      AbTokens.space16,
+      0,
+    ),
+    child: Text(
+      text,
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontXs,
+        color: context.antgrid.textSecondary,
       ),
-    );
-  }
+    ),
+  );
 }
 
 class _Notice extends StatelessWidget {
@@ -959,13 +978,36 @@ class _Notice extends StatelessWidget {
   final String text;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: CarbonSpacing.spacing03),
-    child: CarbonNotification(
-      kind: CarbonNotificationKind.warning,
-      subtitle: text,
-    ),
-  );
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space6,
+        AbTokens.space16,
+        0,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: AbTokens.space2),
+            child: AbIcon(AbIcons.warning, size: 11, color: p.warning),
+          ),
+          const SizedBox(width: AbTokens.space6),
+          Expanded(
+            child: Text(
+              text,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.warning,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Opens the settings sheet for an ARMED [terminalId] — the PA bar's lens chip
@@ -984,9 +1026,9 @@ class _Notice extends StatelessWidget {
 Future<void> showHandlerSessionSettingsSheet(
   BuildContext context,
   String terminalId,
-) => showCarbonModal<void>(
+) => showAbAdaptiveSheet<void>(
   context,
-  builder: (_) => _SettingsSheet(terminalId: terminalId),
+  child: _SettingsSheet(terminalId: terminalId),
 );
 
 class _SettingsSheet extends ConsumerStatefulWidget {
@@ -1054,14 +1096,29 @@ class _SettingsSheetState extends ConsumerState<_SettingsSheet> {
     setState(() => _value = next);
   }
 
+  // Scrolls so the sheet outgrowing a short phone (touch-sized controls,
+  // keyboard up) cannot push its lower controls off screen.
   @override
-  Widget build(BuildContext context) => CarbonModal.informational(
-    title: 'Handler settings',
-    body: HandlerSessionSettings(
-      terminalId: widget.terminalId,
-      value: _current,
-      onChanged: _commit,
-      appliesNextPass: true,
+  Widget build(BuildContext context) => SingleChildScrollView(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            'Handler settings',
+            onClose: () => Navigator.of(context).maybePop(),
+          ),
+        ),
+        HandlerSessionSettings(
+          terminalId: widget.terminalId,
+          value: _current,
+          onChanged: _commit,
+          appliesNextPass: true,
+        ),
+        const SizedBox(height: AbTokens.space16),
+      ],
     ),
   );
 }

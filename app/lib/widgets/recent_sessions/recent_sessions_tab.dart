@@ -1,12 +1,18 @@
 import 'dart:math' as math;
 
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
-import '../../constants/breakpoints.dart';
 import '../../demo/demo_identity.dart';
+import '../../design/ab_colors.dart';
+import '../../design/ab_status_tone.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_separator.dart';
+import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/demo_mode.dart';
 import '../../providers/new_session_picker.dart';
@@ -17,44 +23,32 @@ import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
 import '../../util/detached.dart';
 import '../ab_status_helpers.dart';
-import '../agent_work_status_indicator.dart';
 import '../first_run_checklist.dart';
-import 'carbon_recent_session_row.dart';
+import 'recent_session_row_widget.dart';
 import 'recent_sessions_summary.dart';
 import 'starting_session_row.dart';
 
 class _SessionGroup {
   const _SessionGroup({
-    required this.id,
     required this.label,
     required this.rows,
     this.machineUuid,
-    this.status,
   });
 
-  /// The bucket key: stable, unlike [label], which two groups can share.
-  final String id;
   final String label;
   final List<RecentSessionRow> rows;
 
-  /// Set only when grouped by machine and the group is a remote machine -
-  /// [_GroupHeading] uses it to show a "Connecting..." indicator while that
+  /// Set only when grouped by machine and the group is a remote machine —
+  /// [_GroupHeader] uses it to show a "Connecting…" indicator while that
   /// machine's socket (opened by pull-to-refresh, or a row's own delete/open)
   /// is still mid-handshake. Never triggers a connection itself.
   final String? machineUuid;
-
-  /// Set only when grouped by status, where the heading is the status
-  /// indicator rather than plain text.
-  final AgentWorkStatus? status;
 }
 
 /// Scrollable list of recent sessions grouped by machine, project, or status.
 ///
-/// Each row carries its own delete affordance ([CarbonRecentSessionRow] — a
-/// trash button revealed on hover or focus on desktop, always visible on
-/// touch).
-///
-/// Must sit under an `AbCarbonScope`, which supplies theme and density.
+/// Each row carries its own delete affordance ([RecentSessionRowWidget] — a
+/// hover trash button on desktop, an always-visible one on mobile).
 ///
 /// Landing here never dials the relay: it renders straight from the cache
 /// (instant, offline-friendly). Connecting to sync fresh session lists is an
@@ -63,14 +57,19 @@ class _SessionGroup {
 /// docs on that function for why eagerly auto-connecting every ever-paired
 /// machine was removed.
 class RecentSessionsTab extends ConsumerStatefulWidget {
-  const RecentSessionsTab({super.key, this.showSummary = true});
+  const RecentSessionsTab({super.key, this.showHeader = true});
 
-  /// Whether the status summary badges sit in the list header. The header
-  /// itself always mounts above the rows. Passed DOWN from the screen that
-  /// decides whether the canvas mounts a fixed top bar carrying the same
-  /// badges (`_TopBar` in `new_session_content.dart`) rather than re-derived
-  /// from platform+width here: only the screen knows which one is mounted.
-  final bool showSummary;
+  /// Whether to render [_SessionsHeader] (title + group-by chips + badges) as
+  /// the list's first sliver. Passed DOWN from the screen that decides whether
+  /// the canvas mounts its own fixed top bar carrying that same arrangement
+  /// (`_TopBar` in `new_session_content.dart`) rather than re-derived from
+  /// platform+width here — exactly one of the two may mount, and only the
+  /// screen knows which.
+  ///
+  /// On by default, opt out to suppress — same shape as
+  /// `WorkspacePanel.showTabBar`: the header belongs to this list, and a host
+  /// that has hoisted it into its own chrome is the one that has to say so.
+  final bool showHeader;
 
   @override
   ConsumerState<RecentSessionsTab> createState() => _RecentSessionsTabState();
@@ -98,16 +97,11 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
   /// being started — and the real row it turns into — actually appear.
   void _revealStartingRow() {
     if (!_scroll.hasClients || _scroll.offset <= 0) return;
-    final duration = CarbonMotion.resolve(context, CarbonMotion.moderate01);
-    if (duration == Duration.zero) {
-      _scroll.jumpTo(0);
-      return;
-    }
     detached('recents', 'scroll to starting row', () async {
       await _scroll.animateTo(
         0,
-        duration: duration,
-        curve: CarbonMotion.standard,
+        duration: AbTokens.motionDefault,
+        curve: Curves.easeOutCubic,
       );
     });
   }
@@ -139,70 +133,37 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       // nothing.
       final offerDemo = !hasTarget && !ref.watch(demoModeProvider);
       // A scrollable empty state so the ancestor RefreshIndicator (in
-      // new_session_content.dart) always has a gesture target: the empty
-      // state is a bare Center with no Scrollable of its own, so pull-to-refresh
-      // would be inert here without this wrapper. It must stay the only
-      // Scrollable under the tab: a second one could win the vertical drag
-      // from the refresh viewport.
-      // The width is read once out here: a SliverLayoutBuilder inside the
-      // viewport would rerun, and rebuild its rows, on every scroll frame.
-      return LayoutBuilder(
-        builder: (context, box) {
-          final padding = _listPadding(box.maxWidth);
-          return CustomScrollView(
-            controller: _scroll,
-            physics: const AlwaysScrollableScrollPhysics(),
-            slivers: [
-              // Mounted in this branch too: the first session a user ever
-              // starts is started from an empty list, which is exactly when an
-              // unaccounted-for 30s wait is least explicable.
-              SliverPadding(
-                padding: padding,
-                sliver: const SliverToBoxAdapter(child: StartingSessionRow()),
-              ),
-              // Not SliverFillRemaining: that sizes its child from the
-              // child's intrinsic height, which a max-width box under-reports
-              // (it measures text at the full width, not the capped one), so
-              // a tall checklist overflowed instead of scrolling. A minimum
-              // height centres it the same way and lets it grow past the
-              // viewport.
-              SliverLayoutBuilder(
-                builder: (context, constraints) => SliverPadding(
-                  padding: padding,
-                  sliver: SliverToBoxAdapter(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: math.max(
-                          0,
-                          constraints.viewportMainAxisExtent -
-                              constraints.precedingScrollExtent,
-                        ),
-                      ),
-                      child: Center(
-                        child: showChecklist
-                            ? const MobileFirstRunChecklist()
-                            : _RecentsEmptyState(
-                                title: 'No recent sessions',
-                                subtitle: hasTarget
-                                    ? 'Describe a task below to start your '
-                                          'first session.'
-                                    : 'Pick a project, then describe a task '
-                                          'below.',
-                                // Nothing picked means every path into a
-                                // session is still dead - offer the one that
-                                // needs no machine at all.
-                                onEnterDemo: offerDemo
-                                    ? () => enterDemoMode(ref.container)
-                                    : null,
-                              ),
-                      ),
-                    ),
+      // new_session_content.dart) always has a gesture target: AbEmptyState
+      // is a bare Center with no Scrollable of its own, so pull-to-refresh
+      // would be inert here without this wrapper.
+      return CustomScrollView(
+        controller: _scroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          // Mounted in this branch too: the first session a user ever starts
+          // is started from an empty list, which is exactly when an
+          // unaccounted-for 30s wait is least explicable.
+          const SliverToBoxAdapter(child: StartingSessionRow()),
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: showChecklist
+                ? const MobileFirstRunChecklist()
+                : AbEmptyState(
+                    title: 'No recent sessions',
+                    subtitle: hasTarget
+                        ? 'Describe a task below to start your first session.'
+                        : 'Pick a project, then describe a task below.',
+                    // Nothing picked means every path into a session is still
+                    // dead — offer the one that needs no machine at all.
+                    action: offerDemo
+                        ? AbButton(
+                            label: kDemoEntryLabel,
+                            onTap: () => enterDemoMode(ref.container),
+                          )
+                        : null,
                   ),
-                ),
-              ),
-            ],
-          );
-        },
+          ),
+        ],
       );
     }
 
@@ -231,84 +192,46 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
           : const {},
     );
 
-    // While a start is in flight its row sits between the header and the first
-    // heading, so that heading needs its own gap above it.
-    final starting = ref.watch(newSessionStartInFlightProvider);
-
-    // Wide or narrow is the list's own width, not the screen's: the canvas caps
-    // this column, so a wide window can still hand it a phone-sized one. Read
-    // once out here, since inside the viewport it would be re-resolved on every
-    // scroll frame.
-    return LayoutBuilder(
-      builder: (context, box) {
-        final wide = box.maxWidth >= kCompactBreakpoint;
-        final padding = _listPadding(box.maxWidth);
-        final inset = wide ? CarbonSpacing.spacing06 : CarbonSpacing.spacing05;
-        return CustomScrollView(
-          controller: _scroll,
-          // Stated, not inherited: `ScrollView` only defaults to
-          // AlwaysScrollableScrollPhysics while it has NO controller, so
-          // handing it one would otherwise leave a list shorter than the
-          // viewport refusing the drag - and the ancestor RefreshIndicator
-          // (new_session_content.dart) inert for exactly the users with the
-          // fewest recent sessions.
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            SliverToBoxAdapter(
-              child: RecentListHeader(
-                wide: wide,
-                inset: inset,
-                showSummary: widget.showSummary,
-              ),
+    return CustomScrollView(
+      controller: _scroll,
+      // Stated, not inherited: `ScrollView` only defaults to
+      // AlwaysScrollableScrollPhysics while it has NO controller, so handing it
+      // one would otherwise leave a list shorter than the viewport refusing the
+      // drag — and the ancestor RefreshIndicator (new_session_content.dart)
+      // inert for exactly the users with the fewest recent sessions.
+      physics: const AlwaysScrollableScrollPhysics(),
+      slivers: [
+        if (widget.showHeader)
+          const SliverToBoxAdapter(child: _SessionsHeader()),
+        // Above the groups, not inside one: the session does not exist yet, so
+        // it belongs to no machine, project or status bucket.
+        const SliverToBoxAdapter(child: StartingSessionRow()),
+        for (var i = 0; i < groups.length; i++) ...[
+          SliverToBoxAdapter(
+            child: _GroupHeader(
+              label: groups[i].label,
+              count: groups[i].rows.length,
+              machineUuid: groups[i].machineUuid,
             ),
-            // Above the groups, not inside one: the session does not exist
-            // yet, so it belongs to no machine, project or status bucket.
-            SliverPadding(
-              padding: padding,
-              sliver: const SliverToBoxAdapter(child: StartingSessionRow()),
-            ),
-            for (var i = 0; i < groups.length; i++) ...[
-              SliverToBoxAdapter(
-                child: _GroupHeading(
-                  group: groups[i],
-                  inset: inset,
-                  first: i == 0 && !starting,
-                ),
-              ),
-              SliverPadding(
-                padding: padding,
-                sliver: CarbonContainedListSliver(
-                  key: ValueKey('recent-group-${groups[i].id}'),
-                  label: null,
-                  itemCount: groups[i].rows.length,
-                  itemBuilder: (context, rowIndex) {
-                    final row = groups[i].rows[rowIndex];
-                    return CarbonRecentSessionRow(
-                      key: ValueKey(
-                        '${row.origin.registrationId}:${row.session.id}',
-                      ),
-                      row: row,
-                      groupedBy: groupBy,
-                    );
-                  },
-                ),
-              ),
-            ],
-            const SliverToBoxAdapter(
-              child: SizedBox(height: CarbonSpacing.spacing05),
-            ),
-          ],
-        );
-      },
+          ),
+          SliverList(
+            delegate: SliverChildBuilderDelegate((context, rowIndex) {
+              final row = groups[i].rows[rowIndex];
+              return RecentSessionRowWidget(
+                key: ValueKey('${row.origin.registrationId}:${row.session.id}'),
+                row: row,
+                groupedBy: groupBy,
+              );
+            }, childCount: groups[i].rows.length),
+          ),
+          if (i < groups.length - 1)
+            const SliverToBoxAdapter(child: SizedBox(height: AbTokens.space8)),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: AbTokens.space16)),
+      ],
     );
   }
 }
-
-/// Rows and the composer share this inset on a wide list so their edges line
-/// up; a narrow list runs its rows edge to edge.
-EdgeInsets _listPadding(double width) => EdgeInsets.symmetric(
-  horizontal: width >= kCompactBreakpoint ? CarbonSpacing.spacing06 : 0,
-);
 
 List<_SessionGroup> _groupSessions(
   List<RecentSessionRow> rows,
@@ -365,7 +288,6 @@ List<_SessionGroup> _groupSessions(
   return [
     for (final key in keys)
       _SessionGroup(
-        id: key,
         label: labels[key]!,
         rows: buckets[key]!,
         // Machine-grouped bucket keys ARE the machineUuid (or 'local'); a
@@ -374,151 +296,97 @@ List<_SessionGroup> _groupSessions(
         machineUuid: groupBy == RecentGroupBy.machine
             ? buckets[key]!.first.origin.machineUuid
             : null,
-        status: groupBy == RecentGroupBy.status
-            ? AgentWorkStatus.values.byName(key)
-            : null,
       ),
   ];
 }
 
-/// Not a scrolling empty state: the tab's [CustomScrollView] is the one
-/// Scrollable, and nesting another would split the drag.
-class _RecentsEmptyState extends StatelessWidget {
-  const _RecentsEmptyState({
-    required this.title,
-    required this.subtitle,
-    this.onEnterDemo,
-  });
-
-  final String title;
-  final String subtitle;
-  final VoidCallback? onEnterDemo;
+/// The title, group-by chips, and summary badges, scrolling with the list.
+///
+/// Mounted only where the canvas has no fixed top bar of its own carrying the
+/// same arrangement — which is a real wide mouse desktop, and is decided by
+/// [RecentSessionsTab.showHeader] rather than re-derived here: see that field.
+class _SessionsHeader extends StatelessWidget {
+  const _SessionsHeader();
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(CarbonSpacing.spacing06),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: CarbonSpacing.spacing09 * 8,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space12,
+        AbTokens.space16,
+        AbTokens.space8,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
             children: [
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: t.typography.heading.copyWith(
-                  color: t.colors.textPrimary,
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: RecentSessionsTitle(),
                 ),
               ),
-              const SizedBox(height: CarbonSpacing.spacing03),
-              Text(
-                subtitle,
-                textAlign: TextAlign.center,
-                style: t.typography.body.copyWith(
-                  color: t.colors.textSecondary,
+              SizedBox(width: AbTokens.space10),
+              RecentGroupByChips(),
+              SizedBox(width: AbTokens.space10),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: RecentSessionsSummaryBadges(),
                 ),
               ),
-              if (onEnterDemo != null) ...[
-                const SizedBox(height: CarbonSpacing.spacing05),
-                CarbonButton(
-                  label: kDemoEntryLabel,
-                  kind: CarbonButtonKind.tertiary,
-                  onPressed: onEnterDemo,
-                ),
-              ],
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A group's heading on the page background, not a filled band: the label (the
-/// status indicator when grouped by status) then the session count as plain
-/// text, then a "Connecting..." indicator for a remote machine group whose
-/// socket is mid-handshake.
-class _GroupHeading extends StatelessWidget {
-  const _GroupHeading({
-    required this.group,
-    required this.inset,
-    required this.first,
-  });
-
-  final _SessionGroup group;
-  final double inset;
-
-  /// The list header already gives space above the first heading, unless a
-  /// starting row sits between them.
-  final bool first;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    final count = group.rows.length;
-    final countText = count == 1 ? '1 session' : '$count sessions';
-    final status = group.status;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        inset,
-        first ? 0 : CarbonSpacing.spacing05,
-        inset,
-        CarbonSpacing.spacing03,
-      ),
-      child: Row(
-        children: [
-          Flexible(
-            child: Semantics(
-              header: true,
-              container: true,
-              label: '${group.label}, $countText',
-              excludeSemantics: true,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: status != null
-                        ? CarbonIconIndicator(
-                            kind: agentWorkStatusIndicatorKind(status),
-                            label: group.label,
-                          )
-                        : Text(
-                            group.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: t.typography.label.copyWith(
-                              color: t.colors.textPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                  ),
-                  const SizedBox(width: CarbonSpacing.spacing03),
-                  Text(
-                    '$count',
-                    maxLines: 1,
-                    style: t.typography.label.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (group.machineUuid != null) ...[
-            const SizedBox(width: CarbonSpacing.spacing03),
-            _ConnectingIndicator(machineUuid: group.machineUuid!),
-          ],
+          SizedBox(height: AbTokens.space8),
+          AbSeparator.horizontal(),
         ],
       ),
     );
   }
 }
 
-/// Status shown next to a machine's group header while its control-plane
+/// Uppercase mono section rule for a machine / project / status group:
+/// `LABEL · N ────────`. The trailing hairline anchors the group the way
+/// panel headers do elsewhere, so groups scan as sections rather than a
+/// stray dim line floating between rows.
+class _GroupHeader extends StatelessWidget {
+  const _GroupHeader({
+    required this.label,
+    required this.count,
+    this.machineUuid,
+  });
+
+  final String label;
+  final int count;
+
+  /// Non-null only for a remote machine group under Machine grouping — shows
+  /// a "Connecting…" indicator while that machine's socket is mid-handshake.
+  final String? machineUuid;
+
+  @override
+  Widget build(BuildContext context) {
+    return AbSectionHeader(
+      label: label,
+      count: count,
+      // Mono: this label is a machine or project NAME, not a category word.
+      mono: true,
+      rule: true,
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space12,
+        AbTokens.space16,
+        AbTokens.space4,
+      ),
+      trailing: machineUuid == null
+          ? null
+          : _ConnectingIndicator(machineUuid: machineUuid!),
+    );
+  }
+}
+
+/// Ladder pill shown next to a machine's group header while its control-plane
 /// socket is climbing, or once it has stopped on a reason. Reads
 /// [supervisorStatusProvider] (peek-only, never dials) — invisible once
 /// `Connected` (the fresh row list already communicates "connected", and this
@@ -537,18 +405,28 @@ class _ConnectingIndicator extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    final label = connectionDisplayInfo(status).$2;
     // A block is sticky until the user or an out-of-band event clears it, so it
-    // gets the failed glyph rather than the activity spinner.
-    if (status is Climbing) {
-      return CarbonInlineLoading(
-        status: CarbonInlineLoadingStatus.active,
-        description: '$label…',
-      );
-    }
-    return CarbonIconIndicator(
-      kind: CarbonIconIndicatorKind.failed,
-      label: label,
+    // gets neither the pulse nor the trailing ellipsis that say "still working".
+    final inProgress = status is Climbing;
+    final (tone, label) = connectionDisplayInfo(status);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbStatusDot(tone: tone, size: AbDotSize.sm, pulse: inProgress),
+        const SizedBox(width: AbTokens.space6),
+        Text(
+          inProgress ? '$label…' : label,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXxs,
+            // AbStatusTone.disabled resolves to iconMuted (3:1, dot-tier) —
+            // too dim for this label, which is body text. Every other tone
+            // here is already a text-safe semantic color.
+            color: tone == AbStatusTone.disabled
+                ? context.antgrid.textMuted
+                : tone.color(context),
+          ),
+        ),
+      ],
     );
   }
 }

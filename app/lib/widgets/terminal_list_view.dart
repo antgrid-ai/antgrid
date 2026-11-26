@@ -1,30 +1,35 @@
-import 'dart:math' as math;
-
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/gestures.dart'
+    show GestureBinding, PointerScrollEvent, PointerSignalEvent;
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../models/agent_work_status.dart';
+import '../design/ab_status_tone.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_status_dot.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../models/terminal_models.dart';
 import '../providers/ad_hoc_terminals.dart';
 import '../providers/providers.dart';
 import '../providers/session_workspace_state.dart';
 import '../services/terminal_service.dart';
 import '../util/detached.dart';
-import 'carbon_empty_state.dart';
-import 'carbon_status_dot.dart';
+import '../utils/platform_utils.dart';
+import 'ab_status_helpers.dart';
 import 'terminal_view_wrapper.dart';
+import 'wheel_scroll.dart';
 
 /// The Terminals tab: the session's own shells, one at a time.
 ///
 /// A tab strip of terminals across the top, and the active one filling the
 /// panel below a toolbar naming the folder it runs in.
-///
-/// The strip, the toolbar and the empty states are Carbon, each in its own
-/// scope. The terminal pane is not: [TerminalViewWrapper] is Ab throughout and
-/// is shared with the agent panel, so no scope may enclose it.
 class TerminalListView extends ConsumerStatefulWidget {
   const TerminalListView({super.key});
 
@@ -35,38 +40,7 @@ class TerminalListView extends ConsumerStatefulWidget {
 class _TerminalListViewState extends ConsumerState<TerminalListView> {
   static const int _maxAdHocTerminals = 10;
 
-  // Not a focus target. It only lets this view find the open terminal's own
-  // focus node among its descendants.
-  final FocusNode _terminalHost = FocusNode(
-    debugLabel: 'TerminalPane',
-    canRequestFocus: false,
-    skipTraversal: true,
-  );
-
   SessionUiKey? get _uiKey => ref.read(activeSessionUiKeyProvider);
-
-  @override
-  void dispose() {
-    _terminalHost.dispose();
-    super.dispose();
-  }
-
-  /// A Carbon tab or button keeps focus once pressed, and the terminal only
-  /// autofocuses when nothing holds it, so without this typing after a press
-  /// would go to the control. After the frame so a terminal mounted by the same
-  /// press already exists.
-  void _focusTerminal() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final live = _terminalHost.descendants
-          .where((n) => n.debugLabel == 'TerminalLiveView')
-          .firstOrNull;
-      if (live != null && live.canRequestFocus && !live.hasFocus) {
-        live.requestFocus();
-      }
-    });
-    WidgetsBinding.instance.scheduleFrame();
-  }
 
   void _setSelectedTerminal(String? id) {
     final key = _uiKey;
@@ -94,7 +68,6 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     final id = _nextAdHocTerminalId(tabs.map((t) => t.terminalId).toSet());
     service.createAdHocTerminal(id, name: 'Terminal ${id.split('-').last}');
     _setSelectedTerminal(id);
-    _focusTerminal();
   }
 
   void _select(TerminalService service, String id) {
@@ -136,16 +109,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         : ref.watch(sessionWorkspaceStateProvider(key)).selectedTerminalId;
     final service = serviceWhenReady(ref, terminalServiceProvider);
     if (service == null) {
-      return const AbCarbonScope(
-        child: _Surface(
-          child: Center(
-            child: CarbonInlineLoading(
-              status: CarbonInlineLoadingStatus.active,
-              description: 'loading terminals...',
-            ),
-          ),
-        ),
-      );
+      return const AbLoading(message: 'loading terminals...');
     }
     final tabs = ref.watch(adHocTerminalsProvider);
     // Only these fields: TerminalState has no ==, so watching the whole value
@@ -186,66 +150,38 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
     final atLimit = tabs.length >= _maxAdHocTerminals;
 
-    // The terminal pane is Ab, so this host paints its backdrop and each
-    // Carbon piece paints its own. The slots keep fixed positions so the pane
-    // below is never re-parented by the toolbar coming and going.
     return ColoredBox(
       color: context.antgrid.bgDeepest,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AbCarbonScope(
-            child: _TabStrip(
-              tabs: tabs,
-              activeId: active?.terminalId,
-              onSelect: (id) {
-                _select(service, id);
-                _focusTerminal();
-              },
-              onKill: (id) {
-                _kill(service, tabs, id, shown: id == active?.terminalId);
-                _focusTerminal();
-              },
-              onNew: atLimit ? null : () => _createTerminal(service, tabs),
-            ),
+          _TabStrip(
+            tabs: tabs,
+            activeId: active?.terminalId,
+            onSelect: (id) => _select(service, id),
+            onKill: (id) =>
+                _kill(service, tabs, id, shown: id == active?.terminalId),
+            onNew: atLimit ? null : () => _createTerminal(service, tabs),
           ),
-          active == null
-              ? const SizedBox.shrink()
-              : AbCarbonScope(
-                  child: _ActiveToolbar(
-                    // Empty from an older bridge, which does not report it.
-                    path: checkoutPath ?? '',
-                    onClear: () {
-                      service.clearTerminal(active.terminalId);
-                      _focusTerminal();
-                    },
-                    onRestart: () {
-                      service.restartTerminal(active.terminalId);
-                      _focusTerminal();
-                    },
-                    onKill: () {
-                      _kill(service, tabs, active.terminalId, shown: true);
-                      _focusTerminal();
-                    },
-                  ),
-                ),
+          if (active != null)
+            _ActiveToolbar(
+              // Empty from an older bridge, which does not report it.
+              path: checkoutPath ?? '',
+              onClear: () => service.clearTerminal(active.terminalId),
+              onRestart: () => service.restartTerminal(active.terminalId),
+              onKill: () =>
+                  _kill(service, tabs, active.terminalId, shown: true),
+            ),
           Expanded(
             child: active != null
-                ? Focus(
-                    focusNode: _terminalHost,
-                    child: TerminalViewWrapper(
-                      // Switching tabs mounts the next terminal's own view
-                      // rather than retargeting this one's state at it.
-                      key: ValueKey(active.terminalId),
-                      tab: active,
-                      terminalService: service,
-                    ),
+                ? TerminalViewWrapper(
+                    // Switching tabs mounts the next terminal's own view
+                    // rather than retargeting this one's state at it.
+                    key: ValueKey(active.terminalId),
+                    tab: active,
+                    terminalService: service,
                   )
-                : AbCarbonScope(
-                    child: _Surface(
-                      child: _buildEmptyOrAttaching(service, tabs, attach),
-                    ),
-                  ),
+                : _buildEmptyOrAttaching(service, tabs, attach),
           ),
         ],
       ),
@@ -260,91 +196,56 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     List<TerminalTab> tabs,
     CheckoutAttachStatus attach,
   ) {
+    final newButton = AbButton(
+      label: 'New Terminal',
+      leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
+      onTap: () => _createTerminal(service, tabs),
+    );
     switch (attach) {
       case CheckoutAttachStatus.attaching:
-        return const Center(
-          child: CarbonInlineLoading(
-            status: CarbonInlineLoadingStatus.active,
-            description: 'attaching terminals…',
-          ),
-        );
+        return const AbEmptyState.compact(title: 'attaching terminals…');
       case CheckoutAttachStatus.failed:
         // Retry re-asks for the checkout's status, not one terminal's screen:
         // a checkout-wide failure means no `agent:status` ever arrived.
-        return CarbonEmptyState(
-          error: true,
-          heading: "Couldn't load terminals",
-          body: 'the agent has not answered yet',
-          // A button set, not a Row: two buttons do not fit a split view at
-          // its narrowest, and the set stacks itself.
-          action: CarbonButtonSet(
+        return AbEmptyState.error(
+          title: "Couldn't load terminals",
+          subtitle: 'the agent has not answered yet',
+          // Wrapped, not a Row: two buttons do not fit a split view at its
+          // narrowest.
+          action: Wrap(
+            spacing: AbTokens.space8,
+            alignment: WrapAlignment.center,
             children: [
-              CarbonButton(
-                label: 'New Terminal',
-                kind: CarbonButtonKind.tertiary,
-                icon: const CarbonIcon(CarbonIcons.add),
-                onPressed: () => _createTerminal(service, tabs),
-              ),
-              CarbonButton(
+              AbButton(
                 label: 'Retry',
-                onPressed: () => detached(
+                color: context.antgrid.accent,
+                onTap: () => detached(
                   'TerminalListView',
                   'retry checkout attach failed',
                   service.retryCheckoutAttach,
                 ),
+                compact: true,
               ),
+              newButton,
             ],
           ),
         );
       case CheckoutAttachStatus.unknown:
       case CheckoutAttachStatus.ready:
-        return CarbonEmptyState(
-          icon: CarbonIcons.terminal,
-          heading: 'No terminals running',
-          action: CarbonButton(
-            label: 'New Terminal',
-            icon: const CarbonIcon(CarbonIcons.add),
-            onPressed: () => _createTerminal(service, tabs),
-          ),
+        return AbEmptyState(
+          icon: AbIcons.terminal,
+          title: 'No terminals running',
+          action: newButton,
         );
     }
   }
 }
 
-/// A Carbon piece's own backdrop, with an optional rule under it.
-class _Surface extends StatelessWidget {
-  const _Surface({this.rule = false, required this.child});
-
-  final bool rule;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: t.colors.background,
-        border: rule
-            ? Border(
-                bottom: BorderSide(
-                  color: t.borderSubtle(CarbonLayer.of(context)),
-                  width: CarbonBorders.hairline,
-                ),
-              )
-            : null,
-      ),
-      child: child,
-    );
-  }
-}
-
-/// The terminals as contained, dismissible tabs. New stays pinned outside the
-/// tabs' own scrolling, so opening a terminal never means scrolling to find
-/// the button.
-///
-/// Activation is manual: every terminal a tab selects mounts its own keyed
-/// view, so arrowing across the strip must not mount each one on the way.
-class _TabStrip extends StatelessWidget {
+/// The pills scroll sideways once they outgrow the pane: by swipe on touch,
+/// and on desktop by the wheel or the chevrons that appear at an edge with
+/// more pills past it. New stays pinned outside the scroll, so opening a
+/// terminal never means scrolling to find the button.
+class _TabStrip extends StatefulWidget {
   const _TabStrip({
     required this.tabs,
     required this.activeId,
@@ -362,56 +263,270 @@ class _TabStrip extends StatelessWidget {
   final VoidCallback? onNew;
 
   @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    // The tabs' own height, held while there are none so the strip does not
-    // jump when the first terminal opens.
-    final minHeight = math.max(
-      t.isTouch ? t.touchTarget : CarbonSizes.md,
-      t.minTarget,
+  State<_TabStrip> createState() => _TabStripState();
+}
+
+class _TabStripState extends State<_TabStrip> {
+  final ScrollController _scroll = ScrollController();
+  final Map<String, GlobalKey> _pillKeys = {};
+  bool _canBack = false;
+  bool _canForward = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_syncEdges);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealActive());
+  }
+
+  @override
+  void didUpdateWidget(_TabStrip old) {
+    super.didUpdateWidget(old);
+    // A new tab lands at the end, past the edge on a crowded strip; a tab
+    // picked another way (a notification, a restored session) can be off it
+    // too. Either way the open terminal's pill should be the one on screen.
+    if (old.activeId != widget.activeId ||
+        old.tabs.length != widget.tabs.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealActive());
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _syncEdges() {
+    if (!mounted || !_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final back = pos.pixels > pos.minScrollExtent + 0.5;
+    final forward = pos.pixels < pos.maxScrollExtent - 0.5;
+    if (back != _canBack || forward != _canForward) {
+      setState(() {
+        _canBack = back;
+        _canForward = forward;
+      });
+    }
+  }
+
+  /// Scrolls the least distance that puts the active pill fully on screen,
+  /// and not at all when it already is.
+  void _revealActive() {
+    if (!mounted || !_scroll.hasClients) return;
+    final box = _pillKeys[widget.activeId]?.currentContext?.findRenderObject();
+    final viewport = box == null ? null : RenderAbstractViewport.maybeOf(box);
+    if (box != null && viewport != null) {
+      final pos = _scroll.position;
+      final atStart = viewport.getOffsetToReveal(box, 0).offset;
+      final atEnd = viewport.getOffsetToReveal(box, 1).offset;
+      final target = pos.pixels > atStart
+          ? atStart
+          : pos.pixels < atEnd
+          ? atEnd
+          : null;
+      if (target != null) {
+        _scrollTo(target, 'reveal active tab failed');
+      }
+    }
+    _syncEdges();
+  }
+
+  /// Moves most of a pane-width, keeping a sliver of the last view so the
+  /// eye has something to anchor on.
+  void _page(int direction) {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final target = pos.pixels + direction * pos.viewportDimension * 0.7;
+    _scrollTo(target, 'page tabs failed');
+  }
+
+  void _scrollTo(double target, String what) {
+    final pos = _scroll.position;
+    detached(
+      'TerminalTabStrip',
+      what,
+      () => _scroll.animateTo(
+        target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+        duration: AbTokens.motionSnap,
+        curve: Curves.easeOut,
+      ),
     );
-    return _Surface(
-      rule: true,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: minHeight),
-        child: Row(
-          children: [
-            Expanded(
-              child: tabs.isEmpty
-                  ? const SizedBox.shrink()
-                  : CarbonTabs<String>(
-                      variant: CarbonTabsVariant.contained,
-                      activation: CarbonActivationMode.manual,
-                      semanticLabel: 'Terminals',
-                      value: activeId,
-                      onChanged: onSelect,
-                      // Re-pressing the open tab hands typing back to it.
-                      onReselect: onSelect,
-                      // Mice with no horizontal wheel can still reach every tab.
-                      wheelScrollsSideways: true,
-                      onClose: onKill,
-                      closeLabelBuilder: (name) => 'Kill $name',
-                      tabs: [
-                        for (final tab in tabs)
-                          CarbonOption<String>(
-                            value: tab.terminalId,
-                            label: tab.name,
-                            semanticLabel: '${tab.name}, ${_stateLabel(tab)}',
-                            leading: _TabDots(
-                              tab: tab,
-                              active: tab.terminalId == activeId,
-                            ),
-                          ),
-                      ],
-                    ),
+  }
+
+  /// A mouse wheel only scrolls vertically; on a sideways strip that is the
+  /// gesture a desktop user reaches for first.
+  ///
+  /// Sideways input is left to the strip's own Scrollable, which already
+  /// handles it — taking it here too would move the strip twice. The vertical
+  /// tick is claimed through the resolver so nothing around the strip also
+  /// scrolls on it.
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent || event.scrollDelta.dx != 0) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (e) {
+      if (!_scroll.hasClients) return;
+      jumpScrollBy(_scroll, (e as PointerScrollEvent).scrollDelta.dy);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final ids = {for (final t in widget.tabs) t.terminalId};
+    _pillKeys.removeWhere((id, _) => !ids.contains(id));
+    final desktop = !isMobilePlatform;
+
+    final pills = NotificationListener<ScrollMetricsNotification>(
+      // Fires when the content or viewport changes size (a tab added or
+      // killed, the pane resized), which the scroll listener alone misses.
+      onNotification: (_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _syncEdges());
+        return false;
+      },
+      child: Listener(
+        onPointerSignal: desktop ? _onPointerSignal : null,
+        // Not a lazy ListView: the active pill is scrolled TO, so it has to
+        // exist while off screen, and the strip holds at most a handful.
+        child: SingleChildScrollView(
+          controller: _scroll,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
+          child: Row(
+            children: [
+              for (final t in widget.tabs) ...[
+                _TerminalPill(
+                  key: _pillKeys.putIfAbsent(t.terminalId, GlobalKey.new),
+                  tab: t,
+                  active: t.terminalId == widget.activeId,
+                  onTap: () => widget.onSelect(t.terminalId),
+                  onKill: () => widget.onKill(t.terminalId),
+                ),
+                const SizedBox(width: AbTokens.space4),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+
+    return Container(
+      height: AbTokens.rowHeightMd,
+      decoration: BoxDecoration(
+        color: p.bgDeep,
+        border: Border(bottom: BorderSide(color: p.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          if (desktop && _canBack)
+            AbIconButton(
+              icon: AbIcons.chevronLeft,
+              tooltip: 'Scroll terminals left',
+              onTap: () => _page(-1),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: CarbonSpacing.spacing03,
+          Expanded(child: pills),
+          if (desktop && _canForward)
+            AbIconButton(
+              icon: AbIcons.chevronRight,
+              tooltip: 'Scroll terminals right',
+              onTap: () => _page(1),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(
+              left: AbTokens.space4,
+              right: AbTokens.space8,
+            ),
+            child: _NewButton(onTap: widget.onNew),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TerminalPill extends StatefulWidget {
+  const _TerminalPill({
+    super.key,
+    required this.tab,
+    required this.active,
+    required this.onTap,
+    required this.onKill,
+  });
+
+  final TerminalTab tab;
+  final bool active;
+  final VoidCallback onTap;
+  final VoidCallback onKill;
+
+  @override
+  State<_TerminalPill> createState() => _TerminalPillState();
+}
+
+class _TerminalPillState extends State<_TerminalPill> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final tab = widget.tab;
+    return Semantics(
+      button: true,
+      selected: widget.active,
+      label: '${tab.name}, ${_stateLabel(tab)}',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            height: AbTokens.rowHeightXs,
+            padding: const EdgeInsets.only(
+              left: AbTokens.space10,
+              right: AbTokens.space4,
+            ),
+            decoration: BoxDecoration(
+              color: widget.active
+                  ? p.bgRaised
+                  : _hovered
+                  ? p.bgHover
+                  : null,
+              border: Border.all(
+                color: widget.active ? p.borderDefault : Colors.transparent,
               ),
-              child: _NewButton(onTap: onNew),
+              borderRadius: AbTokens.borderRadius5,
             ),
-          ],
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _RunDot(state: tab.sessionState),
+                const SizedBox(width: AbTokens.space8),
+                Text(
+                  tab.name,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    fontWeight: FontWeight.w500,
+                    color: widget.active || tab.unread
+                        ? p.textPrimary
+                        : p.textSecondary,
+                  ),
+                ),
+                if (tab.unread && !widget.active) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  const AbStatusDot(tone: AbStatusTone.unread),
+                ],
+                const SizedBox(width: AbTokens.space4),
+                AbIconButton(
+                  icon: AbIcons.close,
+                  tone: AbIconButtonTone.muted,
+                  tooltip: 'Kill terminal',
+                  boxSize: 20,
+                  glyphSize: 12,
+                  onTap: widget.onKill,
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -425,54 +540,95 @@ String _stateLabel(TerminalTab tab) => switch (tab.sessionState) {
     tab.exitCode == null ? 'exited' : 'exited (${tab.exitCode})',
 };
 
-/// The run state as a dot, and a second one while the terminal has output
-/// nobody has seen. The tab's spoken name carries the state, so the dots are
-/// decoration.
-class _TabDots extends StatelessWidget {
-  const _TabDots({required this.tab, required this.active});
+/// Running reads as a lit dot with a halo; anything else is a plain dot in
+/// the state's own tone.
+class _RunDot extends StatelessWidget {
+  const _RunDot({required this.state});
 
-  final TerminalTab tab;
-  final bool active;
+  final TerminalSessionState state;
 
   @override
   Widget build(BuildContext context) {
-    final c = CarbonTheme.of(context).colors;
-    final color = switch (tab.sessionState) {
-      TerminalSessionState.running => c.supportSuccess,
-      TerminalSessionState.exited => c.supportError,
-      TerminalSessionState.starting => c.iconSecondary,
-    };
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      spacing: CarbonSpacing.spacing02,
-      children: [
-        CarbonStatusDot(color: color),
-        if (tab.unread && !active)
-          const CarbonWorkStatusDot(status: AgentWorkStatus.unread),
-      ],
+    final color = sessionStateTone(state).color(context);
+    final running = state == TerminalSessionState.running;
+    return Container(
+      width: AbTokens.dotSizeSm + 1,
+      height: AbTokens.dotSizeSm + 1,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: running
+            ? Border.all(
+                color: color.withValues(alpha: 0.15),
+                width: 3,
+                strokeAlign: BorderSide.strokeAlignOutside,
+              )
+            : null,
+      ),
     );
   }
 }
 
-class _NewButton extends StatelessWidget {
+class _NewButton extends StatefulWidget {
   const _NewButton({required this.onTap});
 
   final VoidCallback? onTap;
 
   @override
+  State<_NewButton> createState() => _NewButtonState();
+}
+
+class _NewButtonState extends State<_NewButton> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    // Focusable while disabled so the reason is reachable from the keyboard.
-    return CarbonTooltip(
+    final p = context.antgrid;
+    final enabled = widget.onTap != null;
+    final lit = enabled && _hovered;
+    final color = lit ? p.accent : p.textSecondary;
+    return AbTooltip(
       message: enabled ? 'New terminal' : 'Max terminals reached',
-      child: CarbonButton(
-        label: 'New',
-        semanticLabel: 'New terminal',
-        kind: CarbonButtonKind.ghost,
-        size: CarbonButtonSize.small,
-        icon: const CarbonIcon(CarbonIcons.add),
-        onPressed: onTap,
-        focusableWhenDisabled: true,
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: 'New terminal',
+        child: MouseRegion(
+          cursor: enabled ? SystemMouseCursors.click : MouseCursor.defer,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: Opacity(
+              opacity: enabled ? 1 : AbTokens.opacityDisabled,
+              child: Container(
+                height: AbTokens.rowHeightXs,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space10,
+                ),
+                decoration: BoxDecoration(
+                  border: Border.all(color: lit ? p.accent : p.borderDefault),
+                  borderRadius: AbTokens.borderRadius5,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AbIcon(AbIcons.add, size: 12, color: color),
+                    const SizedBox(width: AbTokens.space6),
+                    Text(
+                      'New',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: color,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -493,68 +649,93 @@ class _ActiveToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return _Surface(
-      rule: true,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // Three labelled buttons beside a path stop fitting in a narrow pane.
-          final folded = constraints.maxWidth < CarbonSpacing.spacing09 * 8;
-          return Row(
-            children: [
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsetsDirectional.only(
-                    start: CarbonSpacing.spacing05,
-                    end: CarbonSpacing.spacing03,
-                  ),
-                  child: Text(
-                    path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: t.typography.code.copyWith(
-                      color: t.colors.textSecondary,
-                    ),
-                  ),
-                ),
+    final p = context.antgrid;
+    return Container(
+      height: AbTokens.rowHeightMd,
+      padding: const EdgeInsets.only(
+        left: AbTokens.space12,
+        right: AbTokens.space8,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: p.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              path,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textMuted,
               ),
-              if (folded)
-                CarbonOverflowMenu(
-                  horizontal: true,
-                  semanticLabel: 'Terminal actions',
-                  entries: [
-                    CarbonMenuItem(label: 'Clear', onPressed: onClear),
-                    CarbonMenuItem(label: 'Restart', onPressed: onRestart),
-                    CarbonMenuItem(
-                      label: 'Kill',
-                      kind: CarbonMenuItemKind.danger,
-                      onPressed: onKill,
-                    ),
-                  ],
-                )
-              else ...[
-                CarbonButton(
-                  label: 'Clear',
-                  kind: CarbonButtonKind.ghost,
-                  size: CarbonButtonSize.small,
-                  onPressed: onClear,
-                ),
-                CarbonButton(
-                  label: 'Restart',
-                  kind: CarbonButtonKind.ghost,
-                  size: CarbonButtonSize.small,
-                  onPressed: onRestart,
-                ),
-                CarbonButton(
-                  label: 'Kill',
-                  kind: CarbonButtonKind.dangerGhost,
-                  size: CarbonButtonSize.small,
-                  onPressed: onKill,
-                ),
-              ],
-            ],
-          );
-        },
+            ),
+          ),
+          _ToolbarAction(label: 'Clear', onTap: onClear),
+          _ToolbarAction(label: 'Restart', onTap: onRestart),
+          _ToolbarAction(label: 'Kill', onTap: onKill, danger: true),
+        ],
+      ),
+    );
+  }
+}
+
+/// A borderless text action: three bordered buttons in a row would outweigh
+/// the path they sit beside.
+class _ToolbarAction extends StatefulWidget {
+  const _ToolbarAction({
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool danger;
+
+  @override
+  State<_ToolbarAction> createState() => _ToolbarActionState();
+}
+
+class _ToolbarActionState extends State<_ToolbarAction> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final rest = widget.danger ? p.error : p.textSecondary;
+    return Semantics(
+      button: true,
+      label: widget.label,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            height: AbTokens.rowHeightXs,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
+            decoration: BoxDecoration(
+              color: _hovered
+                  ? (widget.danger
+                        ? p.error.withValues(alpha: 0.12)
+                        : p.bgHover)
+                  : null,
+              borderRadius: AbTokens.borderRadius5,
+            ),
+            child: Text(
+              widget.label,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: _hovered && !widget.danger ? p.textPrimary : rest,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

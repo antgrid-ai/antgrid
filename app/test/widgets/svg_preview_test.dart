@@ -1,4 +1,3 @@
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,15 +8,11 @@ const _svg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
     '<rect width="10" height="10" fill="red"/></svg>';
 
-Widget _scope(BuildContext context, Widget? child) =>
-    AbCarbonScope(child: child!);
-
 void main() {
   testWidgets('renders an SvgPicture in preview mode', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
         child: MaterialApp(
-          builder: _scope,
           home: Scaffold(
             body: SvgPreview(
               content: const FileContent(

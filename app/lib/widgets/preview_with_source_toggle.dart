@@ -1,6 +1,7 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
+import '../design/ab_icons.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../models/file_tree_models.dart';
 import 'file_content_viewer.dart';
 import 'viewer_header.dart';
@@ -80,10 +81,10 @@ class _PreviewWithSourceToggleState extends State<PreviewWithSourceToggle> {
           onClose: widget.onClose,
           trailing: [
             ...widget.extraActions,
-            ViewerIconButton(
-              icon: CarbonIcons.code,
-              label: 'Show source',
-              onPressed: () => setState(() => _showSource = true),
+            AbIconButton(
+              icon: AbIcons.code,
+              onTap: () => setState(() => _showSource = true),
+              tooltip: 'Show source',
             ),
           ],
         ),

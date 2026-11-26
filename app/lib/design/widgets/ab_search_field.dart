@@ -6,7 +6,6 @@ import '../ab_icons.dart';
 import '../ab_colors.dart';
 import '../ab_tokens.dart';
 import 'ab_text_field.dart';
-import 'ab_touch_sizing.dart';
 
 /// Debounced text input with a search prefix icon and clear button.
 ///
@@ -107,7 +106,6 @@ class _AbSearchFieldState extends State<AbSearchField> {
     // actually has an icon — a bare side keeps the standard [space8] inset so
     // text never runs flush to the border.
     final hasPrefix = widget.prefixIcon != null;
-    final height = AbTouchSizing.fieldHeight(context, widget.height);
     return AbTextField(
       controller: widget.controller,
       focusNode: widget.focusNode,
@@ -116,11 +114,11 @@ class _AbSearchFieldState extends State<AbSearchField> {
       showClearButton: widget.showClearButton,
       autofocus: widget.autofocus,
       fillColor: widget.fillColor ?? context.antgrid.bgDeepest,
-      height: height,
+      height: widget.height,
       border: widget.border,
       prefixIconSize: AbTokens.iconButtonGlyph,
-      prefixIconWidth: widget.prefixIconWidth ?? height,
-      suffixSlotWidth: height,
+      prefixIconWidth: widget.prefixIconWidth ?? widget.height,
+      suffixSlotWidth: widget.height,
       contentPadding: EdgeInsets.only(
         left: hasPrefix ? 0 : AbTokens.space8,
         right: widget.showClearButton ? 0 : AbTokens.space8,

@@ -2,22 +2,32 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_brand_mark.dart';
+import '../design/widgets/ab_branch_pill.dart';
+import '../design/widgets/ab_breadcrumb.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_toast.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
+import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
+import '../providers/recent_sessions.dart';
+import '../providers/session_setup.dart';
+import '../providers/sessions.dart';
+import '../util/detached.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
+import 'session_isolation_badge.dart';
 import 'session_search_field.dart';
+import 'session_shared_workspace_badge.dart';
 
 /// The app-drawn window title bar.
 ///
@@ -447,11 +457,9 @@ class _WindowTitleBarContentsState
             // relocating any of them up here.
             KeyedSubtree(
               key: WindowTitleBarContents.chipSlotKey,
-              child: AbCarbonScope(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: titleBarProjectActions(ref),
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: titleBarProjectActions(ref),
               ),
             ),
             const SizedBox(width: AbTokens.space8),
@@ -493,5 +501,120 @@ class _WindowTitleBarContentsState
         ),
       ],
     );
+  }
+}
+
+/// The agent name / session breadcrumb, with git branch pill.
+///
+/// Named for the row it used to live in; both its surfaces are now in
+/// `agent_panel.dart` — the mobile header and the desktop `AgentBar` — kept as
+/// one widget so the two cannot drift apart.
+class TitleBarBreadcrumb extends ConsumerWidget {
+  const TitleBarBreadcrumb({super.key, this.showBranchPill = true});
+
+  /// False on the mobile agent-panel header ([AgentPanel]), which folds the
+  /// pill into its overflow menu instead — a phone-width row has no space to
+  /// spare for an unshrinkable sibling beside the title. Desktop's
+  /// [AgentBar] keeps the default, where the pill still sits inline.
+  final bool showBranchPill;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final terminalState = ref.watch(terminalStateProvider).value;
+    final activeId = ref.watch(selectedRegistrationIdProvider);
+    // `agent:status` is pushed per checkout and never replayed, so an ISOLATED
+    // session's bundle can miss the only frame that carries the name: the
+    // worktree runtime emits it while being prepared, before the session is
+    // announced and the app has built that checkout's TerminalService. Falling
+    // straight through to the id then renders a 16-char hash as the project.
+    final agentName =
+        terminalState?.agentInfo?.name ??
+        (activeId == null
+            ? 'Antgrid'
+            : ref.watch(projectDisplayNameProvider(activeId)) ??
+                  projectNameFromId(activeId));
+    final gitBranch = terminalState?.gitBranch;
+    final active = ref.watch(activeSessionProvider);
+    // Leaf slot must exist for the '/' separator + leafOverride to render; the
+    // string is a fallback only — the editable leaf renders the live name.
+    final segments = [agentName, if (active != null) active.name];
+
+    return Row(
+      children: [
+        Flexible(
+          child: AbBreadcrumb(
+            segments: segments,
+            leafOverride: active == null
+                ? null
+                : EditableSessionLeaf(session: active),
+          ),
+        ),
+        if (active != null) ...[
+          SessionIsolationBadge(
+            session: active,
+            // The live list's answer, never `active.setup`: the entry can come
+            // from the persisted cache, which carries no setup state at all.
+            setup: ref.watch(activeSessionSetupProvider),
+          ),
+          SessionSharedWorkspaceBadge(session: active),
+        ],
+        if (showBranchPill && gitBranch != null) ...[
+          const SizedBox(width: AbTokens.space8),
+          // FlexFit.loose, not Expanded: the breadcrumb keeps first claim on
+          // slack (it has the higher flex below), and this only gives up its
+          // own width once the row is actually tight — a bare ConstrainedBox
+          // here does not shrink with the row at all, since a non-flex Row
+          // child is sized from its own content, capped but never squeezed,
+          // which is what let the fixed badges above push this row into
+          // overflow on a narrow agent panel. AbBranchPill's own Flexible
+          // Text (see its doc) is what turns this shrink into an ellipsis
+          // instead of a second overflow one widget down.
+          Flexible(fit: FlexFit.loose, child: SessionBranchPill(maxWidth: 160)),
+        ],
+      ],
+    );
+  }
+}
+
+/// The active session's git branch pill — tap to copy. Extracted so both the
+/// inline breadcrumb ([TitleBarBreadcrumb]) and the mobile overflow menu
+/// ([AgentPanel]'s header) share one behavior instead of drifting apart.
+/// Renders nothing while there is no branch to show.
+class SessionBranchPill extends ConsumerWidget {
+  const SessionBranchPill({super.key, this.maxWidth});
+
+  /// Caps the pill's width when it sits beside the breadcrumb — an
+  /// unshrinkable sibling would otherwise floor the title's own space on a
+  /// narrow window. Null renders it at its natural width, for a slot (the
+  /// mobile overflow menu) nothing else competes with for room.
+  final double? maxWidth;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final terminalState = ref.watch(terminalStateProvider).value;
+    final gitBranch = terminalState?.gitBranch;
+    if (gitBranch == null) return const SizedBox.shrink();
+
+    final pill = AbBranchPill(
+      branch: gitBranch,
+      ahead: terminalState?.gitAhead ?? 0,
+      behind: terminalState?.gitBehind ?? 0,
+      onTap: () => detached('WindowTitleBar', 'copy branch name', () async {
+        await Clipboard.setData(ClipboardData(text: gitBranch));
+        if (!context.mounted) return;
+        showAbToast(
+          context,
+          'Copied "$gitBranch"',
+          duration: const Duration(seconds: 2),
+        );
+      }),
+    );
+    final width = maxWidth;
+    return width == null
+        ? pill
+        : ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: width),
+            child: pill,
+          );
   }
 }

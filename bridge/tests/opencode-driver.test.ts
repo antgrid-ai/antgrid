@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
 import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
-import { OpencodeV2Events } from "../../packages/antgrid-agents/src/agents/opencode/v2-events";
 import type { DriverLifecycleEvent } from "../../packages/antgrid-agents/src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
@@ -29,12 +28,12 @@ function makeFakeClient(
   const client: OpencodeClientLike = {
     createSession: async (o) => { calls.push({ m: "createSession", args: [o] }); return rootId; },
     messages: async (s) => { calls.push({ m: "messages", args: [s] }); return []; },
-    revertMessages: async (s, messageId) => { calls.push({ m: "revertMessages", args: [s, messageId] }); },
+    deleteMessage: async (s, messageId) => { calls.push({ m: "deleteMessage", args: [s, messageId] }); },
     prompt: async (s, t, o) => { calls.push({ m: "prompt", args: [s, t, o] }); },
     abort: async (s) => { calls.push({ m: "abort", args: [s] }); },
-    summarize: async (s) => { calls.push({ m: "summarize", args: [s] }); },
+    summarize: async (s, model) => { calls.push({ m: "summarize", args: [s, model] }); },
     replyPermission: async (s, id, r) => { calls.push({ m: "replyPermission", args: [s, id, r] }); },
-    replyForm: async (s, id, a) => { calls.push({ m: "replyForm", args: [s, id, a] }); },
+    replyQuestion: async (id, a) => { calls.push({ m: "replyQuestion", args: [id, a] }); },
     listCommands: async () => { calls.push({ m: "listCommands", args: [] }); return [
       { name: "review", description: "Review changes", hints: ["$ARGUMENTS"], source: "command", template: "..." },
       { name: "hello-skill", source: "skill", hints: [], template: "..." },
@@ -45,11 +44,16 @@ function makeFakeClient(
       { name: "general", mode: "subagent" },
       { name: "compaction", mode: "primary", hidden: true },
     ]; },
-    listProviders: async () => { calls.push({ m: "listProviders", args: [] }); return [
-      { id: "anthropic", name: "Anthropic", models: {
-        "claude-sonnet-5": { id: "claude-sonnet-5", name: "Claude Sonnet 5", variants: { thinking: {} }, limit: { context: 195000, output: 8192 } },
-      } },
-    ]; },
+    listProviders: async () => { calls.push({ m: "listProviders", args: [] }); return {
+      all: [
+        { id: "anthropic", name: "Anthropic", models: {
+          "claude-sonnet-5": { id: "claude-sonnet-5", name: "Claude Sonnet 5", variants: { thinking: {} }, limit: { context: 195000, output: 8192 } },
+        } },
+        { id: "openai", name: "OpenAI", models: { "gpt-5.2": { id: "gpt-5.2", name: "GPT-5.2" } } },
+      ],
+      default: { anthropic: "claude-sonnet-5" },
+      connected: ["anthropic"],
+    }; },
     command: async (s: string, o: any) => { calls.push({ m: "command", args: [s, o] }); },
     events: () => ({
       [Symbol.asyncIterator]() {
@@ -81,71 +85,6 @@ async function startedDriver(rootId = "ses_root") {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("OpencodeDriver", () => {
-  it("shows delivered V2 prompts live with native IDs for reverting", async () => {
-    const { driver, sent, push } = await startedDriver();
-    const stream = new OpencodeV2Events();
-    const base = { sessionID: "ses_root", inboxID: "msg_user" };
-    const publish = (type: string, data: object) => {
-      for (const normalized of stream.normalize({ type, data, id: "evt_fixture", created: 1 } as any)) push(normalized);
-    };
-    try {
-      await driver.prompt("What changed?");
-      publish("session.inbox.enqueued", { ...base, item: { type: "user", payload: { text: "What changed?" }, delivery: "queue" } });
-      publish("session.inbox.delivered", base);
-      publish("session.step.started", { sessionID: "ses_root", assistantMessageID: "msg_answer", model: { id: "model", providerID: "provider" } });
-      publish("session.text.ended", { sessionID: "ses_root", assistantMessageID: "msg_answer", ordinal: 0, text: "The fix." });
-      publish("session.execution.succeeded", { sessionID: "ses_root" });
-      await tick();
-      const items = sent.filter((message) => message.type === "agent:item-added");
-      expect(items.map((message) => message.item)).toMatchObject([
-        { itemId: "msg_user:0", kind: "message", role: "user", text: "What changed?", revertTarget: { messageId: "msg_user", partId: "msg_user:0" } },
-        { itemId: "msg_answer:0", kind: "message", role: "assistant", text: "The fix." },
-      ]);
-      expect(items[0]!.turnId).toBe(items[1]!.turnId);
-      expect(sent.some((message) => message.type === "agent:transcript-replay")).toBe(false);
-    } finally { await driver.dispose(); }
-  });
-
-  it("answers native forms with typed values and option values instead of labels", async () => {
-    const { driver, sent, push, calls } = await startedDriver();
-    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "MCP input", fields: [
-      { key: "count", type: "integer" }, { key: "ok", type: "boolean" },
-      { key: "choice", type: "string", options: [{ value: "stored-value", label: "Display label" }] },
-    ] } });
-    await tick();
-    const questions = sent.filter((message) => message.type === "agent:question");
-    expect(questions).toHaveLength(3);
-    for (const [index, answer] of ["3", "true", "stored-value"].entries()) driver.resolveQuestion(questions[index]!.questionId, answer);
-    await tick();
-    expect(calls.find((call) => call.m === "replyForm")?.args).toEqual(["ses_root", "form", { count: 3, ok: true, choice: "stored-value" }]);
-    await driver.dispose();
-  });
-
-  it("cancelling an external form withdraws its other fields immediately", async () => {
-    const { driver, sent, push, calls } = await startedDriver();
-    push({ type: "form.created", properties: { id: "form", sessionID: "global", title: "Authenticate", fields: [
-      { key: "login", type: "external", url: "https://example.test/login" }, { key: "extra", type: "string" },
-    ] } });
-    await tick();
-    const questions = sent.filter((message) => message.type === "agent:question");
-    driver.resolveQuestion(questions[0]!.questionId, "cancel");
-    await tick();
-    expect(calls.find((call) => call.m === "replyForm")?.args).toEqual(["global", "form", null]);
-    expect(sent.some((message) => message.type === "agent:request-retracted" && message.questionId === questions[1]!.questionId)).toBe(true);
-    await driver.dispose();
-  });
-
-  it("withdraws externally answered forms without sending a second reply", async () => {
-    const { driver, sent, push, calls } = await startedDriver();
-    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "text", type: "string" }] } });
-    await tick();
-    push({ type: "form.replied", properties: { id: "form", sessionID: "ses_root" } });
-    await tick();
-    expect(sent.some((message) => message.type === "agent:request-retracted")).toBe(true);
-    expect(calls.some((call) => call.m === "replyForm")).toBe(false);
-    await driver.dispose();
-  });
-
   it("creates a session on start()", async () => {
     const { calls } = await startedDriver();
     expect(calls.find((c) => c.m === "createSession")).toBeDefined();
@@ -212,25 +151,14 @@ describe("OpencodeDriver", () => {
     expect(added.length).toBe(2);
   });
 
-  it("a completed V2 todowrite call emits a plan item keyed plan:<turnId>", async () => {
+  it("todo.updated emits a plan item keyed plan:<turnId>", async () => {
     const { driver, sent, push } = await startedDriver();
-    const stream = new OpencodeV2Events();
-    const publish = (type: string, data: object) => {
-      for (const normalized of stream.normalize({ type, data, id: "evt_fixture", created: 1 } as any)) push(normalized);
-    };
-    try {
-      await driver.prompt("x");
-      const base = { sessionID: "ses_root", assistantMessageID: "msg_a", id: "call_1" };
-      publish("session.tool.input.started", { ...base, name: "todowrite" });
-      publish("session.tool.called", { ...base, input: { todos: [{ content: "a", status: "in_progress" }] } });
-      await tick();
-      expect(sent.some((m) => m.type === "agent:item-updated" && m.item.kind === "plan")).toBe(false);
-      publish("session.tool.success", { ...base, content: [{ type: "text", text: "Todos updated" }] });
-      await tick();
-      const plan = sent.find((m) => m.type === "agent:item-updated" && m.item.kind === "plan");
-      expect(plan).toBeDefined();
-      if (plan?.type === "agent:item-updated") expect(plan.item.entries?.[0]).toEqual({ text: "a", status: "running" });
-    } finally { await driver.dispose(); }
+    await driver.prompt("x");
+    push({ type: "todo.updated", properties: { sessionID: "ses_root", todos: [{ content: "a", status: "in_progress" }] } });
+    await tick();
+    const plan = sent.find((m) => m.type === "agent:item-updated" && m.item.kind === "plan");
+    expect(plan).toBeDefined();
+    if (plan?.type === "agent:item-updated") expect(plan.item.entries?.[0]).toEqual({ text: "a", status: "running" });
   });
 
   it("child session.created becomes a subtask anchor; child items carry parentItemId", async () => {
@@ -264,6 +192,62 @@ describe("OpencodeDriver", () => {
     expect(perm?.type).toBe("agent:permission-request");
     driver.resolvePermission("perm1", "once");
     expect(calls.find((c) => c.m === "replyPermission")?.args).toEqual(["ses_root", "perm1", "once"]);
+  });
+
+  it("question.asked emits agent:question with prompt+options; resolveQuestion replies", async () => {
+    const { driver, sent, push, calls } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "Which file?", header: "pick", options: [{ label: "a.ts", description: "first" }, { label: "b.ts", description: "second" }], multiple: false }] } });
+    await tick();
+    const q = sent.find((m) => m.type === "agent:question");
+    expect(q?.type).toBe("agent:question");
+    if (q?.type === "agent:question") {
+      expect(q.prompt).toBe("Which file?");
+      expect(q.kind).toBe("single_select");
+      expect(q.options?.map((o) => o.label)).toEqual(["a.ts", "b.ts"]);
+    }
+    driver.resolveQuestion("q1", "a.ts");
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "a.ts"]);
+  });
+
+  it("resolveQuestion translates a single option id to its label", async () => {
+    const { driver, push, calls } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
+    await tick();
+    driver.resolveQuestion("q1", "1");
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "No"]);
+  });
+
+  it("resolveQuestion translates multi-select option ids to labels element-wise", async () => {
+    const { driver, push, calls } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "files", options: [{ label: "a.ts" }, { label: "b.ts" }], multiple: true }] } });
+    await tick();
+    driver.resolveQuestion("q1", ["0", "1"]);
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", ["a.ts", "b.ts"]]);
+  });
+
+  it("resolveQuestion passes a free-form text answer through unchanged (no options)", async () => {
+    const { driver, push, calls } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "name?" }] } });
+    await tick();
+    driver.resolveQuestion("q1", "free text");
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "free text"]);
+  });
+
+  it("resolveQuestion passes a non-index value through unchanged (already a label)", async () => {
+    const { driver, push, calls } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
+    await tick();
+    driver.resolveQuestion("q1", "Yes");
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "Yes"]);
+  });
+
+  it("a question with multiple:true maps to kind multi_select", async () => {
+    const { driver, sent, push } = await startedDriver();
+    push({ type: "question.asked", properties: { id: "q2", sessionID: "ses_root", questions: [{ question: "Pick many", header: "multi", options: [{ label: "x", description: "" }], multiple: true }] } });
+    await tick();
+    const q = sent.find((m) => m.type === "agent:question");
+    expect(q).toBeDefined();
+    if (q?.type === "agent:question") expect(q.kind).toBe("multi_select");
   });
 
   // See the claude-driver equivalent. opencode aborts the whole session rather
@@ -345,20 +329,32 @@ describe("OpencodeDriver", () => {
     expect(calls.find((c) => c.m === "replyPermission")).toBeUndefined();
   });
 
+  it("ending a turn drops a still-pending question's option mapping (answer passes through)", async () => {
+    const { driver, push, calls } = await startedDriver();
+    await driver.prompt("x");
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
+    push({ type: "session.idle", properties: { sessionID: "ses_root" } }); // turn ends -> option labels cleared
+    await tick();
+    driver.resolveQuestion("q1", "1");
+    // With the mapping cleared, the index is no longer translated to "No".
+    expect(calls.find((c) => c.m === "replyQuestion")?.args).toEqual(["q1", "1"]);
+  });
+
   it("retracts pending permissions and questions when the turn ends", async () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
-    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "name", type: "string" }] } });
-    await tick();
-    const question = sent.find((m) => m.type === "agent:question");
+    // Free-text question (no options) — retractable on the same terms as one
+    // carrying options; nothing about the withdrawal depends on the option list.
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "name?" }] } });
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();
     const retracted = sent.filter((m) => m.type === "agent:request-retracted");
+    expect(retracted).toHaveLength(2);
     const ids = retracted.map((m) =>
       m.type === "agent:request-retracted" ? (m.permissionId ?? m.questionId) : "");
     expect(ids).toContain("perm1");
-    expect(ids).toContain(question?.type === "agent:question" ? question.questionId : "missing");
+    expect(ids).toContain("q1");
   });
 
   it("retracts a still-pending permission on dispose (torn down mid-turn)", async () => {
@@ -376,12 +372,10 @@ describe("OpencodeDriver", () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
-    push({ type: "form.created", properties: { id: "form", sessionID: "ses_root", title: "Input", fields: [{ key: "ok", type: "boolean" }] } });
+    push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "yn", options: [{ label: "Yes" }, { label: "No" }], multiple: false }] } });
     await tick();
-    const question = sent.find((m) => m.type === "agent:question");
     driver.resolvePermission("perm1", "once");
-    if (question?.type === "agent:question") driver.resolveQuestion(question.questionId, "true");
-    await tick();
+    driver.resolveQuestion("q1", "0");
     const before = sent.filter((m) => m.type === "agent:request-retracted").length;
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();
@@ -472,17 +466,6 @@ describe("OpencodeDriver", () => {
     expect(replays[0].frames.some((f: any) => f.type === "agent:item-added")).toBe(true);
   });
 
-  it("can resume a running backend when only the history read fails", async () => {
-    const { client, calls } = makeFakeClient({ messages: async () => { throw new Error("History unavailable"); } });
-    const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage() {} });
-    try {
-      await driver.start("ses_existing");
-      await driver.prompt("Continue");
-      expect(calls.find((call) => call.m === "prompt")?.args.slice(0, 2)).toEqual(["ses_existing", "Continue"]);
-      expect(calls.some((call) => call.m === "createSession")).toBe(false);
-    } finally { await driver.dispose(); }
-  });
-
   it("reverts conversation by deleting the selected message and following messages, then replaying history", async () => {
     const history = [
       { info: { id: "m1", role: "user" }, parts: [{ id: "p1", type: "text", messageID: "m1", text: "first" }] },
@@ -501,8 +484,9 @@ describe("OpencodeDriver", () => {
 
     await driver.revert({ messageId: "m2" });
 
-    expect(fake.calls.filter((c) => c.m === "revertMessages").map((c) => c.args)).toEqual([
+    expect(fake.calls.filter((c) => c.m === "deleteMessage").map((c) => c.args)).toEqual([
       ["ses_root", "m2"],
+      ["ses_root", "m3"],
     ]);
     expect(sent.some((m) => m.type === "agent:session-reset")).toBe(true);
   });
@@ -527,9 +511,9 @@ describe("OpencodeDriver", () => {
         fake.calls.push({ m: "messages", args: [sid] });
         return history;
       },
-      revertMessages: async (sid: string, messageId: string) => {
-        fake.calls.push({ m: "revertMessages", args: [sid, messageId] });
-        history = history.slice(0, history.findIndex((m) => m.info.id === messageId));
+      deleteMessage: async (sid: string, messageId: string) => {
+        fake.calls.push({ m: "deleteMessage", args: [sid, messageId] });
+        history = history.filter((m) => m.info.id !== messageId);
       },
     });
     const sent: AbMessage[] = [];
@@ -562,8 +546,8 @@ describe("OpencodeDriver", () => {
     let fake!: ReturnType<typeof makeFakeClient>;
     fake = makeFakeClient({
       messages: async () => history,
-      revertMessages: async (_sid: string, messageId: string) => {
-        history = history.slice(0, history.findIndex((m) => m.info.id === messageId));
+      deleteMessage: async (_sid: string, messageId: string) => {
+        history = history.filter((m) => m.info.id !== messageId);
       },
     });
     const sent: AbMessage[] = [];
@@ -638,7 +622,7 @@ describe("capabilities discovery", () => {
     expect(last.models.length).toBeGreaterThan(0);
   });
 
-  it("emits normalized commands, modes, and provider models", async () => {
+  it("emits normalized commands, modes, and connected-provider models", async () => {
     const { sent } = await startedDriver();
     await tick();
     const caps = capsOf(sent);
@@ -647,7 +631,7 @@ describe("capabilities discovery", () => {
     expect(caps.modes.map((m: any) => m.id)).toEqual(["build", "plan"]); // subagent + hidden filtered
     expect(caps.models).toEqual([
       { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", provider: "Anthropic", efforts: ["thinking"] },
-    ]);
+    ]); // openai not connected
   });
 
   it("is fail-soft when a discovery call rejects", async () => {
@@ -720,7 +704,7 @@ describe("capabilities discovery", () => {
     expect(cmd?.args[1]).toEqual({
       command: "review",
       arguments: "src/main.ts",
-      model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      model: "anthropic/claude-sonnet-5",
     });
   });
 

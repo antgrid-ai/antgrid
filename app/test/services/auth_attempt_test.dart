@@ -13,7 +13,6 @@ class MemoryAuthStorage implements AuthStorage {
   Completer<void>? clearGate;
   Completer<void>? clearing;
   bool refuse = false;
-  bool refuseClear = false;
   @override
   Future<String?> readCookie() async => cookie;
   @override
@@ -41,7 +40,6 @@ class MemoryAuthStorage implements AuthStorage {
   Future<void> clearPendingSignIn() async {
     clearing?.complete();
     if (clearGate != null) await clearGate!.future;
-    if (refuseClear) throw Exception('keychain unavailable');
     pending = null;
   }
 }
@@ -242,21 +240,6 @@ void main() {
       expect(await native(expired).handleDeepLink(callback), isFalse);
     },
   );
-
-  // Both callers drop the future: main()'s deep-link handler and the sign-in
-  // screen's discard. A keychain that won't delete must not escape as a crash.
-  test('cancelling never throws when the keychain refuses the delete', () async {
-    final storage = MemoryAuthStorage();
-    final auth = native(storage);
-    await auth.startOAuth('github');
-    storage.refuseClear = true;
-    final denied = Uri.parse(
-      'antgrid://auth/callback?flow=flow-1&error=access_denied',
-    );
-    expect(await auth.handleDeepLink(denied), isFalse);
-    await expectLater(auth.cancelAuthentication(), completes);
-    await expectLater(auth.discardPendingMagicLink(), completes);
-  });
 
   test(
     'an old callback finishing cleanup cannot clear a newer OAuth attempt',

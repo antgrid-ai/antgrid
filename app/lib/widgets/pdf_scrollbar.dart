@@ -1,7 +1,8 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../design/ab_colors.dart';
+import '../design/ab_tokens.dart';
 
 /// Scrollbar for a [PdfViewer], vertical or horizontal.
 ///
@@ -24,9 +25,9 @@ class PdfScrollbar extends StatefulWidget {
 }
 
 class _PdfScrollbarState extends State<PdfScrollbar> {
-  static const _trackWidth = CarbonSpacing.spacing06;
-  static const _thumbWidth = CarbonSpacing.spacing03;
-  static const _minThumbLength = CarbonSpacing.spacing09;
+  static const _trackWidth = 20.0;
+  static const _thumbWidth = 8.0;
+  static const _minThumbLength = 48.0;
 
   /// Thumb position in [0, 1] while a drag is in flight; null otherwise, when
   /// the thumb follows the document.
@@ -81,7 +82,7 @@ class _PdfScrollbarState extends State<PdfScrollbar> {
     double docExtent,
     double scrollRange,
   ) {
-    final c = CarbonTheme.of(context).colors;
+    final c = context.antgrid;
     final viewExtent = docExtent - scrollRange;
     final thumbLength = (trackLength * viewExtent / docExtent).clamp(
       _minThumbLength,
@@ -133,23 +134,24 @@ class _PdfScrollbarState extends State<PdfScrollbar> {
         children: [
           Positioned(
             top: _vertical ? thumbStart : null,
-            bottom: _vertical ? null : CarbonSpacing.spacing01,
+            bottom: _vertical ? null : 2,
             left: _vertical ? null : thumbStart,
-            right: _vertical ? CarbonSpacing.spacing01 : null,
+            right: _vertical ? 2 : null,
             width: _vertical ? _thumbWidth : thumbLength,
             height: _vertical ? thumbLength : _thumbWidth,
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: dragging ? c.iconPrimary : c.iconSecondary,
+                color: dragging ? c.textPrimary : c.textSecondary,
                 // Readable over the dark backdrop and over a white page alike.
-                border: Border.all(color: c.background),
+                border: Border.all(color: c.bgDeepest),
+                borderRadius: BorderRadius.circular(AbTokens.radiusFull),
               ),
             ),
           ),
           if (dragging && _vertical)
             Positioned(
-              top: thumbStart + thumbLength / 2 - CarbonSpacing.spacing04,
-              right: _trackWidth + CarbonSpacing.spacing03,
+              top: thumbStart + thumbLength / 2 - AbTokens.space12,
+              right: _trackWidth + AbTokens.space6,
               child: _PageBubble(
                 label: '${_pageAt(fraction, scrollRange)} / ${_c.pages.length}',
               ),
@@ -192,21 +194,18 @@ class _PageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final c = theme.colors;
+    final c = context.antgrid;
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: CarbonSpacing.spacing03,
-        vertical: CarbonSpacing.spacing02,
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space4,
       ),
       decoration: BoxDecoration(
-        color: c.layer01,
-        border: Border.all(color: c.borderSubtle01),
+        color: c.bgElevated,
+        border: Border.all(color: c.borderDefault),
+        borderRadius: BorderRadius.circular(AbTokens.radius5),
       ),
-      child: Text(
-        label,
-        style: theme.typography.code.copyWith(color: c.textPrimary),
-      ),
+      child: Text(label, style: AbTokens.monoStyle(color: c.textPrimary)),
     );
   }
 }

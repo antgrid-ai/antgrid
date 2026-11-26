@@ -1,4 +1,3 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -7,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../config/storage_scope.dart';
-import '../util/detached.dart';
+import '../design/widgets/ab_button.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/project_id.dart';
 import '../models/ab_project.dart';
@@ -163,17 +162,9 @@ class OpenFolderButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!_isDesktopPlatform()) return const SizedBox.shrink();
-    // Captured before the picker opens: the tap can outlive this widget.
-    final container = ref.container;
-    return CarbonButton(
-      label: 'Open folder',
-      kind: CarbonButtonKind.tertiary,
-      icon: const CarbonIcon(CarbonIcons.folderAdd),
-      onPressed: () => detached(
-        'OpenFolderButton',
-        'open folder',
-        () => openFolderPicker(container),
-      ),
+    return AbButton(
+      label: 'Open Folder',
+      onTap: () => openFolderPicker(ref.container),
     );
   }
 }

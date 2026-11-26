@@ -1,9 +1,16 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../demo/demo_identity.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
 import '../providers/demo_mode.dart';
 import '../providers/first_run.dart';
 import '../utils/platform_utils.dart';
@@ -36,6 +43,54 @@ void _latchAndMaybeComplete(WidgetRef ref, List<FirstRunStep> steps) {
   });
 }
 
+/// One line per step, terminal-native: the mono `[x]`/`[ ]` marker is data,
+/// not chrome. The first UNCHECKED step reads as a cursor (primary + medium
+/// weight) without any tutorial prose; later unchecked steps recede.
+class _FirstRunStepRow extends StatelessWidget {
+  const _FirstRunStepRow({required this.step, required this.isCursor});
+
+  final FirstRunStep step;
+
+  /// True for the first unchecked step only.
+  final bool isCursor;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.antgrid;
+    final Color labelColor;
+    if (step.done) {
+      labelColor = t.textMuted;
+    } else {
+      labelColor = isCursor ? t.textPrimary : t.textSecondary;
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          step.done ? '[x]' : '[ ]',
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: step.done ? t.statusRunning : t.textMuted,
+          ),
+        ),
+        const SizedBox(width: AbTokens.space8),
+        Expanded(
+          child: Text(
+            step.label,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: labelColor,
+              fontWeight: isCursor && !step.done
+                  ? FontWeight.w500
+                  : FontWeight.normal,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Contextual one-liner for the FIRST unchecked desktop step. Sign-in gets
 /// none — the sign-in screen owns that flow. Kept short enough to survive the
 /// sidebar's ~244px of text width without turning into a paragraph.
@@ -52,6 +107,11 @@ String? _desktopHintFor(String? firstOpenStepId) => switch (firstOpenStepId) {
         'away.',
   _ => null,
 };
+
+/// Aligns the step markers under the header's TITLE rather than its chevron:
+/// the drawer gutter plus [AbListRow]'s leading slot and the gap after it.
+const _stepIndent =
+    AbTokens.drawerGutter + AbTokens.drawerLeadingSlot + AbListRow.leadingGap;
 
 /// Desktop setup checklist, docked in the sidebar directly above `UpdateRow`
 /// and the account footer.
@@ -88,116 +148,84 @@ class FirstRunSetupSection extends ConsumerWidget {
     if (!desktopSetupSectionVisible(ref)) return const SizedBox.shrink();
     final steps = ref.watch(desktopFirstRunStepsProvider);
     _latchAndMaybeComplete(ref, steps);
-    final t = CarbonTheme.of(context);
-    final scope = CarbonSideNavScope.of(context);
+    final t = context.antgrid;
     final collapsed = ref.watch(
       firstRunProvider.select((s) => s.checklistCollapsed),
     );
     final doneCount = steps.where((s) => s.done).length;
     final firstOpen = steps.firstWhereOrNull((s) => !s.done);
     final hint = _desktopHintFor(firstOpen?.id);
-    final duration = CarbonMotion.resolve(context, CarbonMotion.fast02);
-    return DecoratedBox(
+    return Container(
       decoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(
-            color: t.borderSubtle(0),
-            width: CarbonBorders.hairline,
-          ),
-        ),
+        border: Border(top: BorderSide(color: t.borderSubtle)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            // The dismiss button centres on the drawer's trailing rail.
-            padding: EdgeInsetsDirectional.only(
-              start: scope.inset,
-              end: scope.endInset,
+            padding: const EdgeInsets.symmetric(
+              horizontal: AbTokens.drawerGutter,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: CarbonInteraction(
-                    onPressed: () => ref
-                        .read(firstRunProvider.notifier)
-                        .toggleChecklistCollapsed(),
-                    label: 'Setup · $doneCount/${steps.length}',
-                    expanded: !collapsed,
-                    excludeChildSemantics: true,
-                    builder: (context, state, _) => CarbonFocusRing(
-                      visible: state.focusVisible,
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(minHeight: t.minTarget),
-                        child: Row(
-                          children: [
-                            AnimatedRotation(
-                              turns: collapsed
-                                  ? (Directionality.of(context) ==
-                                          TextDirection.rtl
-                                      ? 0.25
-                                      : -0.25)
-                                  : 0,
-                              duration: duration,
-                              child: CarbonIcon(
-                                CarbonIcons.chevronDown,
-                                color: t.colors.iconSecondary,
-                              ),
-                            ),
-                            const SizedBox(width: CarbonSpacing.spacing03),
-                            Expanded(
-                              child: Text(
-                                'Setup · $doneCount/${steps.length}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: t.typography.heading.copyWith(
-                                  color: t.colors.textPrimary,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
+            child: AbListRow(
+              horizontalPadding: 0,
+              density: AbRowDensity.sm,
+              // No `hoverable`: a full-width fill on a docked header reads as a
+              // slab, not a row. The pointer cursor and the chevron are the
+              // affordance — this is chrome, not a list row to be picked out of
+              // its neighbours.
+              leading: AbDisclosureChevron(expanded: !collapsed),
+              // Same treatment as the drawer's PROJECTS label — this is the
+              // second group header in one column, and a section header is
+              // chrome, so sans (see the font rule in app/AGENTS.md).
+              title: Text(
+                'SETUP · $doneCount/${steps.length}',
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  letterSpacing: 1.4,
+                  fontWeight: FontWeight.w600,
+                  color: t.textMuted,
                 ),
-                CarbonButton.iconOnly(
-                  icon: const CarbonIcon(CarbonIcons.close),
-                  semanticLabel: "Dismiss — won't show again",
-                  size: CarbonButtonSize.extraSmall,
-                  onPressed: () =>
-                      ref.read(firstRunProvider.notifier).dismissChecklist(),
-                ),
-              ],
+              ),
+              trailing: AbIconButton(
+                icon: AbIcons.close,
+                tone: AbIconButtonTone.muted,
+                tooltip: "Dismiss — won't show again",
+                onTap: () =>
+                    ref.read(firstRunProvider.notifier).dismissChecklist(),
+              ),
+              onTap: () => ref
+                  .read(firstRunProvider.notifier)
+                  .toggleChecklistCollapsed(),
             ),
           ),
           if (!collapsed)
             Padding(
-              padding: EdgeInsetsDirectional.fromSTEB(
-                scope.inset,
+              padding: const EdgeInsets.fromLTRB(
+                _stepIndent,
                 0,
-                scope.endInset,
-                CarbonSpacing.spacing05,
+                AbTokens.drawerGutter,
+                AbTokens.space8,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   for (var i = 0; i < steps.length; i++) ...[
-                    if (i > 0) const SizedBox(height: CarbonSpacing.spacing03),
+                    if (i > 0) const SizedBox(height: AbTokens.space6),
                     // Compare ids, not references: record identity is
                     // unspecified in Dart (a record can be re-boxed between
                     // reads).
-                    _CarbonFirstRunStep(
+                    _FirstRunStepRow(
                       step: steps[i],
                       isCursor: steps[i].id == firstOpen?.id,
                     ),
                   ],
                   if (hint != null) ...[
-                    const SizedBox(height: CarbonSpacing.spacing03),
+                    const SizedBox(height: AbTokens.space8),
                     Text(
                       hint,
-                      style: t.typography.helper.copyWith(
-                        color: t.colors.textHelper,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXxs,
+                        color: t.textMuted,
                       ),
                     ),
                   ],
@@ -228,64 +256,12 @@ bool mobileFirstRunChecklistVisible(WidgetRef ref) =>
     !ref.watch(demoModeProvider) &&
     ref.watch(firstRunChecklistVisibleProvider);
 
-/// One step of either checklist: the first unchecked step reads as in progress
-/// and later ones as not started.
-///
-/// The label sits beside a glyph-only indicator rather than inside one because
-/// the indicator's own label is a single line, and these steps are sentences
-/// that must wrap on a phone.
-class _CarbonFirstRunStep extends StatelessWidget {
-  const _CarbonFirstRunStep({required this.step, required this.isCursor});
-
-  final FirstRunStep step;
-
-  /// True for the first unchecked step only.
-  final bool isCursor;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CarbonTheme.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        CarbonIconIndicator(
-          kind: step.done
-              ? CarbonIconIndicatorKind.succeeded
-              : (isCursor
-                    ? CarbonIconIndicatorKind.inProgress
-                    : CarbonIconIndicatorKind.notStarted),
-          // The kind is drawn, never spoken, so the state goes in the words.
-          label:
-              '${step.label}, '
-              '${step.done ? 'done' : (isCursor ? 'next' : 'not started')}',
-          compact: true,
-        ),
-        const SizedBox(width: CarbonSpacing.spacing03),
-        Expanded(
-          // The compact indicator already names the step for assistive
-          // technology.
-          child: ExcludeSemantics(
-            child: Text(
-              step.label,
-              style: t.typography.body.copyWith(
-                color: isCursor && !step.done
-                    ? t.colors.textPrimary
-                    : t.colors.textSecondary,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 /// Stays on the canvas rather than following the desktop checklist into the
 /// drawer: on mobile that drawer is a slide-in behind a hamburger, and
 /// onboarding a user has to go looking for is not onboarding.
 ///
 /// Self-gates on [mobileFirstRunChecklistVisible], so the call site stays a
-/// single stable line. Needs an `AbCarbonScope` above it.
+/// single stable line.
 class MobileFirstRunChecklist extends ConsumerWidget {
   const MobileFirstRunChecklist({super.key});
 
@@ -296,72 +272,72 @@ class MobileFirstRunChecklist extends ConsumerWidget {
     if (!mobileFirstRunChecklistVisible(ref)) return const SizedBox.shrink();
     final steps = ref.watch(mobileFirstRunStepsProvider);
     _latchAndMaybeComplete(ref, steps);
-    final t = CarbonTheme.of(context);
+    final t = context.antgrid;
     final firstOpen = steps.firstWhereOrNull((s) => !s.done);
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: CarbonSpacing.spacing06),
+        padding: const EdgeInsets.symmetric(horizontal: AbTokens.space24),
         child: ConstrainedBox(
           // Keeps step lines readable on tablets; no-op on phone widths.
           constraints: const BoxConstraints(maxWidth: 320),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CarbonIcon(
-                CarbonIcons.laptop,
-                size: CarbonSpacing.spacing07,
-                color: t.colors.iconSecondary,
-              ),
-              const SizedBox(height: CarbonSpacing.spacing04),
+              AbIcon(AbIcons.server, size: 32, color: t.textDisabled),
+              const SizedBox(height: AbTokens.space12),
               Row(
                 children: [
                   // Balance the trailing dismiss button so the title stays
                   // visually centered under the icon.
-                  SizedBox.square(dimension: t.minTarget),
+                  SizedBox(width: AbIconButton.footprintWidth(context)),
                   Expanded(
                     child: Text(
                       // Not "No machines yet": a machine may exist
                       // mid-checklist (steps 2–3 still open).
                       'Connect a machine',
-                      style: t.typography.heading.copyWith(
-                        color: t.colors.textPrimary,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: t.textPrimary,
+                        fontWeight: FontWeight.w500,
                       ),
                       textAlign: TextAlign.center,
                     ),
                   ),
-                  CarbonButton.iconOnly(
-                    icon: const CarbonIcon(CarbonIcons.close),
-                    semanticLabel: "Dismiss — won't show again",
-                    onPressed: () =>
+                  AbIconButton(
+                    icon: AbIcons.close,
+                    tooltip: "Dismiss — won't show again",
+                    onTap: () =>
                         ref.read(firstRunProvider.notifier).dismissChecklist(),
                   ),
                 ],
               ),
-              const SizedBox(height: CarbonSpacing.spacing05),
+              const SizedBox(height: AbTokens.space14),
               for (var i = 0; i < steps.length; i++) ...[
-                if (i > 0) const SizedBox(height: CarbonSpacing.spacing03),
-                _CarbonFirstRunStep(
+                if (i > 0) const SizedBox(height: AbTokens.space8),
+                _FirstRunStepRow(
                   step: steps[i],
                   isCursor: steps[i].id == firstOpen?.id,
                 ),
               ],
-              const SizedBox(height: CarbonSpacing.spacing05),
+              const SizedBox(height: AbTokens.space14),
               Text(
                 // Load-bearing: pull-to-refresh is what re-pulls the machine
                 // inventory (step 1) and dials the picker-viewed machine so
                 // its project advert lands (step 2).
                 "Pull down to refresh once you've done a step.",
-                style: t.typography.helper.copyWith(color: t.colors.textHelper),
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: t.textMuted,
+                ),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: CarbonSpacing.spacing05),
+              const SizedBox(height: AbTokens.space16),
               // Every step above needs a desktop the user may not be near. This
               // is the one thing they can do from the phone alone, so the app
               // is never a dead end while the checklist is open.
-              CarbonButton(
+              AbButton(
                 label: kDemoEntryLabel,
-                kind: CarbonButtonKind.tertiary,
-                onPressed: () => enterDemoMode(ref.container),
+                onTap: () => enterDemoMode(ref.container),
               ),
             ],
           ),

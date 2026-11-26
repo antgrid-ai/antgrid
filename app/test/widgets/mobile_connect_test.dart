@@ -113,29 +113,22 @@ void main() {
       expect(find.text('Choose a machine'), findsOneWidget);
       expect(find.text('ONLINE'), findsOneWidget);
       expect(find.text('OFFLINE'), findsOneWidget);
+      expect(find.text('REMOTE ACCESS OFF'), findsOneWidget);
       expect(find.text('last used'), findsOneWidget);
       expect(find.text('Linux · online'), findsOneWidget);
+      expect(
+        find.text('Turn on remote access on that machine to connect from here'),
+        findsOneWidget,
+      );
       // The last-used machine leads the online list.
       expect(
         tester.getTopLeft(find.text('Studio')).dy,
         lessThan(tester.getTopLeft(find.text('MacBook')).dy),
       );
-      // Remote access off: the phone could not drive it, so it is not listed.
-      expect(find.text('Desktop'), findsNothing);
-    },
-  );
-
-  testWidgets(
-    'with every machine’s remote access off, the picker says so',
-    (tester) async {
-      await pump(
-        tester,
-        machines: [_machine('Desktop', remote: false, platform: 'windows')],
+      expect(
+        find.bySemanticsLabel(RegExp(r'^Desktop, remote access off')),
+        findsOneWidget,
       );
-
-      expect(find.text('Desktop'), findsNothing);
-      expect(find.text('Remote access is off'), findsOneWidget);
-      expect(find.text('No machines yet'), findsNothing);
     },
   );
 
@@ -215,7 +208,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Switch machine'), findsOneWidget);
     expect(find.text('Connected · idle'), findsWidgets);
-    expect(find.text('Desktop'), findsNothing);
+    expect(find.text('Remote access is off on this machine'), findsOneWidget);
 
     await tester.tap(find.text('Disconnect'));
     await tester.pumpAndSettle();

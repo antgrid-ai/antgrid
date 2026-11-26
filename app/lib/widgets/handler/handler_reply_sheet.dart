@@ -1,6 +1,13 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import 'handler_why.dart';
 
@@ -8,9 +15,9 @@ Future<String?> showHandlerReplySheet(
   BuildContext context,
   HandlerEscalation escalation,
 ) {
-  return showCarbonModal<String>(
+  return showAbAdaptiveSheet<String>(
     context,
-    builder: (_) => _HandlerReplyForm(escalation: escalation),
+    child: _HandlerReplyForm(escalation: escalation),
   );
 }
 
@@ -36,64 +43,87 @@ class _HandlerReplyFormState extends State<_HandlerReplyForm> {
   @override
   Widget build(BuildContext context) {
     final e = widget.escalation;
-    final t = CarbonTheme.of(context);
-    // Approve is disabled while the field is blank: an empty answer would
-    // submit a bare Enter into the PTY (see HandlerService.reply). Rebuilds on
-    // each keystroke via the controller's own ValueListenable.
-    return ValueListenableBuilder<TextEditingValue>(
-      valueListenable: _controller,
-      builder: (context, value, _) => CarbonModal(
-        title: 'Handler needs you',
-        body: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              e.question,
-              style: t.typography.body.copyWith(
-                color: t.colors.textPrimary,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            // Behind a disclosure, exactly as on the card: the judge is told
-            // its reasoning is read afterward and never in order to answer,
-            // and this sheet is where the answer is actually composed. An
-            // always-open block here would push the field the user came for
-            // below the fold and make that promise false where it counts.
-            if (e.reasoning.trim().isNotEmpty) ...[
-              const SizedBox(height: CarbonSpacing.spacing03),
-              HandlerWhyDisclosure(escalation: e),
-            ],
-            const SizedBox(height: CarbonSpacing.spacing05),
-            if (e.floorRule != null) ...[
-              _FloorBanner(rule: e.floorRule!),
-              const SizedBox(height: CarbonSpacing.spacing03),
-            ],
-            CarbonTextInput(
-              controller: _controller,
-              variant: CarbonTextInputVariant.multiline,
-              minLines: 2,
-              maxLines: 6,
-              semanticLabel: 'Your reply',
-              placeholder: 'Your reply',
-              autofocus: true,
-            ),
-          ],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            'Handler needs you',
+            onClose: () => Navigator.pop(context),
+          ),
         ),
-        actions: [
-          CarbonModalAction(
-            label: 'Cancel',
-            kind: CarbonButtonKind.secondary,
-            onPressed: () => Navigator.pop(context),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            AbTokens.space8,
+            AbTokens.space16,
+            0,
           ),
-          CarbonModalAction(
-            label: 'Approve & send',
-            onPressed: value.text.trim().isEmpty
-                ? null
-                : () => Navigator.pop(context, _controller.text),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                e.question,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontBody,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              // Behind a disclosure, exactly as on the card: the judge is told
+              // its reasoning is read afterward and never in order to answer,
+              // and this sheet is where the answer is actually composed. An
+              // always-open block here would push the field the user came for
+              // below the fold and make that promise false where it counts.
+              if (e.reasoning.trim().isNotEmpty) ...[
+                const SizedBox(height: AbTokens.space8),
+                HandlerWhyDisclosure(escalation: e),
+              ],
+              const SizedBox(height: AbTokens.space12),
+              if (e.floorRule != null) ...[
+                _FloorBanner(rule: e.floorRule!),
+                const SizedBox(height: AbTokens.space8),
+              ],
+              AbTextField(
+                controller: _controller,
+                hintText: 'Your reply',
+                autofocus: true,
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+        const SizedBox(height: AbTokens.space16),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            0,
+            AbTokens.space16,
+            AbTokens.space16,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              AbButton(label: 'Cancel', onTap: () => Navigator.pop(context)),
+              const SizedBox(width: AbTokens.space8),
+              // Disabled while the field is blank: an empty answer would submit
+              // a bare Enter into the PTY (see HandlerService.reply). Rebuilds
+              // on each keystroke via the controller's own ValueListenable.
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _controller,
+                builder: (_, value, _) => AbButton(
+                  label: 'Approve & send',
+                  variant: AbButtonVariant.primary,
+                  onTap: value.text.trim().isEmpty
+                      ? null
+                      : () => Navigator.pop(context, _controller.text),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -108,9 +138,37 @@ class _FloorBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CarbonNotification(
-      kind: CarbonNotificationKind.warning,
-      subtitle: 'Safety floor: $rule — approving sends this as YOUR reply',
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space6,
+      ),
+      decoration: BoxDecoration(
+        border: Border.all(color: p.warning),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // The same shield every other floor surface uses — the Handler tab's
+          // escalation rail and its `floor_warning` feed rows. An emoji here
+          // rendered in whatever the platform's font stack supplied, at a size
+          // and weight nothing in the design system controlled.
+          AbIcon(AbIcons.shield, size: 12, color: p.warning),
+          const SizedBox(width: AbTokens.space6),
+          Expanded(
+            child: Text(
+              'Safety floor: $rule — approving sends this as YOUR reply',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                fontWeight: FontWeight.w600,
+                color: p.warning,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

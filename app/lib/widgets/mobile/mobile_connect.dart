@@ -8,6 +8,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
@@ -25,9 +26,7 @@ import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../machine_scope_menu.dart' show machineActivityLine;
-import '../sidebar_section_label.dart';
-
-export 'connected_machine_button.dart';
+import '../project_sidebar.dart' show SidebarSectionLabel;
 
 /// The phone's canvas until it is connected: pick a machine, watch it
 /// connect, or learn why it did not.
@@ -56,9 +55,7 @@ class MobileConnectScreen extends ConsumerWidget {
   }
 }
 
-/// What to call machine [id] on the phone: the directory's name, else the
-/// inventory's, else a stand-in.
-String mobileMachineName(WidgetRef ref, String id) =>
+String _machineName(WidgetRef ref, String id) =>
     ref
         .watch(machineDirectoryProvider)
         .firstWhereOrNull((m) => m.id == id)
@@ -71,19 +68,11 @@ String mobileMachineName(WidgetRef ref, String id) =>
     'this machine';
 
 /// Machines a phone can be pointed at: never this device, which runs no
-/// bridge of its own, and never one whose remote-access switch is off — the
-/// phone could not drive it, so listing it only offers a row that does nothing.
+/// bridge of its own.
 List<MachineInfo> _remoteMachines(WidgetRef ref) => [
   for (final m in ref.watch(machineDirectoryProvider))
-    if (!m.isLocal && m.remoteAccessEnabled != false) m,
+    if (!m.isLocal) m,
 ];
-
-/// Whether the account has a machine [_remoteMachines] leaves out for its
-/// remote-access switch, so an empty picker can say why instead of
-/// "No machines yet".
-bool _anyRemoteAccessOff(WidgetRef ref) => ref
-    .watch(machineDirectoryProvider)
-    .any((m) => !m.isLocal && m.remoteAccessEnabled == false);
 
 String _offlineLine(MachineInfo m) {
   final seen = m.lastSeenAt;
@@ -112,17 +101,21 @@ class MobileMachinePicker extends ConsumerWidget {
     final rows = ref.watch(recentSessionsProvider);
     final statuses = ref.watch(recentSessionStatusesProvider);
     final machines = _remoteMachines(ref);
+    final locked = [
+      for (final m in machines)
+        if (m.remoteAccessEnabled == false) m,
+    ];
     final online =
         [
           for (final m in machines)
-            if (m.online) m,
+            if (m.online && m.remoteAccessEnabled != false) m,
         ]..sort((a, b) {
           final last = connection.lastMachineId;
           return (b.id == last ? 1 : 0) - (a.id == last ? 1 : 0);
         });
     final offline = [
       for (final m in machines)
-        if (!m.online) m,
+        if (!m.online && m.remoteAccessEnabled != false) m,
     ];
     final loading = ref.watch(accountAgentsProvider).isLoading;
     final container = ref.container;
@@ -136,13 +129,6 @@ class MobileMachinePicker extends ConsumerWidget {
             hasScrollBody: false,
             child: loading
                 ? const Center(child: AbLoading(message: 'Loading machines'))
-                : _anyRemoteAccessOff(ref)
-                ? const AbEmptyState(
-                    title: 'Remote access is off',
-                    subtitle:
-                        'Turn on remote access in Antgrid on your computer to '
-                        'connect to it from here.',
-                  )
                 : const AbEmptyState(
                     title: 'No machines yet',
                     subtitle:
@@ -188,6 +174,20 @@ class MobileMachinePicker extends ConsumerWidget {
                 key: ValueKey('pick:${m.id}'),
                 machine: m,
                 subtitle: _offlineLine(m),
+              ),
+          ],
+          if (locked.isNotEmpty) ...[
+            SidebarSectionLabel(
+              label: 'REMOTE ACCESS OFF',
+              count: locked.length,
+            ),
+            for (final m in locked)
+              MobileMachineRow(
+                key: ValueKey('pick:${m.id}'),
+                machine: m,
+                subtitle:
+                    'Turn on remote access on that machine to connect from '
+                    'here',
               ),
           ],
           const SizedBox(height: AbTokens.space16),
@@ -262,8 +262,8 @@ class MobileMachinePicker extends ConsumerWidget {
 }
 
 /// One machine in the picker or the switch sheet. Tappable only when
-/// [onTap] is given: an offline machine is listed so the user sees it is
-/// known, not missing.
+/// [onTap] is given: an offline or locked machine is listed so the user sees
+/// it is known, not missing.
 class MobileMachineRow extends StatelessWidget {
   const MobileMachineRow({
     super.key,
@@ -284,7 +284,11 @@ class MobileMachineRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = machine;
     final p = context.antgrid;
-    final state = m.online
+    final locked = m.remoteAccessEnabled == false;
+    final reachable = m.online && !locked;
+    final state = locked
+        ? 'remote access off'
+        : m.online
         ? (current ? 'connected' : 'online')
         : 'offline';
     return Semantics(
@@ -303,11 +307,13 @@ class MobileMachineRow extends StatelessWidget {
           borderRadius: AbTokens.borderRadius5,
         ),
         child: AbListRow(
-          leading: AbStatusDot(
-            tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
-            style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
-            size: AbDotSize.md,
-          ),
+          leading: locked
+              ? AbIcon(AbIcons.lock, size: AbTokens.fontLg, color: p.textMuted)
+              : AbStatusDot(
+                  tone: m.online ? AbStatusTone.success : AbStatusTone.disabled,
+                  style: m.online ? AbDotStyle.filled : AbDotStyle.hollow,
+                  size: AbDotSize.md,
+                ),
           title: Row(
             children: [
               Flexible(
@@ -316,7 +322,7 @@ class MobileMachineRow extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: AbTokens.monoStyle(
                     fontSize: AbTokens.fontBody,
-                    color: m.online ? p.textPrimary : p.textMuted,
+                    color: reachable ? p.textPrimary : p.textMuted,
                   ),
                 ),
               ),
@@ -411,7 +417,7 @@ class _MobileConnectingState extends ConsumerState<MobileConnecting> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    final name = mobileMachineName(ref, widget.machineId);
+    final name = _machineName(ref, widget.machineId);
     // Known to this phone already counts: a machine picked from the list was
     // found before the tap, and a restored one may beat the inventory read.
     final found =
@@ -527,19 +533,15 @@ class _Step extends StatelessWidget {
               child: Center(child: glyph),
             ),
             const SizedBox(width: AbTokens.space10),
-            // Flexible: a step names the machine, and a long name on a narrow
-            // phone must wrap rather than run off the screen.
-            Flexible(
-              child: Text(
-                label,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: switch (state) {
-                    _StepState.done => p.textSecondary,
-                    _StepState.active => p.textPrimary,
-                    _StepState.pending => p.textMuted,
-                  },
-                ),
+            Text(
+              label,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontMd,
+                color: switch (state) {
+                  _StepState.done => p.textSecondary,
+                  _StepState.active => p.textPrimary,
+                  _StepState.pending => p.textMuted,
+                },
               ),
             ),
           ],
@@ -577,7 +579,7 @@ class MobileConnectFailed extends ConsumerWidget {
         const SizedBox(height: AbTokens.space14),
         _Title(
           lead: 'Couldn’t connect to ',
-          name: mobileMachineName(ref, machineId),
+          name: _machineName(ref, machineId),
         ),
         const SizedBox(height: AbTokens.space10),
         Text(
@@ -671,6 +673,70 @@ class _Title extends StatelessWidget {
   }
 }
 
+/// The connected machine, heading the phone's home. Opens
+/// [SwitchMachineSheet].
+class ConnectedMachineButton extends ConsumerWidget {
+  const ConnectedMachineButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.antgrid;
+    final id = ref.watch(mobileConnectionProvider.select((c) => c.machineId));
+    if (id == null) return const SizedBox.shrink();
+    final machine = ref
+        .watch(machineDirectoryProvider)
+        .firstWhereOrNull((m) => m.id == id);
+    final name = _machineName(ref, id);
+    final activity = machine == null
+        ? null
+        : machineActivityLine(
+            machine,
+            ref.watch(recentSessionsProvider),
+            ref.watch(recentSessionStatusesProvider),
+          );
+    final line = 'Connected · ${activity ?? 'idle'}';
+    return Semantics(
+      button: true,
+      label: 'Connected to $name, ${activity ?? 'idle'}. Switch machine',
+      excludeSemantics: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: p.borderDefault),
+          borderRadius: AbTokens.borderRadius5,
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: AbTokens.tapTargetMin),
+          child: AbListRow(
+            leading: const AbStatusDot(
+              tone: AbStatusTone.success,
+              size: AbDotSize.md,
+            ),
+            title: Text(
+              name,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontMd,
+                color: p.textPrimary,
+              ),
+            ),
+            subtitle: Text(line),
+            trailing: AbIcon(
+              AbIcons.chevronDown,
+              size: AbTokens.fontSm,
+              color: p.textMuted,
+            ),
+            density: AbRowDensity.sm,
+            horizontalPadding: AbTokens.space10,
+            onTap: () => showAbAdaptiveSheet<void>(
+              context,
+              child: const SwitchMachineSheet(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class SwitchMachineSheet extends ConsumerWidget {
   const SwitchMachineSheet({super.key});
 
@@ -687,6 +753,9 @@ class SwitchMachineSheet extends ConsumerWidget {
     void close() => Navigator.of(context).pop();
 
     String subtitleFor(MachineInfo m) {
+      if (m.remoteAccessEnabled == false) {
+        return 'Remote access is off on this machine';
+      }
       if (!m.online) return _offlineLine(m);
       final activity = machineActivityLine(m, rows, statuses) ?? 'idle';
       return m.id == current ? 'Connected · $activity' : 'Online · $activity';
@@ -694,11 +763,11 @@ class SwitchMachineSheet extends ConsumerWidget {
 
     final reachable = [
       for (final m in machines)
-        if (m.online) m,
+        if (m.online && m.remoteAccessEnabled != false) m,
     ];
     final unreachable = [
       for (final m in machines)
-        if (!m.online) m,
+        if (!m.online || m.remoteAccessEnabled == false) m,
     ];
 
     return SafeArea(

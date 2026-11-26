@@ -1,14 +1,8 @@
-import 'dart:ui' show Tristate;
-
-import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/models/search_models.dart';
-import 'package:antgrid/widgets/search_result_list.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../helpers/carbon_guard.dart';
+import 'package:antgrid/models/search_models.dart';
+import 'package:antgrid/widgets/search_result_list.dart';
 
 SearchMatch _match(
   int line, {
@@ -27,22 +21,18 @@ Widget _host(
   String query = 'needle',
   bool isRegex = false,
   bool caseSensitive = false,
-  Key? key,
   void Function(String, int, int)? onMatchTap,
 }) => MaterialApp(
   home: Scaffold(
-    body: AbCarbonScope(
-      child: SizedBox(
-        width: 480,
-        height: 400,
-        child: SearchResultList(
-          key: key,
-          results: results,
-          query: query,
-          isRegex: isRegex,
-          caseSensitive: caseSensitive,
-          onMatchTap: onMatchTap ?? (_, _, _) {},
-        ),
+    body: SizedBox(
+      width: 480,
+      height: 400,
+      child: SearchResultList(
+        results: results,
+        query: query,
+        isRegex: isRegex,
+        caseSensitive: caseSensitive,
+        onMatchTap: onMatchTap ?? (_, _, _) {},
       ),
     ),
   ),
@@ -81,8 +71,8 @@ void main() {
     expect(find.text('1001'), findsOneWidget);
     expect(last, findsNothing);
 
-    // The rows share one extent, so one jump to the end lands on it; the loop
-    // only tolerates a build that needs another frame to settle.
+    // The extent is estimated from the rows built so far, so one jump to it
+    // can land short of the end.
     final position = tester
         .state<ScrollableState>(find.byType(Scrollable))
         .position;
@@ -106,17 +96,6 @@ void main() {
     }
   });
 
-  testWidgets('a file shows its folder beside its name', (tester) async {
-    await tester.pumpWidget(
-      _host([
-        SearchFileGroup(path: 'src/lib/money.ts', matches: [_match(18)]),
-      ]),
-    );
-
-    expect(find.text('money.ts'), findsOneWidget);
-    expect(find.text('src/lib'), findsOneWidget);
-  });
-
   testWidgets('a collapsed file keeps its match count and stays collapsed as '
       'more matches stream in, and expanding restores its rows', (
     tester,
@@ -133,27 +112,15 @@ void main() {
     expect(find.text('101'), findsNothing);
     expect(find.text('102'), findsNothing);
     expect(find.text('2'), findsOneWidget);
+    expect(find.text('▶'), findsOneWidget);
     expect(find.text('203'), findsOneWidget);
 
     await tester.tap(find.text('a.dart'));
     await tester.pump();
     expect(find.text('101'), findsOneWidget);
     expect(find.text('102'), findsOneWidget);
-  });
-
-  testWidgets('a header announces whether its file is open', (tester) async {
-    final handle = tester.ensureSemantics();
-    await tester.pumpWidget(_host(_twoFiles()));
-
-    SemanticsData header() => tester
-        .getSemantics(find.bySemanticsLabel('a.dart, 2 matches'))
-        .getSemanticsData();
-    expect(header().flagsCollection.isExpanded, Tristate.isTrue);
-
-    await tester.tap(find.text('a.dart'));
-    await tester.pump();
-    expect(header().flagsCollection.isExpanded, Tristate.isFalse);
-    handle.dispose();
+    expect(find.text('▶'), findsNothing);
+    expect(find.text('▼'), findsNWidgets(2));
   });
 
   testWidgets('tapping a match row reports its file, line and column', (
@@ -171,28 +138,6 @@ void main() {
     await tester.tap(find.text('b.dart'));
     await tester.pump();
     expect(calls, hasLength(1));
-  });
-
-  testWidgets('arrow keys and Enter open a match from the keyboard', (
-    tester,
-  ) async {
-    final calls = <(String, int, int)>[];
-    await tester.pumpWidget(
-      _host(_twoFiles(), onMatchTap: (p, l, c) => calls.add((p, l, c))),
-    );
-
-    // Tapping the first header focuses the tree and folds it; reopen it, then
-    // walk down to its first match.
-    await tester.tap(find.text('a.dart'));
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-
-    expect(calls, [('a.dart', 101, 1)]);
   });
 
   testWidgets('a case-insensitive search highlights every occurrence in the '
@@ -216,39 +161,5 @@ void main() {
       );
       expect(_highlights(tester, line), expected, reason: 'query $query');
     }
-  });
-
-  testWidgets('the scroll position survives leaving the list and returning', (
-    tester,
-  ) async {
-    final results = [
-      SearchFileGroup(
-        path: 'big.txt',
-        matches: [for (var i = 1; i <= 100; i++) _match(1000 + i)],
-      ),
-    ];
-    const key = PageStorageKey<String>('results');
-    await tester.pumpWidget(_host(results, key: key));
-    tester
-        .state<ScrollableState>(find.byType(Scrollable))
-        .position
-        .jumpTo(480);
-    await tester.pump();
-
-    await tester.pumpWidget(
-      const MaterialApp(home: Scaffold(body: SizedBox.shrink())),
-    );
-    await tester.pumpWidget(_host(results, key: key));
-
-    expect(
-      tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels,
-      480,
-    );
-  });
-
-  testWidgets('no Ab widget sits under the scope', (tester) async {
-    await tester.pumpWidget(_host(_twoFiles()));
-
-    expect(abWidgetsInScope(tester), isEmpty);
   });
 }

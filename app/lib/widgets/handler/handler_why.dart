@@ -1,6 +1,8 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../design/ab_colors.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_disclosure.dart';
 import '../../models/handler_state.dart';
 
 /// Label on the disclosure that hides [HandlerEscalation.reasoning] until
@@ -37,39 +39,50 @@ bool handlerWhyOpenByDefault(HandlerEscalation e) =>
 /// where it matters most: that is where the user actually composes the answer
 /// the question above is asking for.
 ///
-/// The accordion item is keyed by escalation id so the one recycling rule lives
-/// here: the card renders this through an element reused by position in a list,
-/// and a card that scrolled onto a different escalation must remount closed
-/// (or open, for the fallback question) rather than inherit the last one's
-/// state. A remount also skips the open animation a toggle would play.
+/// Owns its expanded state, unlike the [AbDisclosure] it wraps, so the one
+/// recycling rule lives in one place: the card renders this through a `State`
+/// reused by position in a list, and a card that scrolled onto a different
+/// escalation must not open on that one's reasoning.
 ///
 /// Callers still test [HandlerEscalation.reasoning] for emptiness themselves —
 /// they own the gap that would otherwise be left above an absent row.
-class HandlerWhyDisclosure extends StatelessWidget {
+class HandlerWhyDisclosure extends StatefulWidget {
   const HandlerWhyDisclosure({super.key, required this.escalation});
 
   final HandlerEscalation escalation;
 
   @override
+  State<HandlerWhyDisclosure> createState() => _HandlerWhyDisclosureState();
+}
+
+class _HandlerWhyDisclosureState extends State<HandlerWhyDisclosure> {
+  late bool _expanded = handlerWhyOpenByDefault(widget.escalation);
+
+  @override
+  void didUpdateWidget(HandlerWhyDisclosure oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.escalation.escalationId !=
+        widget.escalation.escalationId) {
+      _expanded = handlerWhyOpenByDefault(widget.escalation);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    return CarbonAccordion(
-      flush: true,
-      size: CarbonAccordionSize.small,
-      align: CarbonAccordionAlign.start,
-      children: [
-        CarbonAccordionItem(
-          key: ValueKey(escalation.escalationId),
-          initiallyOpen: handlerWhyOpenByDefault(escalation),
-          title: const Text(handlerWhyLabel),
-          child: Text(
-            escalation.reasoning,
-            style: theme.typography.body.copyWith(
-              color: theme.colors.textSecondary,
-            ),
-          ),
+    final p = context.antgrid;
+    return AbDisclosure(
+      label: handlerWhyLabel,
+      expanded: _expanded,
+      onToggle: () => setState(() => _expanded = !_expanded),
+      // A step up from the collapsed row's own size: this is prose the user
+      // asked to see, not a caption they are meant to skim past.
+      child: Text(
+        widget.escalation.reasoning,
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontSm,
+          color: p.textMuted,
         ),
-      ],
+      ),
     );
   }
 }

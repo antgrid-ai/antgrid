@@ -1,13 +1,12 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../design/ab_carbon.dart';
 import '../design/ab_status_tone.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../project/checkout_readiness.dart';
 import '../providers/checkout_readiness.dart';
 import 'ab_status_helpers.dart';
-import 'carbon_status_dot.dart';
 
 /// Always-visible counterpart to the boot screen's phases and the pane-level
 /// hydration strip, which are both transient: without this, "is the checkout
@@ -34,48 +33,33 @@ class WorkspaceReadinessChip extends ConsumerWidget {
     }
 
     final (tone, label) = readinessDisplayInfo(readiness);
+    final color = tone.color(context);
 
-    return AbCarbonScope(
-      child: Padding(
-        padding: const EdgeInsetsDirectional.only(
-          start: CarbonSpacing.spacing03,
-        ),
-        // Medium, not small: a small tag does not draw its leading glyph.
-        child: CarbonTag(
-          label: label,
-          color: _tagColor(tone),
-          icon: _ToneDot(tone: tone),
-        ),
+    return Container(
+      height: AbTokens.iconButtonBox,
+      margin: const EdgeInsets.only(left: AbTokens.space6),
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space6),
+      decoration: BoxDecoration(
+        color: color.withAlpha(26),
+        borderRadius: AbTokens.borderRadius3,
+        border: Border.all(color: color.withAlpha(90)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbStatusDot(tone: tone, size: AbDotSize.sm),
+          const SizedBox(width: AbTokens.space6),
+          Text(
+            label,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              fontWeight: FontWeight.w500,
+              color: color,
+              height: 1.0,
+            ),
+          ),
+        ],
       ),
     );
-  }
-}
-
-CarbonTagColor _tagColor(AbStatusTone tone) => switch (tone) {
-  AbStatusTone.danger => CarbonTagColor.red,
-  AbStatusTone.success => CarbonTagColor.green,
-  AbStatusTone.info => CarbonTagColor.blue,
-  AbStatusTone.warning => CarbonTagColor.warmGray,
-  _ => CarbonTagColor.gray,
-};
-
-/// The tag's glyph. Drawn in the tone's support colour because a tag's own
-/// palette has no way to carry one.
-class _ToneDot extends StatelessWidget {
-  const _ToneDot({required this.tone});
-
-  final AbStatusTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = CarbonTheme.of(context).colors;
-    final color = switch (tone) {
-      AbStatusTone.danger => c.supportError,
-      AbStatusTone.success => c.supportSuccess,
-      AbStatusTone.info => c.supportInfo,
-      AbStatusTone.warning => c.supportWarning,
-      _ => c.iconDisabled,
-    };
-    return CarbonStatusDot(key: const Key('readiness-dot'), color: color);
   }
 }

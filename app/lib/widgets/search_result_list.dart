@@ -1,10 +1,9 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
+import '../design/ab_tokens.dart';
+import '../design/ab_colors.dart';
 import '../models/search_models.dart';
 
-/// Content-search results as a tree: a file is a branch that folds, a match is
-/// a leaf. Only for use inside an `AbCarbonScope`.
 class SearchResultList extends StatefulWidget {
   final List<SearchFileGroup> results;
   final String query;
@@ -27,36 +26,13 @@ class SearchResultList extends StatefulWidget {
 
 class _SearchResultListState extends State<SearchResultList> {
   final Set<String> _collapsedFiles = {};
-  late final ScrollController _scroll;
 
   // The flat rows depend only on the results list and which files are
   // collapsed, so a parent rebuild must not reallocate one item per match.
   List<_ResultRow> _rows = const [];
-  Map<String, SearchFileGroup> _groups = const {};
   List<SearchFileGroup>? _rowsSource;
   int _collapseVersion = 0;
   int _rowsVersion = -1;
-
-  @override
-  void initState() {
-    super.initState();
-    // A tree has no PageStorageKey of its own to restore a scroll with, and a
-    // list left for a file and returned to must come back where it was.
-    final saved = PageStorage.maybeOf(context)?.readState(context);
-    _scroll = ScrollController(initialScrollOffset: saved is double ? saved : 0)
-      ..addListener(_saveOffset);
-  }
-
-  void _saveOffset() {
-    if (!mounted || !_scroll.hasClients) return;
-    PageStorage.maybeOf(context)?.writeState(context, _scroll.offset);
-  }
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
 
   @override
   void reassemble() {
@@ -70,32 +46,16 @@ class _SearchResultListState extends State<SearchResultList> {
       return _rows;
     }
     final rows = <_ResultRow>[];
-    final groups = <String, SearchFileGroup>{};
     for (final group in widget.results) {
-      groups[group.path] = group;
       rows.add(_HeaderItem(group));
       if (_collapsedFiles.contains(group.path)) continue;
-      for (var i = 0; i < group.matches.length; i++) {
-        rows.add(_MatchItem(group, group.matches[i], i));
+      for (final match in group.matches) {
+        rows.add(_MatchItem(group, match));
       }
     }
     _rowsSource = widget.results;
     _rowsVersion = _collapseVersion;
-    _groups = groups;
     return _rows = rows;
-  }
-
-  void _toggle(String path) {
-    setState(() {
-      _collapseVersion++;
-      if (!_collapsedFiles.remove(path)) _collapsedFiles.add(path);
-    });
-  }
-
-  void _openMatch(String path, int index) {
-    final match = _groups[path]?.matches[index];
-    if (match == null) return;
-    widget.onMatchTap(path, match.line, match.column);
   }
 
   @override
@@ -105,46 +65,86 @@ class _SearchResultListState extends State<SearchResultList> {
         ? widget.query
         : widget.query.toLowerCase();
 
-    return CarbonTreeView(
-      controller: _scroll,
-      semanticLabel: 'Search results',
+    return ListView.builder(
+      key: const PageStorageKey('search_results'),
       itemCount: rows.length,
       itemBuilder: (context, index) => switch (rows[index]) {
-        _HeaderItem(:final group) => CarbonTreeNodeData(
-          id: ('file', group.path),
-          label: group.path,
-          semanticLabel: '${group.path}, ${group.matches.length} matches',
-          isBranch: true,
-          expanded: !_collapsedFiles.contains(group.path),
-          content: _FileLabel(path: group.path),
-          trailing: CarbonTag(
-            label: '${group.matches.length}',
-            size: CarbonTagSize.small,
+        _HeaderItem(:final group) => _buildFileHeader(context, group),
+        _MatchItem(:final group, :final match) => _MatchRow(
+          match: match,
+          query: widget.query,
+          highlightQuery: highlightQuery,
+          isRegex: widget.isRegex,
+          caseSensitive: widget.caseSensitive,
+          filePath: group.path,
+          onTap: () => widget.onMatchTap(group.path, match.line, match.column),
+        ),
+      },
+    );
+  }
+
+  Widget _buildFileHeader(BuildContext context, SearchFileGroup group) {
+    final isCollapsed = _collapsedFiles.contains(group.path);
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _collapseVersion++;
+          if (isCollapsed) {
+            _collapsedFiles.remove(group.path);
+          } else {
+            _collapsedFiles.add(group.path);
+          }
+        });
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: AbTokens.space6,
+          ),
+          color: context.antgrid.bgDeep,
+          child: Row(
+            children: [
+              Text(
+                isCollapsed ? '\u25B6' : '\u25BC',
+                style: TextStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: context.antgrid.iconMuted,
+                ),
+              ),
+              const SizedBox(width: AbTokens.space6),
+              Expanded(
+                child: Text(
+                  group.path,
+                  style: AbTokens.monoStyle(
+                    fontWeight: FontWeight.w600,
+                    color: context.antgrid.textSecondary,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space6,
+                  vertical: 1,
+                ), // 1px badge inset
+                decoration: BoxDecoration(
+                  color: context.antgrid.bgElevated,
+                  borderRadius: AbTokens.borderRadius3,
+                ),
+                child: Text(
+                  '${group.matches.length}',
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-        _MatchItem(:final group, :final match, :final index) =>
-          CarbonTreeNodeData(
-            id: ('match', group.path, index),
-            label: match.lineContent,
-            semanticLabel: 'Line ${match.line}: ${match.lineContent}',
-            depth: 1,
-            content: _MatchLine(
-              match: match,
-              query: widget.query,
-              highlightQuery: highlightQuery,
-              isRegex: widget.isRegex,
-              caseSensitive: widget.caseSensitive,
-            ),
-          ),
-      },
-      onToggle: (id) {
-        if (id case ('file', final String path)) _toggle(path);
-      },
-      onActivate: (id) {
-        if (id case ('match', final String path, final int index)) {
-          _openMatch(path, index);
-        }
-      },
+      ),
     );
   }
 }
@@ -162,60 +162,11 @@ class _HeaderItem extends _ResultRow {
 }
 
 class _MatchItem extends _ResultRow {
-  const _MatchItem(super.group, this.match, this.index);
+  const _MatchItem(super.group, this.match);
   final SearchMatch match;
-
-  /// Position within the group's matches; with the path it names the match.
-  final int index;
 }
 
-/// The file's name with the folder it sits in beside it, muted: with matches
-/// from many folders, the name alone does not say which file a row is.
-class _FileLabel extends StatelessWidget {
-  const _FileLabel({required this.path});
-
-  final String path;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final inherited = DefaultTextStyle.of(context).style;
-    final slash = path.lastIndexOf('/');
-    final name = slash < 0 ? path : path.substring(slash + 1);
-    final folder = slash < 0 ? '' : path.substring(0, slash);
-    final code = theme.typography.code;
-    return Row(
-      children: [
-        Flexible(
-          child: Text(
-            name,
-            maxLines: 1,
-            softWrap: false,
-            overflow: TextOverflow.ellipsis,
-            style: code.copyWith(
-              color: inherited.color,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-        if (folder.isNotEmpty) ...[
-          const SizedBox(width: CarbonSpacing.spacing03),
-          Flexible(
-            child: Text(
-              folder,
-              maxLines: 1,
-              softWrap: false,
-              overflow: TextOverflow.ellipsis,
-              style: code.copyWith(color: theme.colors.textPlaceholder),
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _MatchLine extends StatelessWidget {
+class _MatchRow extends StatelessWidget {
   final SearchMatch match;
   final String query;
 
@@ -225,46 +176,60 @@ class _MatchLine extends StatelessWidget {
   final String highlightQuery;
   final bool isRegex;
   final bool caseSensitive;
+  final String filePath;
+  final VoidCallback onTap;
 
-  const _MatchLine({
+  const _MatchRow({
     required this.match,
     required this.query,
     required this.highlightQuery,
     required this.isRegex,
-    required this.caseSensitive,
+    this.caseSensitive = false,
+    required this.filePath,
+    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final theme = CarbonTheme.of(context);
-    final colors = theme.colors;
-    final inherited = DefaultTextStyle.of(context).style;
-    final base = theme.typography.code.copyWith(color: inherited.color);
-    return Row(
-      children: [
-        SizedBox(
-          width: CarbonSpacing.spacing09,
-          child: Text(
-            '${match.line}',
-            style: base.copyWith(color: colors.textPlaceholder),
-            textAlign: TextAlign.right,
-            maxLines: 1,
+    return GestureDetector(
+      onTap: onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: 3,
+          ), // 3px row inset
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 48,
+                child: Text(
+                  '${match.line}',
+                  style: AbTokens.monoStyle(color: context.antgrid.textMuted),
+                  textAlign: TextAlign.right,
+                ),
+              ),
+              const SizedBox(width: AbTokens.space8),
+              Expanded(
+                child: _buildHighlightedLine(context, match.lineContent),
+              ),
+            ],
           ),
         ),
-        const SizedBox(width: CarbonSpacing.spacing03),
-        Expanded(child: _highlighted(base, colors)),
-      ],
+      ),
     );
   }
 
-  Widget _highlighted(TextStyle base, CarbonColors colors) {
-    final line = match.lineContent;
+  Widget _buildHighlightedLine(BuildContext context, String line) {
+    final baseStyle = AbTokens.monoStyle();
+
     if (query.isEmpty || isRegex) {
       return Text(
         line,
-        style: base,
+        style: baseStyle,
         maxLines: 1,
-        softWrap: false,
         overflow: TextOverflow.ellipsis,
       );
     }
@@ -286,8 +251,9 @@ class _MatchLine extends StatelessWidget {
         TextSpan(
           text: line.substring(index, index + query.length),
           style: TextStyle(
-            backgroundColor: colors.highlight,
+            backgroundColor: context.antgrid.accent.withValues(alpha: 0.3),
             fontWeight: FontWeight.w700,
+            color: context.antgrid.accent,
           ),
         ),
       );
@@ -295,9 +261,8 @@ class _MatchLine extends StatelessWidget {
     }
 
     return RichText(
-      text: TextSpan(style: base, children: spans),
+      text: TextSpan(style: baseStyle, children: spans),
       maxLines: 1,
-      softWrap: false,
       overflow: TextOverflow.ellipsis,
     );
   }

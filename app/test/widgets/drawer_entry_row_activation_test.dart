@@ -1,5 +1,3 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -262,26 +260,15 @@ void main() {
       ProviderScope(
         overrides: stores.overrides,
         child: MaterialApp(
-          home: AbCarbonScope(
-            child: Scaffold(
-              body: DrawerRemoveButton(entry: RemoteAgentEntry(recent)),
-            ),
+          home: Scaffold(
+            body: DrawerRemoveButton(entry: RemoteAgentEntry(recent)),
           ),
         ),
       ),
     );
     await tester.pump();
 
-    await tester.tap(
-      find.byWidgetPredicate(
-        (w) =>
-            w is CarbonOverflowMenu &&
-            w.semanticLabel ==
-                'Actions for ${RemoteAgentEntry(recent).displayName}',
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Forget agent'));
+    await tester.tap(find.byTooltip('Forget agent'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Forget'));
     await tester.pump();

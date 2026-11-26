@@ -10,7 +10,6 @@ import 'package:antgrid/services/preview_service.dart';
 import 'package:antgrid/services/preview_site_data.dart';
 import 'package:antgrid/storage/preview_origin_owner_store.dart';
 import 'package:flutter/foundation.dart';
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -90,13 +89,8 @@ void main() {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
   }
 
-  final moreButton = find.byWidgetPredicate(
-    (w) => w is CarbonOverflowMenu && w.semanticLabel == 'More',
-    description: 'CarbonOverflowMenu "More"',
-  );
-
   Future<void> openClearItem(WidgetTester tester) async {
-    await tester.tap(moreButton);
+    await tester.tap(find.byTooltip('More'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('Clear site data'));
@@ -189,20 +183,20 @@ void main() {
     final rig = await boot(tester);
     await mount(tester, rig.container, rig.preview);
 
-    await tester.tap(moreButton);
+    await tester.tap(find.byTooltip('More'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Open in browser'), findsOneWidget);
+    expect(find.text('Refresh'), findsOneWidget);
     await tester.tap(find.text('Clear site data'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Clear site data?'), findsOneWidget);
-    expect(find.text('Open in browser'), findsNothing);
+    expect(find.text('Refresh'), findsNothing);
     await confirm(tester);
 
     expect(recorder.calls, 1);
-    expect(find.text('Open in browser'), findsNothing);
+    expect(find.text('Refresh'), findsNothing);
     expect(find.text('Preview site data cleared'), findsOneWidget);
     await tester.pump(const Duration(seconds: 10));
   });

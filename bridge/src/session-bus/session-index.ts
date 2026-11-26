@@ -58,17 +58,10 @@ export interface SessionBusSessionIndexDeps {
 export class SessionBusSessionIndex {
   private readonly labels = new Map<string, string | undefined>();
   private readonly disk = new Map<string, ReadonlyMap<string, SessionEntry>>();
-  private didHydrate = false;
+  private hydrated = false;
   private warnedBeforeHydrate = false;
 
   constructor(private readonly deps: SessionBusSessionIndexDeps) {}
-
-  /** Whether startup hydrate has finished. A `lookup` miss before it is timing,
-   *  not an unknown id, so a caller that would turn a miss into a terminal answer
-   *  must wait on this first. */
-  get hydrated(): boolean {
-    return this.didHydrate;
-  }
 
   /**
    * Seed the disk-fallback half from every project this machine has ever
@@ -81,7 +74,7 @@ export class SessionBusSessionIndex {
       const entries = await SessionManager.readPersisted(abDir, project.id, true);
       this.noteProject(project.id, project.label, entries);
     }
-    this.didHydrate = true;
+    this.hydrated = true;
   }
 
   /**
@@ -186,7 +179,7 @@ export class SessionBusSessionIndex {
     // A miss before hydrate() finishes reads identically to a genuine unknown
     // id, so it earns its own line once: without it, a bug report from the
     // startup window points at the wrong half of this class.
-    if (!this.didHydrate && !this.warnedBeforeHydrate) {
+    if (!this.hydrated && !this.warnedBeforeHydrate) {
       this.warnedBeforeHydrate = true;
       log.warn("session-bus: session index queried before startup hydrate finished — a miss here may just be timing, not a real addressing bug");
     }

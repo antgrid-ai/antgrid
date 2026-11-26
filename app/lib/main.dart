@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
-import 'package:carbon_flutter/carbon_flutter.dart' show CarbonLicenses;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     show FlutterLocalNotificationsPlugin;
@@ -140,7 +139,6 @@ Future<void> main() async {
       'JetBrains Mono NL',
     ], await rootBundle.loadString('assets/fonts/OFL.txt'));
   });
-  CarbonLicenses.register();
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(const [
       'Antgrid',
@@ -198,11 +196,6 @@ Future<void> main() async {
     MachineScopeStore.open(),
     MobileMachineStore.open(),
   ).wait;
-  await settleFollowSystemDefault(
-    prefs,
-    hasPriorUse: () =>
-        projectStore.list().isNotEmpty || recentAgentsStore.list().isNotEmpty,
-  );
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
   // Consumed unconditionally, never behind Windows' `--after-update` argument:
@@ -367,16 +360,6 @@ Future<void> main() async {
         }),
       );
     });
-    // (e) A handshake whose keypair read failed (a locked iPhone) waits for the
-    // next one; the foreground is when the keychain is readable again. Held
-    // for the app's lifetime, like the stats listener above.
-    AppLifecycleListener(
-      onResume: () => detached(
-        'Main',
-        'push retry on resume failed',
-        () => pushService.retryUnregistered(warmSessions()),
-      ),
-    );
     unawaited(
       pushService.init(sessions: warmSessions).catchError((Object e) {
         AbLog.error(
@@ -417,15 +400,7 @@ Future<void> main() async {
   }
 
   // Subscribe for in-flight links while the app is running.
-  appLinks.uriLinkStream.listen(
-    (uri) => detached('Main', 'deep link failed', () => handleLink(uri)),
-    // An EventChannel error event; without a handler it lands as a crash.
-    onError: (Object error) => AbLog.warn(
-      'Main',
-      'deep link stream error',
-      fields: {'error': '$error'},
-    ),
-  );
+  appLinks.uriLinkStream.listen((uri) => unawaited(handleLink(uri)));
 
   // The one place a tapped notification is turned into a navigation, whichever
   // surface delivered it. No context: an OS-level tap has no widget behind it,
@@ -486,11 +461,7 @@ Future<void> main() async {
   // redemption), so awaiting it before runApp would stall launch on a slow or
   // half-open connection. It's best-effort and invalidates currentUserProvider
   // when it completes, so the UI updates as soon as the session lands.
-  detached(
-    'Main',
-    'cold-start deep link failed',
-    () async => handleLink(await appLinks.getInitialLink()),
-  );
+  unawaited(appLinks.getInitialLink().then(handleLink));
 
   // The notification that launched a terminated app. Each source is read
   // EXACTLY once, because none of them is drained by the read: push's
@@ -604,16 +575,22 @@ TextScaler composedTextScalerFor({
   return TextScaler.linear(composed.toDouble());
 }
 
-/// Palette rendered under [platformBrightness]: [chosen], unless follow-system
-/// substitutes a preset for it (see [renderedPreset]).
+/// Palette actually rendered, after the follow-system-brightness setting.
+/// When enabled: OS-light renders the `light` preset; OS-dark renders the
+/// user's chosen preset — unless that chosen preset IS light, which would
+/// blind in a dark room, so it falls back to the default dark palette.
+/// When disabled the chosen palette passes through untouched.
 @visibleForTesting
 AbColors effectivePaletteFor({
   required AppSettings settings,
   required AbColors chosen,
   required Brightness platformBrightness,
 }) {
-  final rendered = renderedPreset(settings, platformBrightness);
-  return rendered == settings.preset ? chosen : kPresets[rendered]!;
+  if (!settings.followSystemBrightness) return chosen;
+  if (platformBrightness == Brightness.light) {
+    return kPresets[AbThemePreset.light]!;
+  }
+  return settings.preset == AbThemePreset.light ? kDefaultPalette : chosen;
 }
 
 class AbApp extends ConsumerWidget {
@@ -628,17 +605,7 @@ class AbApp extends ConsumerWidget {
       customPrimary: settings.customPrimary,
       customAccent: settings.customAccent,
     );
-    AbColors paletteUnder(Brightness b) => effectivePaletteFor(
-      settings: settings,
-      chosen: palette,
-      platformBrightness: b,
-    );
-    final lightPalette = paletteUnder(Brightness.light);
-    final darkPalette = paletteUnder(Brightness.dark);
-    final lightTheme = buildAbTheme(lightPalette);
-    final darkTheme = identical(darkPalette, lightPalette)
-        ? lightTheme
-        : buildAbTheme(darkPalette);
+    final theme = buildAbTheme(palette);
     // Sign-in is optional on desktop. Mobile (iOS/Android) requires an account
     // for relay pairing. Splash only while session state is genuinely unknown
     // (cold start with no cached cookie).
@@ -647,25 +614,35 @@ class AbApp extends ConsumerWidget {
       title: 'Antgrid',
       navigatorKey: ref.watch(rootNavigatorKeyProvider),
       debugShowCheckedModeBanner: false,
-      // Follow-system is ThemeMode.system over the two resolved palettes; with
-      // following off both are the chosen one. The swap is instant, like the
-      // OS flip that triggers it, and like a preset pick always was.
-      theme: lightTheme,
-      darkTheme: darkTheme,
-      themeMode: ThemeMode.system,
-      themeAnimationStyle: AnimationStyle.noAnimation,
+      theme: theme,
+      darkTheme: theme,
       builder: (context, child) {
         // The OS-provided MediaQuery, captured BEFORE our copyWith below
         // replaces scaler/animation fields — its textScaler, disableAnimations
         // and platformBrightness are the accessibility inputs we compose with.
         final osMediaQuery = MediaQuery.of(context);
 
+        // Resolved here (not in AbApp.build) so MediaQuery.platformBrightnessOf
+        // re-runs the builder on every OS light/dark flip. MaterialApp's
+        // `theme:` above is only the pre-follow chosen theme; everything
+        // visible renders under the Theme override below, so swapping the
+        // effective theme + bar style here flips the whole app in lockstep.
+        final effectivePalette = effectivePaletteFor(
+          settings: settings,
+          chosen: palette,
+          platformBrightness: MediaQuery.platformBrightnessOf(context),
+        );
+        final effectiveTheme = identical(effectivePalette, palette)
+            ? theme
+            : buildAbTheme(effectivePalette);
+
         // DPI scaling still flows via devicePixelRatio at the engine layer —
         // the textScaler override is unaffected by it.
-        // System bars follow the theme MaterialApp resolved above this
-        // builder, so a preset switch or OS flip restyles bar icons at once.
+        // System bars track the LIVE effective palette: the builder re-runs on
+        // every settings change, so a preset switch restyles bar icons
+        // immediately.
         return AnnotatedRegion<SystemUiOverlayStyle>(
-          value: systemBarStyleFor(context.antgrid),
+          value: systemBarStyleFor(effectivePalette),
           child: MediaQuery(
             data: osMediaQuery.copyWith(
               textScaler: composedTextScalerFor(
@@ -678,19 +655,22 @@ class AbApp extends ConsumerWidget {
               disableAnimations:
                   osMediaQuery.disableAnimations || settings.reduceMotion,
             ),
-            // Mounted from the builder, not from a screen: the console has to
-            // outlive every route and stay out of the shell's own layout,
-            // which is also what lets it drive navigation from wherever the
-            // app currently is. It renders nothing unless the driver entry
-            // point enabled it.
-            child: AbTextDensity(
-              child: NavConsole(
-                // Inside the console so a card never covers its command
-                // field, around the demo frame so its title bar shares the
-                // app's one stack.
-                child: AbToastHost(
-                  toaster: ref.watch(appToasterProvider),
-                  child: DemoFrame(child: child!),
+            child: Theme(
+              data: effectiveTheme,
+              // Mounted from the builder, not from a screen: the console has to
+              // outlive every route and stay out of the shell's own layout,
+              // which is also what lets it drive navigation from wherever the
+              // app currently is. It renders nothing unless the driver entry
+              // point enabled it.
+              child: AbTextDensity(
+                child: NavConsole(
+                  // Inside the console so a card never covers its command
+                  // field, around the demo frame so its title bar shares the
+                  // app's one stack.
+                  child: AbToastHost(
+                    toaster: ref.watch(appToasterProvider),
+                    child: DemoFrame(child: child!),
+                  ),
                 ),
               ),
             ),

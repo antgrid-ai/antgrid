@@ -3,7 +3,6 @@
 // and SessionsService collapsed every mutation refusal to null. The row is the
 // primary place such a session is tapped, so it is where the refusal has to
 // speak — and the workspace must not move onto a session that never spawned.
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -100,11 +99,11 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: MaterialApp(
+        child: const MaterialApp(
           builder: abToastHostBuilder,
-          home: AbCarbonScope(child: Scaffold(
-            body: const SessionRow(entryId: _projectId, session: _entry),
-          )),
+          home: Scaffold(
+            body: SessionRow(entryId: _projectId, session: _entry),
+          ),
         ),
       ),
     );

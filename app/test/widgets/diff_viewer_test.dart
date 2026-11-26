@@ -1,9 +1,9 @@
-import 'package:carbon_flutter/carbon_flutter.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/design/ab_carbon.dart';
-import 'package:antgrid/widgets/carbon_code_style.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_scrollbar.dart';
+import 'package:antgrid/widgets/code_syntax.dart';
 import 'package:antgrid/widgets/diff_viewer.dart';
 
 /// A hunk whose code lines are far wider than any pane the app renders in.
@@ -49,20 +49,18 @@ Widget _host({
     body: Center(
       child: MediaQuery(
         data: MediaQueryData(textScaler: textScaler),
-        child: AbCarbonScope(
-          child: SizedBox(
-            width: width,
-            height: height,
-            child: DiffViewer(
-              path: path,
-              gitStatus: 'M',
-              diff: diff ?? _diff,
-              additions: additions,
-              deletions: deletions,
-              onViewFile: onViewFile ?? () {},
-              onClose: () {},
-              onSendToAgent: (context, message) async {},
-            ),
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: DiffViewer(
+            path: path,
+            gitStatus: 'M',
+            diff: diff ?? _diff,
+            additions: additions,
+            deletions: deletions,
+            onViewFile: onViewFile ?? () {},
+            onClose: () {},
+            onSendToAgent: (context, message) async {},
           ),
         ),
       ),
@@ -91,12 +89,6 @@ Offset _inBodyOffScrollbar(WidgetTester tester) {
   return Offset(rect.left + 20, rect.bottom - 60);
 }
 
-/// The written "View file" button of the binary placeholder, as opposed to the
-/// header's link or its icon-only stand-in.
-final Finder _placeholderAction = find.byWidgetPredicate(
-  (w) => w is CarbonButton && w.label == 'View file',
-);
-
 Finder _codeText(String startsWith) => find.byWidgetPredicate(
   (w) => w is Text && (w.textSpan?.toPlainText() ?? '').startsWith(startsWith),
 );
@@ -120,10 +112,9 @@ void main() {
       final line = tester.widget<Text>(_codeText('  final String greeting'));
       expect(line.softWrap, isFalse);
       expect(line.maxLines, 1);
-      // The whole point of sharing the Carbon code style: a file and its diff
-      // must not read at two different sizes.
-      final style = CarbonCodeStyle.of(tester.element(find.byType(DiffViewer)));
-      expect(line.textSpan!.style!.fontSize, style.text.fontSize);
+      // The whole point of sharing kCodeFontSize: a file and its diff must not
+      // read at two different sizes.
+      expect(line.textSpan!.style!.fontSize, kCodeFontSize);
     });
 
     testWidgets('a long line scrolls sideways instead of being squeezed', (
@@ -220,17 +211,15 @@ void main() {
               controller: controller,
               children: [
                 const SizedBox.expand(),
-                AbCarbonScope(
-                  child: DiffViewer(
-                    path: 'lib/a.dart',
-                    gitStatus: 'M',
-                    diff: _diff,
-                    additions: 1,
-                    deletions: 1,
-                    onViewFile: () {},
-                    onClose: () {},
-                    onSendToAgent: (context, message) async {},
-                  ),
+                DiffViewer(
+                  path: 'lib/a.dart',
+                  gitStatus: 'M',
+                  diff: _diff,
+                  additions: 1,
+                  deletions: 1,
+                  onViewFile: () {},
+                  onClose: () {},
+                  onSendToAgent: (context, message) async {},
                 ),
               ],
             ),
@@ -306,7 +295,7 @@ void main() {
       expect(find.text('1'), findsOneWidget);
       expect(find.text('2'), findsNWidgets(2));
 
-      final bars = tester.widgetList<RawScrollbar>(find.byType(RawScrollbar));
+      final bars = tester.widgetList<AbScrollbar>(find.byType(AbScrollbar));
       expect(bars.length, 2);
       expect(
         bars.map((b) => b.controller).toSet().length,
@@ -407,7 +396,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(_placeholderAction);
+      await tester.tap(find.widgetWithText(AbButton, 'View file'));
       await tester.pumpAndSettle();
 
       expect(viewed, 1);
@@ -428,7 +417,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(wide, greaterThan(find.text('View file').evaluate().length));
-      expect(_placeholderAction, findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'View file'), findsOneWidget);
     });
   });
 }

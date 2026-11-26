@@ -76,11 +76,8 @@ export class TokenBucketRateLimiter {
     this.burst = burst;
   }
 
-  /**
-   * Consume `cost` tokens; returns false (drop the message) when fewer remain.
-   * A refused call consumes nothing. Byte budgets pass the payload size as cost.
-   */
-  allow(key: string, cost = 1): boolean {
+  /** Consume one token; returns false (drop the message) when the bucket is dry. */
+  allow(key: string): boolean {
     const now = Date.now();
     let bucket = this.buckets.get(key);
     if (!bucket) {
@@ -97,8 +94,8 @@ export class TokenBucketRateLimiter {
         bucket.lastRefill = now;
       }
     }
-    if (bucket.tokens < cost) return false;
-    bucket.tokens -= cost;
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
     return true;
   }
 

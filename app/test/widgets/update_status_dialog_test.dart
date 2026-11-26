@@ -1,8 +1,8 @@
 import 'dart:async';
 
-import 'package:antgrid/design/ab_carbon.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_dialog_surface.dart';
+import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/design/widgets/ab_progress_rule.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/subscription.dart';
@@ -61,11 +61,9 @@ void main() {
             body: Builder(
               builder: (context) {
                 caller = context;
-                return const AbCarbonScope(
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: AccountFooter(),
-                  ),
+                return const Align(
+                  alignment: Alignment.bottomCenter,
+                  child: AccountFooter(),
                 );
               },
             ),
@@ -80,14 +78,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester.getTopLeft(find.text('Check for updates…')).dy,
-      lessThan(tester.getTopLeft(find.textContaining('Version')).dy),
+      lessThan(tester.getTopLeft(find.text('Version')).dy),
     );
     await tester.ensureVisible(find.text('Check for updates…'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Check for updates…'));
     await tester.pumpAndSettle();
-    expect(find.text('App settings…'), findsNothing);
-    expect(find.text('Check for updates…'), findsNothing);
+    expect(find.byType(AbMenu), findsNothing);
     expect(find.byType(UpdateStatusDialog), findsOneWidget);
     return (container: container, install: install, caller: caller);
   }
