@@ -467,14 +467,16 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   Widget build(BuildContext context) {
     // Picking a project (local folder or remote) hands focus straight to the
     // prompt field so the next keystroke describes the task — the
-    // composer's analogue of the old SessionConfig's name-field grab.
+    // composer's analogue of the old SessionConfig's name-field grab. Not on
+    // touch: there focus raises the keyboard over the project list the user
+    // was browsing, and a tap on the field is what asks for it.
     ref.listen(selectedTargetProjectProvider, (previous, next) {
       if (previous?.id != next?.id) {
         ref.read(newSessionIsolatedProvider.notifier).set(false);
         ref.read(newSessionBranchSelectionProvider.notifier).set(null);
       }
       seedNewSessionAgentForTarget(ref.container, next);
-      if (next != null) _promptFocus.requestFocus();
+      if (next != null && !isMobilePlatform) _promptFocus.requestFocus();
     });
     ref.listen(newSessionAgentProvider, (_, next) => _applyModeDefault(next));
     ref.listen(newSessionBypassSupportProvider, (_, next) {

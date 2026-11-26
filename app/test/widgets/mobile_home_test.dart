@@ -12,6 +12,7 @@ import 'package:antgrid/providers/project_index.dart';
 import 'package:antgrid/providers/project_composer.dart';
 import 'package:antgrid/providers/project_work_status.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/widgets/session_row.dart';
 import 'package:antgrid/widgets/machine_scope_sheet.dart';
 import 'package:antgrid/widgets/mobile/mobile_home.dart';
 
@@ -146,7 +147,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('NEEDS YOU'), findsOneWidget);
-    expect(find.text('Session ask'), findsOneWidget);
+    // On its card, and again under its project, open because it needs you.
+    expect(find.text('Session ask'), findsNWidgets(2));
     expect(find.text('mbp · antgrid'), findsOneWidget);
     expect(find.text('Open and respond'), findsOneWidget);
     expect(find.text('PROJECTS'), findsOneWidget);
@@ -177,6 +179,23 @@ void main() {
       tester.element(find.byType(MobileHomeList)),
     );
     expect(container.read(composerProjectViewProvider)?.group.key, 'git:r/antgrid');
+  });
+
+  testWidgets('a project with live sessions lists them, and folds on tap', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host(const MobileHomeList()));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(SessionRow), findsNWidgets(2));
+
+    await tester.tap(find.text('antgrid'));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byType(SessionRow), findsNothing);
+
+    await tester.tap(find.text('antgrid'));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byType(SessionRow), findsNWidgets(2));
   });
 
   testWidgets('the scope sheet lists no offline machine and no toggle for one', (

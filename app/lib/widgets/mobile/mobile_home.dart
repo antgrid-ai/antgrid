@@ -2,12 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_empty_state.dart';
-import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_disclosure_chevron.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/agent_work_status.dart';
@@ -16,15 +15,23 @@ import '../../providers/machine_scope.dart';
 import '../../providers/mobile_connection.dart';
 import '../../providers/project_index.dart';
 import '../../providers/project_composer.dart';
+import '../../providers/project_work_status.dart' show recentStatusKey;
 import '../../providers/recent_sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
-import '../project_sidebar.dart' show SidebarSectionLabel;
+import '../project_sidebar.dart'
+    show
+        SidebarSectionLabel,
+        machineShortTagsProvider,
+        projectGroupExpansionProvider,
+        shortMachineTag;
+import '../session_row.dart';
 import '../recent_sessions/starting_session_row.dart';
 
 /// The phone's home: what waits on the user across the machines in scope, then
-/// every project in scope, merged across machines. Tapping a project points
-/// the composer below at it; a needs-you card opens the session itself.
+/// every project in scope, merged across machines. Tapping a project lists its
+/// sessions and points the composer below at it; a needs-you card opens the
+/// session itself.
 class MobileHomeList extends ConsumerWidget {
   const MobileHomeList({super.key});
 
@@ -207,6 +214,9 @@ class _NeedsYouCard extends ConsumerWidget {
   }
 }
 
+/// One project merged across machines and, while open, its sessions. Tapping
+/// it opens or folds it like the sidebar's row, and points the composer below
+/// at it.
 class _ProjectTile extends ConsumerWidget {
   const _ProjectTile({super.key, required this.view});
 
@@ -215,60 +225,92 @@ class _ProjectTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
+    final key = view.group.key;
+    final openByDefault = view.liveCount > 0 || view.needsYouCount > 0;
+    final expanded =
+        ref.watch(projectGroupExpansionProvider.select((s) => s[key])) ??
+        openByDefault;
+    final multiMachine = view.group.members.length > 1;
+    final machineTags = expanded && multiMachine
+        ? ref.watch(machineShortTagsProvider)
+        : const <String, String>{};
     final parts = [
       if (view.liveCount > 0) '${view.liveCount} live',
       if (view.allOffline) 'offline',
     ];
-    return Semantics(
-      button: true,
-      label: [
-        view.group.name,
-        if (view.needsYouCount > 0) '${view.needsYouCount} need you',
-        ...parts,
-      ].join(', '),
-      excludeSemantics: true,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: AbTokens.touchControlMin),
-        child: AbListRow(
-          leading: AbIcon(
-            AbIcons.folder,
-            size: AbTokens.iconButtonGlyph,
-            color: p.textMuted,
-          ),
-          title: Text(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          button: true,
+          expanded: expanded,
+          label: [
             view.group.name,
-            style: AbTokens.monoStyle(
-              fontWeight: FontWeight.w600,
-              color: view.allOffline ? p.textMuted : p.textPrimary,
+            if (view.needsYouCount > 0) '${view.needsYouCount} need you',
+            ...parts,
+          ].join(', '),
+          excludeSemantics: true,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minHeight: AbTokens.touchControlMin,
             ),
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (view.needsYouCount > 0) const AbStatusDot(tone: AbStatusTone.warning),
-              if (view.needsYouCount > 0 && parts.isNotEmpty)
-                const SizedBox(width: AbTokens.space8),
-              if (parts.isNotEmpty)
-                Text(
-                  parts.join(' · '),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: p.textSecondary,
-                  ),
+            child: AbListRow(
+              leading: AbDisclosureChevron(expanded: expanded),
+              title: Text(
+                view.group.name,
+                style: AbTokens.monoStyle(
+                  fontWeight: FontWeight.w600,
+                  color: view.allOffline ? p.textMuted : p.textPrimary,
                 ),
-            ],
-          ),
-          horizontalPadding: AbTokens.space12,
-          // Lit while it is what the composer below will start a session in.
-          selected: ref.watch(
-            composerProjectViewProvider.select(
-              (v) => v?.group.key == view.group.key,
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!expanded && view.needsYouCount > 0)
+                    const AbStatusDot(tone: AbStatusTone.warning),
+                  if (!expanded && view.needsYouCount > 0 && parts.isNotEmpty)
+                    const SizedBox(width: AbTokens.space8),
+                  if (parts.isNotEmpty)
+                    Text(
+                      parts.join(' · '),
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: p.textSecondary,
+                      ),
+                    ),
+                ],
+              ),
+              horizontalPadding: AbTokens.space12,
+              // Lit while it is what the composer below will start a session
+              // in.
+              selected: ref.watch(
+                composerProjectViewProvider.select((v) => v?.group.key == key),
+              ),
+              selectionStyle: AbRowSelection.surface,
+              onTap: () {
+                final container = ref.container;
+                container
+                    .read(projectGroupExpansionProvider.notifier)
+                    .toggle(key, byDefault: openByDefault);
+                pointComposerAtProject(container, view);
+              },
             ),
           ),
-          selectionStyle: AbRowSelection.surface,
-          onTap: () => pointComposerAtProject(ref.container, view),
         ),
-      ),
+        if (expanded)
+          for (final r in view.sessions)
+            SessionRow(
+              key: ValueKey(
+                recentStatusKey(r.origin.registrationId, r.session.id),
+              ),
+              entryId: r.origin.registrationId,
+              session: r.session,
+              machineTag: multiMachine
+                  ? machineTags[machineIdOf(r.origin)] ??
+                        shortMachineTag(r.origin.deviceName)
+                  : null,
+            ),
+      ],
     );
   }
 }

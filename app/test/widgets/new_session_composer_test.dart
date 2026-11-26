@@ -1737,6 +1737,55 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
+    const otherProject = PickerProject(
+      id: 'p-other',
+      name: 'other',
+      detail: '/home/me/other',
+      isLocal: true,
+    );
+
+    FocusNode promptNode(WidgetTester tester) => tester
+        .widget<AbPromptField>(
+          find.byKey(const Key('new-session-prompt-field')),
+        )
+        .focusNode;
+
+    testWidgets('picking a project on touch leaves the keyboard down', (
+      tester,
+    ) async {
+      expect(isMobilePlatform, isTrue);
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      containerOf(
+        tester,
+      ).read(selectedTargetProjectProvider.notifier).set(otherProject);
+      await tester.pumpAndSettle();
+
+      expect(promptNode(tester).hasFocus, isFalse);
+    });
+
+    testWidgets('picking a project on desktop focuses the prompt', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      containerOf(
+        tester,
+      ).read(selectedTargetProjectProvider.notifier).set(otherProject);
+      await tester.pumpAndSettle();
+
+      expect(promptNode(tester).hasFocus, isTrue);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('an ended start never fades the Enter hint out in its place', (
       tester,
     ) async {

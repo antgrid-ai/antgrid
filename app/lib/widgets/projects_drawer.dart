@@ -115,7 +115,7 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           minBodyExtent: MediaQuery.textScalerOf(
             context,
           ).scale(AbTokens.rowHeightLg),
-          header: const _TopChrome(),
+          header: const _NavActions(),
           body: _Body(
             refreshKey: _refreshKey,
             onRefresh: _refreshBusy ? null : _refreshFromButton,
@@ -132,8 +132,21 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           // Neither belongs to a machine-less demo: the footer's account row
           // fetches the user, the subscription and the pricing catalogue, and
           // the update row's only action leaves for the store.
+          // The machine choice sits at the foot on both: it is set once and
+          // rarely touched, so it yields the top to the list it filters. A
+          // phone holds one machine, so there it is that machine's switcher.
           pinned: [
-            if (!ref.watch(mobileConnectEnabledProvider))
+            if (ref.watch(mobileConnectEnabledProvider))
+              const Padding(
+                padding: EdgeInsets.fromLTRB(
+                  AbTokens.drawerGutter,
+                  AbTokens.space8,
+                  AbTokens.drawerGutter,
+                  AbTokens.space4,
+                ),
+                child: ConnectedMachineButton(),
+              )
+            else
               const MachineScopeButton(),
             if (!ref.watch(demoModeProvider)) ...const [UpdateRow(), _Footer()],
           ],
@@ -143,39 +156,6 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
   }
 }
 
-/// Fixed chrome above the project list. One slot because [AbDockedColumn]
-/// budgets per slot and neither of these may be compressed — the New Session
-/// button is the drawer's primary action.
-///
-/// This is the header slot, which is never budgeted at all, so it outranks even
-/// the pinned rows: on a panel too short for it the account footer is already
-/// gone while both still paint whole, and the drawer's clip is what
-/// keeps them off the workspace.
-class _TopChrome extends ConsumerWidget {
-  const _TopChrome();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // A phone holds one machine, and the choice of it leads the drawer. The
-    // desktop's machine scope is pinned at the bottom instead: it is set once
-    // and rarely touched, so it yields the top to the list it filters.
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const _NavActions(),
-        if (ref.watch(mobileConnectEnabledProvider))
-          const Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: AbTokens.drawerGutter,
-              vertical: AbTokens.space4,
-            ),
-            child: ConnectedMachineButton(),
-          ),
-      ],
-    );
-  }
-}
 
 /// The setup checklist in its docked slot, between the project list and the
 /// pinned rows below it.
@@ -217,6 +197,9 @@ void closeDrawerIfOverlay(BuildContext context) {
   }
 }
 
+/// Fixed chrome above the project list, in the header slot [AbDockedColumn]
+/// never budgets: the New Session button is the drawer's primary action, so it
+/// outranks even the pinned rows.
 class _NavActions extends ConsumerWidget {
   const _NavActions();
 

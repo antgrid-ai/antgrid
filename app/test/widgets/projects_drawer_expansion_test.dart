@@ -17,6 +17,8 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/machine_scope.dart';
+import 'package:antgrid/providers/mobile_connection.dart';
+import 'package:antgrid/widgets/mobile/mobile_connect.dart' show ConnectedMachineButton;
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart' show DrawerRemoveButton;
@@ -133,7 +135,7 @@ void main() {
     await stores.cachedSessionsStore.flushNow();
   }
 
-  Widget buildDrawer({bool machineOnline = true}) {
+  Widget buildDrawer({bool machineOnline = true, bool phone = false}) {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
@@ -143,6 +145,7 @@ void main() {
         // The footer's account row: signed out renders a static CTA with no
         // network.
         currentUserProvider.overrideWith((_) async => null),
+        if (phone) mobileConnectEnabledProvider.overrideWithValue(true),
         accountAgentsProvider.overrideWith(
           (_) async => [_heartbeat(fresh: machineOnline)],
         ),
@@ -291,6 +294,24 @@ void main() {
 
     expect(find.text('NEEDS YOU'), findsOneWidget);
     expect(find.text('This machine · antgrid'), findsNWidgets(waiting));
+  });
+
+  testWidgets('on a phone the machine switcher sits at the foot, like the desktop scope', (
+    tester,
+  ) async {
+    await seedRemoteCopy([_session('remote')]);
+    await tester.pumpWidget(buildDrawer(phone: true));
+    containerOf(tester)
+        .read(mobileConnectionProvider.notifier)
+        .connect(_machineUuid);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(MachineScopeButton), findsNothing);
+    expect(find.byType(ConnectedMachineButton), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byType(ConnectedMachineButton)).dy,
+      greaterThan(tester.getTopLeft(find.text('antgrid')).dy),
+    );
   });
 
   testWidgets('the scope menu says when a machine has remote access off', (
