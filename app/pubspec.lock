@@ -720,8 +720,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
-      resolved-ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
+      ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
+      resolved-ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.2.0-beta.2+antgrid.1"
@@ -729,8 +729,8 @@ packages:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
-      resolved-ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
+      ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
+      resolved-ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.2.0-beta.2+antgrid.1"
@@ -1266,8 +1266,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
-      resolved-ref: "9f052f01d16646944e9e62316209c53cf6c62e8c"
+      ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
+      resolved-ref: "2a12634238e025a7d5096e2cfbe4401a03f96c65"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.0.7-beta.2+antgrid.1"
